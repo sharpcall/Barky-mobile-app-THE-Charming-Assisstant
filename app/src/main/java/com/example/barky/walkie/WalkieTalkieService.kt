@@ -105,6 +105,8 @@ class WalkieTalkieService : Service() {
     fun switchCamera(): Boolean = engine?.switchCamera() == true
     fun isCameraFrontPreferred(): Boolean = engine?.isCameraFrontPreferred()
         ?: com.example.barky.BarkyPrefs.isCameraFront(this)
+    fun startLocalPreview() = engine?.startLocalPreview()
+    fun stopLocalPreview() = engine?.stopLocalPreview()
 
     override fun onBind(intent: Intent?): IBinder = binder
 

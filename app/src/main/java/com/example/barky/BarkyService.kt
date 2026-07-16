@@ -1,9 +1,12 @@
 package com.example.barky
 
+import android.accessibilityservice.AccessibilityButtonController
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
+import android.content.Intent
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -25,6 +28,7 @@ class BarkyService : AccessibilityService() {
     private var windowManager: WindowManager? = null
     private var currentDelay = 20 * 1000L
     private var lastScanAt = 0L
+    private var conversionEnabled = true
 
     // Conversion factors
     private val cmToInch = 0.393701
@@ -66,17 +70,42 @@ class BarkyService : AccessibilityService() {
         serviceInfo = info
 
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        loadDelay()
-        Log.i(TAG, "BarkyService connected")
+        loadPrefs()
+        registerAccessibilityButtonOpensApp()
+        Log.i(TAG, "BarkyService connected conversionEnabled=$conversionEnabled")
     }
 
-    private fun loadDelay() {
-        val prefs = getSharedPreferences("prefs", Context.MODE_PRIVATE)
-        currentDelay = prefs.getInt("hide_delay", 20) * 1000L
+    private fun registerAccessibilityButtonOpensApp() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
+        try {
+            val ctrl = accessibilityButtonController ?: return
+            ctrl.registerAccessibilityButtonCallback(
+                object : AccessibilityButtonController.AccessibilityButtonCallback() {
+                    override fun onClicked(controller: AccessibilityButtonController) {
+                        openMainApp()
+                    }
+                },
+                handler
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "accessibility button callback not available", t)
+        }
+    }
+
+    private fun loadPrefs() {
+        val prefs = getSharedPreferences(BarkyPrefs.NAME, Context.MODE_PRIVATE)
+        currentDelay = prefs.getInt(BarkyPrefs.KEY_HIDE_DELAY, 20) * 1000L
+        conversionEnabled = prefs.getBoolean(BarkyPrefs.KEY_CONVERSION_ENABLED, true)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        // Reload toggle often so Settings changes apply without restarting the service
+        conversionEnabled = BarkyPrefs.isConversionEnabled(this)
+        if (!conversionEnabled) {
+            hideOverlay()
+            return
+        }
 
         // Throttle: accessibility fires very often; avoid main-thread jank / ANR risk.
         val now = System.currentTimeMillis()
@@ -99,6 +128,22 @@ class BarkyService : AccessibilityService() {
             } catch (_: Exception) {
                 // ignore
             }
+        }
+    }
+
+    private fun openMainApp() {
+        try {
+            val i = Intent(this, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+            }
+            startActivity(i)
+            Log.i(TAG, "Opened MainActivity from accessibility")
+        } catch (t: Throwable) {
+            Log.w(TAG, "openMainApp failed", t)
         }
     }
 
@@ -179,7 +224,11 @@ class BarkyService : AccessibilityService() {
     private fun showOverlay(conversions: List<String>) {
         handler.post {
             try {
-                loadDelay()
+                loadPrefs()
+                if (!conversionEnabled) {
+                    hideOverlay()
+                    return@post
+                }
                 val joined = conversions.joinToString("\n")
 
                 if (overlayView != null) {
@@ -196,6 +245,9 @@ class BarkyService : AccessibilityService() {
                 overlayView = view
 
                 view.findViewById<TextView>(R.id.overlay_text).text = joined
+                // Tap conversion bubble → open Barky; Hide stays separate
+                view.setOnClickListener { openMainApp() }
+                view.findViewById<TextView>(R.id.overlay_text).setOnClickListener { openMainApp() }
                 view.findViewById<Button>(R.id.close_btn).setOnClickListener { hideOverlay() }
 
                 val params = WindowManager.LayoutParams(

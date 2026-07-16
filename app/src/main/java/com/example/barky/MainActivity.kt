@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 import com.example.barky.walkie.WalkiePeer
 import com.example.barky.walkie.WalkieTalkieService
 import com.google.android.material.appbar.MaterialToolbar
+import android.widget.ImageButton
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.checkbox.MaterialCheckBox
@@ -43,7 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkiePtt: MaterialButton
     private lateinit var walkieWakeup: MaterialButton
     private lateinit var walkieReplay: MaterialButton
-    private lateinit var walkieFlipCamera: MaterialButton
+    private lateinit var walkieFlipCamera: ImageButton
     private lateinit var walkieVideo: ImageView
     private lateinit var walkieVideoHint: TextView
 
@@ -212,6 +213,7 @@ class MainActivity : AppCompatActivity() {
             updateControls()
             updateReplayButton()
             updateInternetPairUi(walkieService?.getMyInviteCode() ?: walkieService?.internetInviteCode)
+            walkieService?.startLocalPreview()
             walkieStatus.text = if (selectedPeer != null) {
                 getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
             } else {
@@ -260,15 +262,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         walkieFlipCamera.setOnClickListener {
-            val wasFront = BarkyPrefs.isCameraFront(this)
             walkieService?.switchCamera()
-            // Idle path flips prefs immediately; live switch applies async then saves
-            val front = if (isTalking) !wasFront else BarkyPrefs.isCameraFront(this)
-            Toast.makeText(
-                this,
-                if (front) R.string.walkie_camera_front else R.string.walkie_camera_back,
-                Toast.LENGTH_SHORT
-            ).show()
+            // Brief feedback; preview / TX stream should flip immediately
+            walkieFlipCamera.animate().rotationBy(180f).setDuration(200).start()
             updateFlipCameraLabel()
         }
         updateFlipCameraLabel()
@@ -357,6 +353,13 @@ class MainActivity : AppCompatActivity() {
         if (!BarkyPrefs.isWifiOnly(this)) {
             walkieService?.applyNetworkMode()
         }
+        // Live viewfinder so flip works before HOLD
+        walkieService?.startLocalPreview()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        walkieService?.startLocalPreview()
     }
 
     private fun updateInternetPairUi(inviteCode: String?) {
@@ -372,6 +375,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        walkieService?.stopLocalPreview()
         if (walkieBound) {
             walkieService?.removeListener(walkieUiListener)
             try {

@@ -58,6 +58,17 @@ class SettingsActivity : AppCompatActivity() {
             ).show()
         }
 
+        val conversion = findViewById<MaterialCheckBox>(R.id.unit_conversion_enabled)
+        conversion.isChecked = BarkyPrefs.isConversionEnabled(this)
+        conversion.setOnCheckedChangeListener { _, checked ->
+            BarkyPrefs.setConversionEnabled(this, checked)
+            Toast.makeText(
+                this,
+                if (checked) R.string.settings_conversion_on else R.string.settings_conversion_off,
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
         val delayEdit = findViewById<TextInputEditText>(R.id.delay_edit)
         val prefs = getSharedPreferences(BarkyPrefs.NAME, MODE_PRIVATE)
         delayEdit.setText(prefs.getInt(BarkyPrefs.KEY_HIDE_DELAY, 20).toString())

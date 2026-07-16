@@ -15,6 +15,8 @@ object BarkyPrefs {
     const val KEY_WIFI_ONLY = "walkie_wifi_only"
     /** Preferred camera for walkie capture (true = front / selfie). */
     const val KEY_CAMERA_FRONT = "walkie_camera_front"
+    /** When true: accessibility unit conversion overlay is active. */
+    const val KEY_CONVERSION_ENABLED = "unit_conversion_enabled"
 
     fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -44,5 +46,12 @@ object BarkyPrefs {
         val next = !isCameraFront(context)
         setCameraFront(context, next)
         return next
+    }
+
+    fun isConversionEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_CONVERSION_ENABLED, true)
+
+    fun setConversionEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_CONVERSION_ENABLED, enabled).apply()
     }
 }

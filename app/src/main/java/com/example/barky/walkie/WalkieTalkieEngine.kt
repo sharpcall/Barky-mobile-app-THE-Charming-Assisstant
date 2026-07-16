@@ -114,6 +114,9 @@ class WalkieTalkieEngine(
     private var savedMusicVolume = -1
 
     private var cameraSource: CameraFrameSource? = null
+    /** Local idle preview (so flip works before HOLD). */
+    private var previewSource: CameraFrameSource? = null
+    @Volatile private var localPreviewWanted = false
     private val videoFrameId = AtomicInteger(1)
     private val videoAssembly = ConcurrentHashMap<Int, Array<ByteArray?>>()
     private val videoAssemblyTime = ConcurrentHashMap<Int, Long>()
@@ -204,25 +207,91 @@ class WalkieTalkieEngine(
     fun getMyInviteCode(): String? = myInviteCode
 
     /**
-     * Switch front/back camera. During HOLD: live switch. When idle: saves preference
-     * for the next send.
+     * Switch front/back immediately on live preview or during HOLD.
      */
     fun switchCamera(): Boolean {
-        val cam = cameraSource
-        if (cam != null && talking.get()) {
-            cam.switchCamera()
+        val talkCam = cameraSource
+        if (talkCam != null && talking.get()) {
+            talkCam.switchCamera()
             return true
         }
-        val nextFront = BarkyPrefs.toggleCameraFront(appContext)
-        videoDebug("Camera preferred: ${if (nextFront) "front" else "back"} (next HOLD)")
-        postStatus(
-            if (nextFront) "Front camera selected"
-            else "Back camera selected"
-        )
+        val prev = previewSource
+        if (prev != null) {
+            prev.switchCamera()
+            return true
+        }
+        // No camera open yet — flip preference and start preview so user sees it now
+        BarkyPrefs.toggleCameraFront(appContext)
+        if (localPreviewWanted && !talking.get() && !receiving.get() && !replaying.get()) {
+            startLocalPreviewInternal()
+        }
+        val front = BarkyPrefs.isCameraFront(appContext)
+        postStatus(if (front) "Front camera" else "Back camera")
         return true
     }
 
     fun isCameraFrontPreferred(): Boolean = BarkyPrefs.isCameraFront(appContext)
+
+    /** Start local viewfinder so flip is instant (before HOLD). */
+    fun startLocalPreview() {
+        localPreviewWanted = true
+        if (talking.get() || receiving.get() || replaying.get()) return
+        startLocalPreviewInternal()
+    }
+
+    fun stopLocalPreview() {
+        localPreviewWanted = false
+        stopLocalPreviewInternal()
+    }
+
+    private fun startLocalPreviewInternal() {
+        if (previewSource != null || talking.get()) return
+        if (!running.get()) return
+        try {
+            stopLocalPreviewInternal()
+            val cam = CameraFrameSource(
+                context = appContext,
+                compactForUdp = { false },
+                config = CaptureConfig.Live,
+                preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
+                onFacingChanged = { front ->
+                    BarkyPrefs.setCameraFront(appContext, front)
+                    videoDebug("Preview camera: ${if (front) "front" else "back"}")
+                    postStatus(if (front) "Front camera" else "Back camera")
+                },
+                onError = { msg -> videoDebug("Preview camera: $msg") }
+            ) { jpeg ->
+                if (talking.get() || replaying.get()) return@CameraFrameSource
+                decodeAndEmit(jpeg, live = true)
+            }
+            previewSource = cam
+            cam.start()
+            videoDebug("Local preview started front=${BarkyPrefs.isCameraFront(appContext)}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "startLocalPreview", t)
+        }
+    }
+
+    private fun stopLocalPreviewInternal() {
+        val p = previewSource
+        previewSource = null
+        try {
+            p?.stopAndWait(400L)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun maybeResumeLocalPreview() {
+        if (!localPreviewWanted) return
+        if (talking.get() || receiving.get() || replaying.get() || flushingRecorded.get()) return
+        mainHandler.postDelayed({
+            if (localPreviewWanted && !talking.get() && !receiving.get() &&
+                !replaying.get() && !flushingRecorded.get()
+            ) {
+                startLocalPreviewInternal()
+            }
+        }, 250)
+    }
 
     /** Re-read prefs after Settings change: Wi‑Fi-only vs internet pairing. */
     fun applyNetworkMode() {
@@ -343,6 +412,8 @@ class WalkieTalkieEngine(
         talking.set(false)
         flushingRecorded.set(false)
         bestQualitySession.set(false)
+        localPreviewWanted = false
+        stopLocalPreviewInternal()
         stopTalking()
         stopReplay()
         markNotReceiving()
@@ -424,6 +495,8 @@ class WalkieTalkieEngine(
         }
         if (replaying.get()) stopReplay()
         if (!talking.compareAndSet(false, true)) return
+        // Free camera hardware for TX session
+        stopLocalPreviewInternal()
 
         val best = BarkyPrefs.isBestQualityVideo(appContext)
         bestQualitySession.set(best)
@@ -588,6 +661,7 @@ class WalkieTalkieEngine(
                 mainHandler.post { listener.onTalkingChanged(false) }
                 postStatus("Ready")
                 videoDebug("BEST record empty — nothing to send")
+                maybeResumeLocalPreview()
                 return
             }
             val metrics = clipMetrics(audio, frames)
@@ -603,6 +677,7 @@ class WalkieTalkieEngine(
             )
             if (!flushingRecorded.compareAndSet(false, true)) {
                 mainHandler.post { listener.onTalkingChanged(false) }
+                maybeResumeLocalPreview()
                 return
             }
             flushThread = thread(name = "walkie-best-flush", isDaemon = true) {
@@ -613,6 +688,7 @@ class WalkieTalkieEngine(
                     bestQualitySession.set(false)
                     mainHandler.post { listener.onTalkingChanged(false) }
                     postStatus("Ready")
+                    maybeResumeLocalPreview()
                 }
             }
             return
@@ -661,6 +737,7 @@ class WalkieTalkieEngine(
 
         mainHandler.post { listener.onTalkingChanged(false) }
         postStatus("Ready")
+        maybeResumeLocalPreview()
     }
 
     private data class ClipMetrics(val videoMs: Long, val audioMs: Long, val frames: Int)

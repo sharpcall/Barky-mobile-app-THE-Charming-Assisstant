@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material-style camera switch (two half-circle arrows) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Outer circle hint -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,8c-2.21,0 -4,1.79 -4,4s1.79,4 4,4 4,-1.79 4,-4 -1.79,-4 -4,-4zM12,14c-1.1,0 -2,-0.9 -2,-2s0.9,-2 2,-2 2,0.9 2,2 -0.9,2 -2,2z" />
+    <!-- Top arc with arrow (clockwise) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M20,5h-3.17l1.24,-1.24C16.97,2.66 14.61,2 12,2 6.48,2 2,6.48 2,12h2c0,-4.41 3.59,-8 8,-8 1.85,0 3.55,0.63 4.9,1.69L15,7h5V5z" />
+    <!-- Bottom arc with arrow -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,19h3.17l-1.24,1.24C7.03,21.34 9.39,22 12,22c5.52,0 10,-4.48 10,-10h-2c0,4.41 -3.59,8 -8,8 -1.85,0 -3.55,-0.63 -4.9,-1.69L9,17H4V19z" />
+</vector>

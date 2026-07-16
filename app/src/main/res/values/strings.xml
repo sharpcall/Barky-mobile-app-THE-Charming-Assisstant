@@ -26,7 +26,13 @@
     <string name="walkie_connect_ok">Hole-punch started — wait a few seconds, then HOLD</string>
     <string name="walkie_connect_bad">Invalid pair code</string>
 
-    <string name="settings_delay_title">Conversion overlay</string>
+    <string name="settings_conversion_toggle_title">Measurement conversion</string>
+    <string name="settings_conversion_enabled">Enable unit conversion (inch ↔ cm, ft ↔ m, …)</string>
+    <string name="settings_conversion_enabled_help">When on, Barky uses Accessibility to show conversions over other apps. Turn off to stop scanning and hide the conversion bubble. Gear icon / accessibility button opens Barky.</string>
+    <string name="settings_conversion_on">Unit conversion ON</string>
+    <string name="settings_conversion_off">Unit conversion OFF</string>
+
+    <string name="settings_delay_title">Conversion overlay delay</string>
     <string name="settings_delay_label">Auto-hide delay (seconds)</string>
     <string name="settings_delay_hint">1–300</string>
     <string name="settings_save_delay">Save delay</string>
