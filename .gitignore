@@ -23,6 +23,12 @@ build/
 # Local configuration (SDK path)
 local.properties
 
+# Local secrets — never commit (GitHub token, etc.)
+.github_token
+.github_push.env
+*.token
+secrets/
+
 # Proguard
 proguard/
 
