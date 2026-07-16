@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand -->
+    <color name="barky_primary">#C45C26</color>
+    <color name="barky_primary_dark">#8B3A12</color>
+    <color name="barky_primary_light">#F0A36C</color>
+    <color name="barky_secondary">#2F5D50</color>
+
+    <!-- Surfaces -->
+    <color name="barky_background">#F7F2EB</color>
+    <color name="barky_surface">#FFFFFF</color>
+    <color name="barky_card_stroke">#E4D8C8</color>
+
+    <!-- Text -->
+    <color name="barky_on_primary">#FFFFFF</color>
+    <color name="barky_on_surface">#1F1A16</color>
+    <color name="barky_on_surface_muted">#6B5E54</color>
+    <color name="barky_hint">#8A7B6F</color>
+
+    <!-- Walkie -->
+    <color name="walkie_ptt">#2F5D50</color>
+    <color name="walkie_ptt_active">#C62828</color>
+    <color name="walkie_wakeup">#B71C1C</color>
+    <color name="walkie_rx">#1565C0</color>
+
+    <!-- Legacy launcher -->
+    <color name="ic_launcher_background">#C45C26</color>
+</resources>

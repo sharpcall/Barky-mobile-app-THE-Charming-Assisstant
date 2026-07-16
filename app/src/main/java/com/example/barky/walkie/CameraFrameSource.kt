@@ -1,0 +1,428 @@
+package com.example.barky.walkie
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.SurfaceTexture
+import android.graphics.YuvImage
+import android.hardware.Camera
+import android.os.Handler
+import android.os.HandlerThread
+import android.util.Log
+import android.view.Surface
+import android.view.WindowManager
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+/** Encode / pacing options for [CameraFrameSource]. */
+data class CaptureConfig(
+    val minIntervalMs: Long,
+    val maxEdge: Int,
+    val jpegQuality: Int,
+    val maxBytesTcp: Int
+) {
+    companion object {
+        val Live = CaptureConfig(
+            minIntervalMs = WalkieProtocol.VIDEO_MIN_INTERVAL_MS,
+            maxEdge = WalkieProtocol.VIDEO_OUT_MAX_EDGE,
+            jpegQuality = WalkieProtocol.VIDEO_JPEG_QUALITY_START,
+            maxBytesTcp = WalkieProtocol.VIDEO_JPEG_MAX_BYTES_TCP
+        )
+        /** Local record-only path: denser frames, sharper JPEGs (no network pressure while capturing). */
+        val BestRecord = CaptureConfig(
+            minIntervalMs = WalkieProtocol.BEST_VIDEO_MIN_INTERVAL_MS,
+            maxEdge = WalkieProtocol.VIDEO_OUT_MAX_EDGE,
+            jpegQuality = WalkieProtocol.BEST_VIDEO_JPEG_QUALITY,
+            maxBytesTcp = WalkieProtocol.BEST_VIDEO_JPEG_MAX_BYTES
+        )
+    }
+}
+
+/**
+ * Camera → upright JPEG frames on a **background thread**.
+ *
+ * Codec: Motion JPEG via Android platform JPEG encoder
+ * (`YuvImage.compressToJpeg` + `Bitmap.compress`). No third-party library.
+ *
+ * Important: Camera preview callbacks run on the main thread; we copy NV21
+ * and encode/send off-main to avoid NetworkOnMainThreadException.
+ */
+@Suppress("DEPRECATION")
+class CameraFrameSource(
+    private val context: Context,
+    private val compactForUdp: () -> Boolean = { false },
+    private val config: CaptureConfig = CaptureConfig.Live,
+    /** Preferred lens at start (user can [switchCamera] later). */
+    preferFrontCamera: Boolean = true,
+    private val onFacingChanged: (front: Boolean) -> Unit = {},
+    private val onError: (String) -> Unit = {},
+    private val onJpegFrame: (ByteArray) -> Unit
+) {
+    private val running = AtomicBoolean(false)
+    private var camera: Camera? = null
+    private var surfaceTexture: SurfaceTexture? = null
+    private var lastSentAt = 0L
+    private var facingFront: Boolean = preferFrontCamera
+    private var preferFront: Boolean = preferFrontCamera
+    private var sensorOrientation: Int = 90
+    private var workerThread: HandlerThread? = null
+    private var worker: Handler? = null
+    private var frameCount = 0
+
+    fun isFrontFacing(): Boolean = facingFront
+
+    fun start() {
+        if (!running.compareAndSet(false, true)) return
+        val wt = HandlerThread("walkie-encode").also { it.start() }
+        workerThread = wt
+        worker = Handler(wt.looper)
+
+        worker?.post {
+            try {
+                openAndStartCamera()
+            } catch (t: Throwable) {
+                Log.e(TAG, "start failed", t)
+                onError("Camera start failed: ${t.javaClass.simpleName}: ${t.message}")
+                stop()
+            }
+        }
+    }
+
+    /** Flip front ↔ back without ending the talk session. */
+    fun switchCamera() {
+        if (!running.get()) return
+        worker?.post {
+            try {
+                preferFront = !preferFront
+                releaseCamera()
+                openAndStartCamera()
+                onFacingChanged(facingFront)
+                Log.i(TAG, "switched camera front=$facingFront")
+            } catch (t: Throwable) {
+                Log.e(TAG, "switchCamera failed", t)
+                onError("Camera switch failed: ${t.message}")
+            }
+        }
+    }
+
+    fun stop() {
+        stopAndWait(400L)
+    }
+
+    /** Stop camera and wait for the encode thread to finish the last JPEG. */
+    fun stopAndWait(timeoutMs: Long = 600L) {
+        running.set(false)
+        val w = worker
+        val wt = workerThread
+        if (w != null && wt != null) {
+            val done = CountDownLatch(1)
+            w.post {
+                try {
+                    releaseCamera()
+                } finally {
+                    done.countDown()
+                }
+            }
+            try {
+                done.await(timeoutMs, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+            }
+            wt.quitSafely()
+            try {
+                wt.join(300)
+            } catch (_: InterruptedException) {
+            }
+        } else {
+            releaseCamera()
+        }
+        worker = null
+        workerThread = null
+    }
+
+    private fun openAndStartCamera() {
+        val cam = openCamera() ?: run {
+            onError("Camera.open failed — grant camera permission / close other camera apps")
+            running.set(false)
+            return
+        }
+        camera = cam
+        val params = cam.parameters
+        val sizes = params.supportedPreviewSizes
+        if (sizes.isNullOrEmpty()) {
+            onError("No camera preview sizes")
+            stop()
+            return
+        }
+        val size = pickPreviewSize(sizes)
+        params.setPreviewSize(size.width, size.height)
+        params.previewFormat = ImageFormat.NV21
+        // Prefer faster FPS range when available
+        try {
+            val ranges = params.supportedPreviewFpsRange
+            val best = ranges?.maxByOrNull { it[1] }
+            if (best != null) params.setPreviewFpsRange(best[0], best[1])
+        } catch (_: Exception) {
+        }
+        try {
+            if (params.supportedFocusModes?.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO) == true) {
+                params.focusMode = Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO
+            }
+        } catch (_: Exception) {
+        }
+        cam.parameters = params
+        try {
+            cam.setDisplayOrientation(computeDisplayOrientation())
+        } catch (_: Exception) {
+        }
+
+        val st = SurfaceTexture(10)
+        st.setOnFrameAvailableListener({
+            try {
+                st.updateTexImage()
+            } catch (_: Exception) {
+            }
+        }, worker)
+        surfaceTexture = st
+        cam.setPreviewTexture(st)
+
+        // Drop backlog: if encoder is busy, skip rather than queue lag
+        val encoding = AtomicBoolean(false)
+        cam.setPreviewCallback { data, camera ->
+            if (!running.get() || data == null) return@setPreviewCallback
+            val now = System.currentTimeMillis()
+            if (now - lastSentAt < config.minIntervalMs) return@setPreviewCallback
+            if (!encoding.compareAndSet(false, true)) return@setPreviewCallback
+            lastSentAt = now
+            val ps = try {
+                camera.parameters.previewSize
+            } catch (_: Exception) {
+                encoding.set(false)
+                return@setPreviewCallback
+            }
+            val copy = data.copyOf()
+            val w = ps.width
+            val h = ps.height
+            worker?.post {
+                try {
+                    if (!running.get()) return@post
+                    val jpeg = nv21ToUprightJpeg(copy, w, h)
+                    if (jpeg != null && jpeg.isNotEmpty()) {
+                        frameCount++
+                        onJpegFrame(jpeg)
+                    } else {
+                        onError("JPEG encode returned empty (preview ${w}x${h})")
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "encode", t)
+                    onError("Encode error: ${t.javaClass.simpleName}: ${t.message}")
+                } finally {
+                    encoding.set(false)
+                }
+            }
+        }
+        cam.startPreview()
+        Log.i(TAG, "preview ${size.width}x${size.height} front=$facingFront interval=${config.minIntervalMs}ms q=${config.jpegQuality}")
+        onError("Camera OK ${size.width}x${size.height} (MJPEG encode thread)")
+    }
+
+    private fun releaseCamera() {
+        try {
+            camera?.setPreviewCallback(null)
+            camera?.stopPreview()
+        } catch (_: Exception) {
+        }
+        try {
+            camera?.release()
+        } catch (_: Exception) {
+        }
+        camera = null
+        try {
+            surfaceTexture?.setOnFrameAvailableListener(null)
+            surfaceTexture?.release()
+        } catch (_: Exception) {
+        }
+        surfaceTexture = null
+    }
+
+    private fun nv21ToUprightJpeg(nv21: ByteArray, width: Int, height: Int): ByteArray? {
+        val maxEdge = config.maxEdge
+        val longer = max(width, height)
+        val scaleDown = if (longer > maxEdge) maxEdge.toFloat() / longer else 1f
+        val srcW: Int
+        val srcH: Int
+        val srcNv21: ByteArray
+        if (scaleDown < 0.99f) {
+            srcW = max(2, (width * scaleDown).roundToInt() and 0x7FFFFFFE)
+            srcH = max(2, (height * scaleDown).roundToInt() and 0x7FFFFFFE)
+            srcNv21 = scaleNv21(nv21, width, height, srcW, srcH)
+        } else {
+            srcW = width
+            srcH = height
+            srcNv21 = nv21
+        }
+
+        val yuv = YuvImage(srcNv21, ImageFormat.NV21, srcW, srcH, null)
+        val rawJpeg = ByteArrayOutputStream(srcW * srcH / 2)
+        if (!yuv.compressToJpeg(Rect(0, 0, srcW, srcH), 85, rawJpeg)) return null
+        val rawBytes = rawJpeg.toByteArray()
+
+        val opts = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inMutable = false
+        }
+        val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, opts) ?: return null
+
+        val matrix = Matrix()
+        val rotation = computeJpegRotation()
+        if (rotation != 0) matrix.postRotate(rotation.toFloat())
+        if (facingFront) matrix.postScale(-1f, 1f)
+
+        val bmp = if (rotation != 0 || facingFront) {
+            val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            if (rotated !== decoded) decoded.recycle()
+            rotated
+        } else {
+            decoded
+        }
+
+        val maxBytes = if (compactForUdp()) {
+            WalkieProtocol.VIDEO_JPEG_MAX_BYTES_UDP
+        } else {
+            config.maxBytesTcp
+        }
+        var quality = config.jpegQuality
+        var out: ByteArray
+        do {
+            val baos = ByteArrayOutputStream(maxBytes.coerceAtMost(360_000))
+            bmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+            out = baos.toByteArray()
+            quality -= 10
+        } while (out.size > maxBytes && quality >= 35)
+
+        if (out.size > maxBytes && compactForUdp()) {
+            val small = Bitmap.createScaledBitmap(bmp, max(1, bmp.width / 2), max(1, bmp.height / 2), true)
+            val baos = ByteArrayOutputStream()
+            small.compress(Bitmap.CompressFormat.JPEG, 45, baos)
+            if (small !== bmp) small.recycle()
+            out = baos.toByteArray()
+        }
+
+        bmp.recycle()
+        return out
+    }
+
+    private fun scaleNv21(src: ByteArray, sw: Int, sh: Int, dw: Int, dh: Int): ByteArray {
+        val out = ByteArray(dw * dh + dw * dh / 2)
+        val xRatio = sw.toFloat() / dw
+        val yRatio = sh.toFloat() / dh
+        for (y in 0 until dh) {
+            val sy = (y * yRatio).toInt().coerceIn(0, sh - 1)
+            val srcRow = sy * sw
+            val dstRow = y * dw
+            for (x in 0 until dw) {
+                val sx = (x * xRatio).toInt().coerceIn(0, sw - 1)
+                out[dstRow + x] = src[srcRow + sx]
+            }
+        }
+        val srcUv = sw * sh
+        val dstUv = dw * dh
+        val uvDh = dh / 2
+        val uvDw = dw / 2
+        for (y in 0 until uvDh) {
+            val sy = (y * yRatio).toInt().coerceIn(0, sh / 2 - 1)
+            val srcRow = srcUv + sy * sw
+            val dstRow = dstUv + y * dw
+            for (x in 0 until uvDw) {
+                val sx = (x * xRatio).toInt().coerceIn(0, sw / 2 - 1) * 2
+                val di = dstRow + x * 2
+                val si = srcRow + sx
+                out[di] = src[si]
+                out[di + 1] = src[si + 1]
+            }
+        }
+        return out
+    }
+
+    private fun computeJpegRotation(): Int {
+        val degrees = displayRotationDegrees()
+        return if (facingFront) {
+            (sensorOrientation + degrees) % 360
+        } else {
+            (sensorOrientation - degrees + 360) % 360
+        }
+    }
+
+    private fun computeDisplayOrientation(): Int {
+        val degrees = displayRotationDegrees()
+        return if (facingFront) {
+            (360 - (sensorOrientation + degrees) % 360) % 360
+        } else {
+            (sensorOrientation - degrees + 360) % 360
+        }
+    }
+
+    private fun displayRotationDegrees(): Int {
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return when (wm.defaultDisplay.rotation) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+
+    private fun openCamera(): Camera? {
+        val n = Camera.getNumberOfCameras()
+        var front = -1
+        var back = -1
+        val info = Camera.CameraInfo()
+        for (i in 0 until n) {
+            Camera.getCameraInfo(i, info)
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) front = i
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_BACK) back = i
+        }
+        val preferred = if (preferFront) front else back
+        val fallback = if (preferFront) back else front
+        val id = when {
+            preferred >= 0 -> preferred
+            fallback >= 0 -> fallback
+            else -> return null
+        }
+        Camera.getCameraInfo(id, info)
+        facingFront = info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT
+        preferFront = facingFront
+        sensorOrientation = info.orientation
+        return try {
+            Camera.open(id)
+        } catch (t: Throwable) {
+            Log.e(TAG, "open failed", t)
+            onError("Camera.open($id) failed: ${t.message}")
+            null
+        }
+    }
+
+    private fun pickPreviewSize(sizes: List<Camera.Size>): Camera.Size {
+        val tw = WalkieProtocol.VIDEO_WIDTH
+        val th = WalkieProtocol.VIDEO_HEIGHT
+        return sizes
+            .filter { it.width * it.height in (640 * 480)..(1280 * 720) }
+            .minByOrNull { abs(it.width - tw) + abs(it.height - th) }
+            ?: sizes
+                .filter { it.width * it.height <= 1280 * 720 }
+                .maxByOrNull { it.width * it.height }
+            ?: sizes.first()
+    }
+
+    companion object {
+        private const val TAG = "CameraFrameSource"
+    }
+}

@@ -1,0 +1,73 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Intermediates + APK output live under a no-space path so aapt2 works
+// when the source project sits under "F:\To sort\...".
+def externalBuildRoot = providers.gradleProperty("barky.buildRoot")
+        .orElse("C:/AndroidBuilds/barky")
+        .get()
+layout.buildDirectory.set(file("${externalBuildRoot}/app"))
+
+android {
+    namespace 'com.example.barky'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.example.barky"
+        minSdk 26
+        targetSdk 35
+        versionCode 22
+        versionName "3.4-flip-camera-contacts"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        // Not used; keeps sync/config simpler
+        viewBinding false
+        buildConfig false
+    }
+
+    packaging {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+    }
+}
+
+// After a successful debug build, copy the APK next to the module sources
+// so it is easy to find under the original project tree.
+afterEvaluate {
+    def assembleDebug = tasks.findByName("assembleDebug")
+    if (assembleDebug != null) {
+        assembleDebug.doLast {
+            def apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
+            if (apk.exists()) {
+                def outDir = file("${project.projectDir}/build-outputs")
+                outDir.mkdirs()
+                copy {
+                    from apk
+                    into outDir
+                    rename { "app-debug.apk" }
+                }
+                logger.lifecycle("Debug APK copied to: ${new File(outDir, 'app-debug.apk').absolutePath}")
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+}

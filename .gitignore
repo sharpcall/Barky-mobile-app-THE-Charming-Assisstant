@@ -1,0 +1,58 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+release/
+
+# Gradle files
+.gradle/
+build/
+**/build/
+
+# Local configuration (SDK path)
+local.properties
+
+# Proguard
+proguard/
+
+# Log Files
+*.log
+
+# Android Studio
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Keystore — never commit secrets
+*.jks
+*.keystore
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kotlin
+.kotlin/
+
+# External build root intermediates (if present under project)
+build-outputs/*.apk
+!build-outputs/.gitkeep
+
+# Optional local tooling
+*.hprof
+.cxx/

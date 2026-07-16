@@ -1,0 +1,11 @@
+// Top-level build file
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+}
+
+// Keep Gradle/AGP intermediates on a path without spaces (see gradle.properties).
+def externalBuildRoot = providers.gradleProperty("barky.buildRoot")
+        .orElse("C:/AndroidBuilds/barky")
+        .get()
+layout.buildDirectory.set(file("${externalBuildRoot}/root"))

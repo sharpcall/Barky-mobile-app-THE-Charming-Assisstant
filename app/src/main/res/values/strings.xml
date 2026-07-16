@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Barky</string>
+    <string name="accessibility_service_label">Barky</string>
+    <string name="accessibility_desc">Barky detects length units (cm, in/&quot;, ft/&apos;, m) on screen and shows conversions</string>
+
+    <string name="settings">Settings</string>
+    <string name="settings_conversion_title">On-screen unit conversion</string>
+    <string name="settings_conversion_help">Grant permissions, then enable Barky in Accessibility settings so conversions can appear over other apps.</string>
+    <string name="settings_grant_overlay">1. Grant display over other apps</string>
+    <string name="settings_enable_accessibility">2. Enable Barky accessibility service</string>
+    <string name="settings_setup_reminder">Show setup reminder</string>
+    <string name="settings_setup_steps">1) Grant overlay\n2) Enable Barky in Accessibility settings</string>
+    <string name="settings_overlay_granted">Overlay permission already granted</string>
+    <string name="settings_walkie_title">Walkie network</string>
+    <string name="settings_wifi_only">Walkie-Talkie over WiFi only</string>
+    <string name="settings_wifi_only_help">Checked (default): phones find each other only on the same Wi‑Fi.\nUnchecked: Internet mode — each phone learns a public address via free public STUN (not a Barky server). Share pair codes so the phones can hole-punch. Symmetric carrier NATs may still block pure P2P; a future relay would fix hard cases.</string>
+    <string name="settings_wifi_only_saved_on">Wi‑Fi only: local discovery</string>
+    <string name="settings_wifi_only_saved_off">Internet pairing enabled — share codes on the main screen</string>
+
+    <string name="walkie_internet_title">Internet pair (no central Barky server)</string>
+    <string name="walkie_my_code_waiting">Your pair code: discovering…</string>
+    <string name="walkie_my_code">Your pair code:\n%1$s\n(tap and hold to copy — send to the other phone)</string>
+    <string name="walkie_peer_code_hint">Their pair code</string>
+    <string name="walkie_connect_invite">Connect with their code</string>
+    <string name="walkie_connect_ok">Hole-punch started — wait a few seconds, then HOLD</string>
+    <string name="walkie_connect_bad">Invalid pair code</string>
+
+    <string name="settings_delay_title">Conversion overlay</string>
+    <string name="settings_delay_label">Auto-hide delay (seconds)</string>
+    <string name="settings_delay_hint">1–300</string>
+    <string name="settings_save_delay">Save delay</string>
+    <string name="settings_delay_saved">Delay saved: %1$d s</string>
+
+    <string name="walkie_title">Video walkie (same Wi‑Fi)</string>
+    <string name="walkie_help">Connects automatically on the same Wi‑Fi. Hold to send a one-way video message. Audio plays live while video displays. Replay plays the last message.</string>
+    <string name="walkie_start">Start walkie</string>
+    <string name="walkie_stop">Stop walkie</string>
+    <string name="walkie_status_idle">Walkie off</string>
+    <string name="walkie_status_connecting">Connecting on Wi‑Fi…</string>
+    <string name="walkie_status_ready">Ready — connected to %1$s</string>
+    <string name="walkie_status_waiting">Waiting for the other phone…</string>
+    <string name="walkie_peers_none">No peers found yet…</string>
+    <string name="walkie_peers_searching">Looking for the other Barky phone…</string>
+    <string name="walkie_peer_linked">Linked with %1$s</string>
+    <string name="walkie_best_quality">BEST Quality video / slow send speed</string>
+    <string name="walkie_ptt">HOLD to send video</string>
+    <string name="walkie_ptt_tx">Sending video…</string>
+    <string name="walkie_ptt_recording">Recording BEST quality…</string>
+    <string name="walkie_ptt_busy">Channel busy — wait…</string>
+    <string name="walkie_wakeup">WAKEUP</string>
+    <string name="walkie_stop_ringing">Stop Ringing</string>
+    <string name="walkie_receiving">Receiving video message…</string>
+    <string name="walkie_replay">Replay</string>
+    <string name="walkie_stop_replay">Stop</string>
+    <string name="walkie_video_desc">Walkie video</string>
+    <string name="walkie_video_placeholder">Video appears here</string>
+    <string name="walkie_flip_camera">Switch front / back camera</string>
+    <string name="walkie_flip_camera_icon">⇄</string>
+    <string name="walkie_camera_front">Front camera</string>
+    <string name="walkie_camera_back">Back camera</string>
+    <string name="walkie_need_contacts">Contacts permission is for future calling features</string>
+    <string name="walkie_need_phone">Phone permission is for future calling features</string>
+    <string name="walkie_channel_busy_toast">Other phone is talking — release and wait</string>
+    <string name="walkie_need_camera">Camera permission is required for video messages</string>
+    <string name="walkie_notif_title">Barky walkie</string>
+    <string name="walkie_channel_name">Walkie talkie</string>
+    <string name="walkie_wakeup_channel">Walkie wakeup</string>
+    <string name="walkie_wakeup_channel_desc">Loud alerts from the other walkie</string>
+    <string name="walkie_wakeup_title">Barky WAKEUP!</string>
+    <string name="walkie_wakeup_body">Ring from %1$s</string>
+    <string name="walkie_need_mic">Microphone permission is required for push-to-talk</string>
+    <string name="walkie_need_notif">Notification permission helps show walkie status and wakeups</string>
+</resources>
