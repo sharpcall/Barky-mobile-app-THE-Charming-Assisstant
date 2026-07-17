@@ -90,8 +90,11 @@
     <string name="walkie_stop_replay">Stop</string>
     <string name="walkie_video_desc">Walkie video</string>
     <string name="walkie_video_placeholder">Video appears here</string>
-    <string name="walkie_flip_camera">Switch front / back camera</string>
+    <string name="walkie_flip_camera">Switch peer camera (front / back)</string>
+    <string name="walkie_flip_self_camera">Switch my camera (front / back)</string>
     <string name="walkie_flip_camera_icon">⇄</string>
+    <string name="walkie_flip_peer_toast">Asked peer to flip camera</string>
+    <string name="walkie_flip_self_toast">Switched my camera</string>
     <string name="walkie_camera_front">Front camera</string>
     <string name="walkie_camera_back">Back camera</string>
     <string name="walkie_need_contacts">Contacts permission is for future calling features</string>

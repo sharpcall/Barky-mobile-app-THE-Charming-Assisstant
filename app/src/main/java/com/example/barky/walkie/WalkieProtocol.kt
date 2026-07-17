@@ -38,6 +38,11 @@ object WalkieProtocol {
     const val TYPE_MONITOR_AUDIO: Byte = 0x0F
     /** Continuous monitor JPEG part (same layout as TYPE_VIDEO) — live only. */
     const val TYPE_MONITOR_VIDEO: Byte = 0x10
+    /**
+     * Ask peer to flip their own camera (front/back) while they serve SEE / local cam.
+     * Used so either party can switch the other party’s lens during SEE.
+     */
+    const val TYPE_CAMERA_FLIP: Byte = 0x11
 
     const val AUDIO_MODE_SPEAKER: Byte = 0
     const val AUDIO_MODE_HEADSET: Byte = 1

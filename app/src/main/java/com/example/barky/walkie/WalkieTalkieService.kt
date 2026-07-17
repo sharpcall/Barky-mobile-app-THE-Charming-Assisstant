@@ -117,6 +117,8 @@ class WalkieTalkieService : Service() {
     fun connectViaInvite(code: String): Boolean = engine?.connectViaInvite(code) == true
     fun getMyInviteCode(): String? = engine?.getMyInviteCode() ?: internetInviteCode
     fun switchCamera(): Boolean = engine?.switchCamera() == true
+    /** Ask peer to flip their camera (front/back) during SEE. */
+    fun requestPeerCameraFlip(): Boolean = engine?.requestPeerCameraFlip() == true
     fun isCameraFrontPreferred(): Boolean = engine?.isCameraFrontPreferred()
         ?: com.example.barky.BarkyPrefs.isCameraFront(this)
     fun startLocalPreview() = engine?.startLocalPreview()
@@ -291,6 +293,10 @@ class WalkieTalkieService : Service() {
                 Log.i(TAG, "TEST_SEE_STOP via adb")
                 engine?.stopSeeRemote()
             }
+            ACTION_TEST_PEER_CAMERA_FLIP -> {
+                Log.i(TAG, "TEST_PEER_CAMERA_FLIP via adb")
+                engine?.requestPeerCameraFlip()
+            }
             ACTION_TEST_GPS_ON -> {
                 Log.i(TAG, "TEST_GPS_ON via adb")
                 BarkyPrefs.setGpsEnabled(this, true)
@@ -450,6 +456,7 @@ class WalkieTalkieService : Service() {
         const val ACTION_TEST_LISTEN_STOP = "com.example.barky.TEST_LISTEN_STOP"
         const val ACTION_TEST_SEE_START = "com.example.barky.TEST_SEE_START"
         const val ACTION_TEST_SEE_STOP = "com.example.barky.TEST_SEE_STOP"
+        const val ACTION_TEST_PEER_CAMERA_FLIP = "com.example.barky.TEST_PEER_CAMERA_FLIP"
         const val ACTION_TEST_GPS_ON = "com.example.barky.TEST_GPS_ON"
         const val ACTION_TEST_GPS_OFF = "com.example.barky.TEST_GPS_OFF"
         const val ACTION_SET_BEST_QUALITY = "com.example.barky.SET_BEST_QUALITY"

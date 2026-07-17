@@ -31,9 +31,7 @@
         android:layout_weight="1"
         android:background="#0B141A">
 
-        <!-- Self-view box: full-bleed local cam, or floating PiP during SEE.
-             During PiP, TextureView stays for camera Surface; ImageView shows
-             frames with true few-pixel transparent rectangular perimeter. -->
+        <!-- Self-view: full-bleed idle cam, or floating PiP during SEE (natural aspect). -->
         <FrameLayout
             android:id="@+id/walkie_pip_box"
             android:layout_width="match_parent"
@@ -45,16 +43,19 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
 
-            <!-- Soft-edge display (true alpha perimeter); covers TextureView in PiP.
-                 CENTER_CROP keeps natural proportions (never stretch with fitXY). -->
-            <ImageView
-                android:id="@+id/walkie_pip_soft"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:clickable="false"
-                android:contentDescription="@null"
-                android:focusable="false"
-                android:scaleType="centerCrop"
+            <!-- Local flip: switches THIS phone's camera (top-right of self PiP). -->
+            <ImageButton
+                android:id="@+id/walkie_pip_flip"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_gravity="top|end"
+                android:layout_margin="6dp"
+                android:background="@drawable/bg_flip_camera_circle"
+                android:contentDescription="@string/walkie_flip_self_camera"
+                android:elevation="8dp"
+                android:padding="6dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_flip_camera"
                 android:visibility="gone" />
         </FrameLayout>
 

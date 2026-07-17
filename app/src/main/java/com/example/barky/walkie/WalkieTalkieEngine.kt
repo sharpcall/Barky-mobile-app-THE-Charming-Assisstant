@@ -271,6 +271,8 @@ class WalkieTalkieEngine(
 
     /**
      * Switch front/back on HOLD, SEE-serve, SEE-watch PiP, or idle preview.
+     * Never opens a second Camera when [cameraSource] already owns the hardware
+     * (dual-SEE crash fix).
      */
     fun switchCamera(): Boolean {
         val talkCam = cameraSource
@@ -285,7 +287,13 @@ class WalkieTalkieEngine(
             Log.i(TAG, "switchCamera via previewSource")
             return true
         }
-        // SEE watch PiP: ensure local preview then flip
+        // Prefer existing hardware only — do not start a second Camera while busy
+        if (servingSee.get() || talking.get()) {
+            BarkyPrefs.toggleCameraFront(appContext)
+            Log.w(TAG, "switchCamera: camera busy, toggled preference only")
+            return false
+        }
+        // SEE watch PiP (not serving): ensure local preview then flip
         if (requestingSee.get()) {
             localPreviewWanted = true
             startLocalPreviewInternal()
@@ -304,14 +312,49 @@ class WalkieTalkieEngine(
         return true
     }
 
+    /**
+     * Ask peer to flip *their* camera (front/back). Works for one-way SEE and dual SEE.
+     * Same code path on every device.
+     */
+    fun requestPeerCameraFlip(): Boolean {
+        val peer = currentPeer() ?: getPeers().firstOrNull()
+        if (peer == null || peer.port <= 0) {
+            postError("No peer to flip camera")
+            return false
+        }
+        thread(name = "walkie-cam-flip-req", isDaemon = true) {
+            try {
+                sendControl(peer, WalkieProtocol.TYPE_CAMERA_FLIP)
+                // Retry once for stale ports
+                Thread.sleep(80)
+                val p = currentPeer() ?: peer
+                sendControl(p, WalkieProtocol.TYPE_CAMERA_FLIP)
+            } catch (t: Throwable) {
+                Log.w(TAG, "requestPeerCameraFlip", t)
+            }
+        }
+        postStatus("Asked peer to flip camera…")
+        Log.i(TAG, "CAMERA_FLIP_REQ → ${peer.host}:${peer.port}")
+        return true
+    }
+
+    /** Peer asked us to flip our lens (while we serve SEE / have a camera open). */
+    private fun handleCameraFlipReq(from: String) {
+        Log.i(TAG, "CAMERA_FLIP from $from servingSee=${servingSee.get()} talking=${talking.get()}")
+        val ok = switchCamera()
+        postStatus(if (ok) "Camera flipped (peer request)" else "Camera flip requested")
+    }
+
     fun isCameraFrontPreferred(): Boolean = BarkyPrefs.isCameraFront(appContext)
 
     /** Bind TextureView surface for flicker-free local camera display. */
     fun setUiPreviewTexture(texture: SurfaceTexture?) {
         uiPreviewTexture = texture
         Log.i(TAG, "uiPreviewTexture set=${texture != null}")
-        if (texture != null && localPreviewWanted && !talking.get()) {
-            // Restart preview onto the real TextureView
+        // Never restart a second Camera while serve/HOLD owns the hardware
+        if (texture != null && localPreviewWanted && !talking.get() &&
+            !servingSee.get() && cameraSource == null
+        ) {
             stopLocalPreviewInternal()
             startLocalPreviewInternal()
         }
@@ -336,6 +379,11 @@ class WalkieTalkieEngine(
     private fun startLocalPreviewInternal() {
         if (previewSource != null || talking.get()) return
         if (!running.get()) return
+        // Dual-SEE / serve-SEE already owns Camera1 — never open a second instance
+        if (servingSee.get() || cameraSource != null) {
+            Log.i(TAG, "startLocalPreviewInternal skip: camera owned by serve/HOLD")
+            return
+        }
         try {
             stopLocalPreviewInternal()
             val hasHw = uiPreviewTexture != null
@@ -1975,6 +2023,7 @@ class WalkieTalkieEngine(
                         WalkieProtocol.TYPE_GPS -> handleGpsPacket(snapshot)
                         WalkieProtocol.TYPE_MONITOR_AUDIO -> handleMonitorAudio(snapshot)
                         WalkieProtocol.TYPE_MONITOR_VIDEO -> handleMonitorVideo(snapshot, from)
+                        WalkieProtocol.TYPE_CAMERA_FLIP -> handleCameraFlipReq(from)
                     }
                 } catch (_: java.net.SocketTimeoutException) {
                 } catch (t: Throwable) {
@@ -3137,6 +3186,7 @@ class WalkieTalkieEngine(
         }
         monitorTarget = peer
         mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), true) }
+        // Release idle preview so Camera1 is free (critical for dual SEE — one camera only)
         stopLocalPreviewInternal()
         // Video only — mic is owned by LISTEN serve (if any)
         monitorVideoThread = thread(name = "walkie-serve-see-video", isDaemon = true) {

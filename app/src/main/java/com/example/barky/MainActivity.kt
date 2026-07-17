@@ -12,9 +12,7 @@ import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
@@ -71,12 +69,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieFlipCamera: ImageButton
     private lateinit var walkiePipBox: android.widget.FrameLayout
     private lateinit var walkiePreview: TextureView
-    /** Soft-edge PiP display (true perimeter alpha); TextureView feeds the camera Surface. */
-    private lateinit var walkiePipSoft: ImageView
+    /** Flip button on self PiP — local camera only. */
+    private lateinit var walkiePipFlip: ImageButton
     private lateinit var walkieVideo: ImageView
-    private val pipSoftHandler = Handler(Looper.getMainLooper())
-    private var pipSoftLoop: Runnable? = null
-    private var pipSoftLastBmp: Bitmap? = null
     private lateinit var walkieVideoHint: TextView
     private lateinit var walkieMap: WebView
     private lateinit var walkieLockHint: TextView
@@ -340,7 +335,11 @@ class MainActivity : AppCompatActivity() {
                     showMap = false
                     // WhatsApp-style: big remote + small local self-view
                     applySeeSplitLayout(true)
-                    walkieService?.startLocalPreview()
+                    // If we are also serving SEE, cameraSource already owns the lens —
+                    // do not open a second Camera (dual-SEE crash).
+                    if (!isServingSee) {
+                        walkieService?.startLocalPreview()
+                    }
                 } else if (!isTalking && !isReceiving && !isReplaying) {
                     applySeeSplitLayout(false)
                     if (gpsEnabled) {
@@ -459,7 +458,7 @@ class MainActivity : AppCompatActivity() {
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
         walkiePipBox = findViewById(R.id.walkie_pip_box)
         walkiePreview = findViewById(R.id.walkie_preview)
-        walkiePipSoft = findViewById(R.id.walkie_pip_soft)
+        walkiePipFlip = findViewById(R.id.walkie_pip_flip)
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
         walkieMap = findViewById(R.id.walkie_map)
@@ -529,14 +528,26 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Stage flip: while SEE → flip *peer* camera; idle/HOLD → flip own camera
         walkieFlipCamera.setOnClickListener {
-            // Works during SEE (local PiP / serve cam) as well as idle / HOLD
-            val ok = walkieService?.switchCamera() == true
-            if (!ok && isSeeing) {
-                walkieService?.startLocalPreview()
+            if (isSeeing) {
+                val ok = walkieService?.requestPeerCameraFlip() == true
+                Toast.makeText(
+                    this,
+                    if (ok) R.string.walkie_flip_peer_toast else R.string.walkie_connect_bad,
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
                 walkieService?.switchCamera()
+                updateFlipCameraLabel()
             }
             walkieFlipCamera.animate().rotationBy(180f).setDuration(200).start()
+        }
+        // Self PiP flip: always local camera
+        walkiePipFlip.setOnClickListener {
+            walkieService?.switchCamera()
+            walkiePipFlip.animate().rotationBy(180f).setDuration(200).start()
+            Toast.makeText(this, R.string.walkie_flip_self_toast, Toast.LENGTH_SHORT).show()
             updateFlipCameraLabel()
         }
         updateFlipCameraLabel()
@@ -923,7 +934,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
-        stopPipSoftLoop()
         walkieService?.stopLocalPreview()
         if (walkieBound) {
             walkieService?.removeListener(walkieUiListener)
@@ -1077,8 +1087,12 @@ class MainActivity : AppCompatActivity() {
             walkiePipBox.elevation = 24f
             walkiePipBox.bringToFront()
             walkieMicStage.elevation = 8f
-            applyPipSoftEdges(true)
-            // Second layout pass after measure so Pixel/Samsung both get non-zero parent size
+            walkiePreview.alpha = 1f
+            if (::walkiePipFlip.isInitialized) {
+                walkiePipFlip.visibility = View.VISIBLE
+                walkiePipFlip.bringToFront()
+            }
+            // Second layout pass after measure so both phones get non-zero parent size
             walkiePipBox.post {
                 layoutFloatingPip(preservePosition = true)
                 applyNaturalPreviewTransform()
@@ -1088,100 +1102,54 @@ class MainActivity : AppCompatActivity() {
             pipLayoutActive = false
             pipLastLeft = -1
             pipLastTop = -1
-            applyPipSoftEdges(false)
+            if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
             resetPreviewFullBleed()
         }
     }
 
     /**
-     * Soft rectangular perimeter: a few pixels of **true alpha transparency**
-     * around all four edges (not rounded corners, not a dark vignette).
-     *
-     * TextureView surfaces are composited outside the normal view draw path, so
-     * overlay DST_OUT cannot punch them. We snapshot the TextureView into an
-     * [ImageView] with perimeter alpha, and hide the opaque TextureView.
-     */
-    private fun applyPipSoftEdges(enabled: Boolean) {
-        if (!::walkiePipBox.isInitialized || !::walkiePipSoft.isInitialized) return
-        walkiePipBox.clipToOutline = false
-        walkiePreview.clipToOutline = false
-        if (enabled) {
-            // Keep TextureView laid out for camera Surface, but do not show its hard edges
-            walkiePreview.alpha = 0f
-            walkiePipSoft.visibility = View.VISIBLE
-            walkiePipSoft.bringToFront()
-            startPipSoftLoop()
-        } else {
-            stopPipSoftLoop()
-            walkiePreview.alpha = 1f
-            walkiePipSoft.visibility = View.GONE
-            walkiePipSoft.setImageDrawable(null)
-        }
-    }
-
-    private fun startPipSoftLoop() {
-        stopPipSoftLoop()
-        // Few-pixel band: ~10dp, clamped so small PiP still has a clear center
-        val edgePx = (10f * resources.displayMetrics.density).toInt().coerceIn(6, 18)
-        val loop = object : Runnable {
-            override fun run() {
-                if (!isSeeing || !pipLayoutActive || !::walkiePreview.isInitialized) return
-                try {
-                    if (walkiePreview.isAvailable && walkiePreview.width > 2 && walkiePreview.height > 2) {
-                        val raw = walkiePreview.getBitmap(walkiePreview.width, walkiePreview.height)
-                        if (raw != null && !raw.isRecycled) {
-                            val soft = SoftEdgeBitmaps.applyPerimeterFade(raw, edgePx)
-                            if (raw !== soft && !raw.isRecycled) raw.recycle()
-                            val prev = pipSoftLastBmp
-                            pipSoftLastBmp = soft
-                            walkiePipSoft.setImageBitmap(soft)
-                            if (prev != null && prev !== soft && !prev.isRecycled) {
-                                // Delay recycle one frame so ImageView finishes bind
-                                pipSoftHandler.post { if (!prev.isRecycled) prev.recycle() }
-                            }
-                        }
-                    }
-                } catch (_: Throwable) {
-                }
-                pipSoftHandler.postDelayed(this, 66L) // ~15 fps soft PiP
-            }
-        }
-        pipSoftLoop = loop
-        pipSoftHandler.post(loop)
-    }
-
-    private fun stopPipSoftLoop() {
-        pipSoftLoop?.let { pipSoftHandler.removeCallbacks(it) }
-        pipSoftLoop = null
-        val prev = pipSoftLastBmp
-        pipSoftLastBmp = null
-        if (prev != null && !prev.isRecycled) prev.recycle()
-    }
-
-    /**
-     * Natural PiP size from camera buffer aspect (no stretch).
-     * Sensor is landscape (e.g. 1280x720); upright on phone is portrait (720x1280).
+     * Natural PiP size from camera buffer + display orientation (no stretch).
+     * Phone portrait: sensor landscape buffer becomes tall upright (e.g. 720×1280).
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        val baseW = ((if (pipEnlarged) 132f else 96f) * density).toInt()
-        // Upright height/width after typical 90° display orientation
-        val uprightAspect = if (previewBufW > 0 && previewBufH > 0) {
-            // buffer landscape W x H → upright aspect = W/H (taller than wide)
-            previewBufW.toFloat() / previewBufH.toFloat()
+        // Width of PiP; height derived from upright aspect so faces are not wide-squashed
+        val baseW = ((if (pipEnlarged) 140f else 100f) * density).toInt()
+        val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
+            val orient = previewDisplayOrient
+            val uprightW: Float
+            val uprightH: Float
+            if (orient % 180 == 0) {
+                uprightW = previewBufW.toFloat()
+                uprightH = previewBufH.toFloat()
+            } else {
+                // 90° / 270°: swap for upright phone view
+                uprightW = previewBufH.toFloat()
+                uprightH = previewBufW.toFloat()
+            }
+            (uprightH / uprightW).coerceIn(1.0f, 2.2f)
         } else {
-            4f / 3f
+            4f / 3f // default phone portrait selfie
         }
-        val pipH = (baseW * uprightAspect).toInt().coerceIn(baseW, (baseW * 2.2f).toInt())
-        // Never larger than ~35% of stage — prevents covering remote video
+        var pipW = baseW
+        var pipH = (baseW * uprightAspectHOverW).toInt()
+        // Cap so PiP never covers most of remote video
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val maxW = (parentW * 0.35f).toInt().coerceAtLeast(baseW)
-        val maxH = (parentH * 0.40f).toInt().coerceAtLeast(baseW)
-        val w = baseW.coerceAtMost(maxW)
-        val h = pipH.coerceAtMost(maxH)
-        return w to h
+        val maxW = (parentW * (if (pipEnlarged) 0.42f else 0.32f)).toInt().coerceAtLeast(baseW)
+        val maxH = (parentH * (if (pipEnlarged) 0.50f else 0.38f)).toInt().coerceAtLeast(baseW)
+        if (pipW > maxW) {
+            val s = maxW.toFloat() / pipW
+            pipW = maxW
+            pipH = (pipH * s).toInt()
+        }
+        if (pipH > maxH) {
+            val s = maxH.toFloat() / pipH
+            pipH = maxH
+            pipW = (pipW * s).toInt()
+        }
+        return pipW.coerceAtLeast(1) to pipH.coerceAtLeast(1)
     }
 
     private fun layoutFloatingPip(preservePosition: Boolean) {
@@ -1232,12 +1200,10 @@ class MainActivity : AppCompatActivity() {
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
         )
-        if (::walkiePipSoft.isInitialized) {
-            walkiePipSoft.layoutParams = android.widget.FrameLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            walkiePipSoft.scaleType = ImageView.ScaleType.CENTER_CROP
+        walkiePreview.alpha = 1f
+        if (::walkiePipFlip.isInitialized && isSeeing) {
+            walkiePipFlip.visibility = View.VISIBLE
+            walkiePipFlip.bringToFront()
         }
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }
@@ -1330,44 +1296,52 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.elevation = 0f
         walkiePreview.translationX = 0f
         walkiePreview.translationY = 0f
-        stopPipSoftLoop()
-        if (::walkiePipSoft.isInitialized) {
-            walkiePipSoft.visibility = View.GONE
-            walkiePipSoft.setImageDrawable(null)
-        }
+        if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
         if (::walkiePreview.isInitialized) walkiePreview.alpha = 1f
         applyNaturalPreviewTransform()
     }
 
     /**
-     * Center-crop TextureView so faces/scenes keep natural proportions (no stretch).
-     * Matches Camera1 buffer (landscape) + setDisplayOrientation (usually 90° on phones).
+     * Center-crop TextureView into the PiP box so proportions stay natural (no stretch).
+     * Box size already matches upright camera aspect; transform fills without squashing.
      */
     private fun applyNaturalPreviewTransform() {
         if (!::walkiePreview.isInitialized) return
         val viewWidth = walkiePreview.width
         val viewHeight = walkiePreview.height
         if (viewWidth <= 0 || viewHeight <= 0 || previewBufW <= 0 || previewBufH <= 0) return
+        val orient = previewDisplayOrient
+        // Buffer size as presented after setDisplayOrientation
+        val bufW: Float
+        val bufH: Float
+        if (orient % 180 == 0) {
+            bufW = previewBufW.toFloat()
+            bufH = previewBufH.toFloat()
+        } else {
+            bufW = previewBufH.toFloat()
+            bufH = previewBufW.toFloat()
+        }
+        val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+        val bufAspect = bufW / bufH
+        val scale: Float
+        val dx: Float
+        val dy: Float
+        if (bufAspect > viewAspect) {
+            // Buffer wider than view → match height, crop sides
+            scale = viewHeight / bufH
+            dx = (viewWidth - bufW * scale) * 0.5f
+            dy = 0f
+        } else {
+            // Buffer taller than view → match width, crop top/bottom
+            scale = viewWidth / bufW
+            dx = 0f
+            dy = (viewHeight - bufH * scale) * 0.5f
+        }
         val matrix = Matrix()
-        val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        val centerX = viewRect.centerX()
-        val centerY = viewRect.centerY()
-        // Sensor buffer is landscape (e.g. 1280x720); after displayOrientation the visual is upright
-        val bufferRect = android.graphics.RectF(
-            0f,
-            0f,
-            previewBufH.toFloat(),
-            previewBufW.toFloat()
-        )
-        bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-        matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-        val scale = max(
-            viewHeight.toFloat() / previewBufW.toFloat(),
-            viewWidth.toFloat() / previewBufH.toFloat()
-        )
-        matrix.postScale(scale, scale, centerX, centerY)
-        // Front camera: mirror horizontally for natural selfie view
-        // (sensor may already mirror; only if it looks reversed in testing — skip by default)
+        // Map sensor buffer (pre-orientation) into view; TextureView already has displayOrientation on camera
+        // Camera1 feeds TextureView in display orientation, so buffer is upright-sized as bufW×bufH
+        matrix.setScale(scale, scale)
+        matrix.postTranslate(dx, dy)
         walkiePreview.setTransform(matrix)
     }
 
