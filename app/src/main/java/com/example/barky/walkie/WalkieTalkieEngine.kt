@@ -252,7 +252,7 @@ class WalkieTalkieEngine(
             val cam = CameraFrameSource(
                 context = appContext,
                 compactForUdp = { false },
-                config = CaptureConfig.Live,
+                config = CaptureConfig.Preview,
                 preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
                 onFacingChanged = { front ->
                     BarkyPrefs.setCameraFront(appContext, front)
@@ -499,8 +499,11 @@ class WalkieTalkieEngine(
         // Free camera hardware for TX session
         stopLocalPreviewInternal()
 
+        // Re-read prefs with app context (same file as Activity); log for adb smoke
         val best = BarkyPrefs.isBestQualityVideo(appContext)
         bestQualitySession.set(best)
+        Log.i(TAG, "startTalking bestQuality=$best (from prefs)")
+        videoDebug("startTalking mode=${if (best) "BEST_RECORD" else "LIVE_STREAM"}")
         videoTxOk = 0
         videoTxFail = 0
         lastVideoError = ""
@@ -2131,16 +2134,19 @@ class WalkieTalkieEngine(
         try {
             if (live) {
                 val now = android.os.SystemClock.elapsedRealtime()
-                // Preview: ~10 fps is enough for flip UI; live TX/RX: ~15–20 fps
-                val minGap = if (localPreview) 100L else 50L
+                // Fewer UI paints = less flicker (encode still full rate for send/store)
+                val minGap = when {
+                    localPreview -> 120L
+                    else -> 66L // ~15 fps display
+                }
                 if (now - lastUiEmitAt < minGap) return
                 if (!uiEmitBusy.compareAndSet(false, true)) return
                 lastUiEmitAt = now
             }
             val opts = BitmapFactory.Options().apply {
-                // RGB_565 is faster / less GC pressure for continuous stream
-                inPreferredConfig =
-                    if (localPreview) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
+                inPreferredConfig = Bitmap.Config.RGB_565
+                // Local preview: half-res decode (flip still clear, much less GC flash)
+                if (localPreview) inSampleSize = 2
             }
             val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
             if (bmp == null) {

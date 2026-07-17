@@ -36,6 +36,13 @@ data class CaptureConfig(
             jpegQuality = WalkieProtocol.VIDEO_JPEG_QUALITY_START,
             maxBytesTcp = WalkieProtocol.VIDEO_JPEG_MAX_BYTES_TCP
         )
+        /** Idle viewfinder: slower capture → less UI flicker while flipping lenses. */
+        val Preview = CaptureConfig(
+            minIntervalMs = 120L,
+            maxEdge = 640,
+            jpegQuality = 70,
+            maxBytesTcp = 80_000
+        )
         /** Local record-only path: denser frames, sharper JPEGs (no network pressure while capturing). */
         val BestRecord = CaptureConfig(
             minIntervalMs = WalkieProtocol.BEST_VIDEO_MIN_INTERVAL_MS,

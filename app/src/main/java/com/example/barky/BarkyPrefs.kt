@@ -25,7 +25,8 @@ object BarkyPrefs {
         prefs(context).getBoolean(KEY_BEST_QUALITY, false)
 
     fun setBestQualityVideo(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean(KEY_BEST_QUALITY, enabled).apply()
+        // commit() so HOLD immediately after check sees the new value (apply is async)
+        prefs(context).edit().putBoolean(KEY_BEST_QUALITY, enabled).commit()
     }
 
     fun isWifiOnly(context: Context): Boolean =
@@ -49,7 +50,7 @@ object BarkyPrefs {
     }
 
     fun isConversionEnabled(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_CONVERSION_ENABLED, true)
+        prefs(context).getBoolean(KEY_CONVERSION_ENABLED, false)
 
     fun setConversionEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_CONVERSION_ENABLED, enabled).apply()

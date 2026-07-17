@@ -262,11 +262,16 @@ class MainActivity : AppCompatActivity() {
         // Smoother continuous video (less flash when swapping bitmaps)
         walkieVideo.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
+        // Don't restore checkbox from activity state — always trust prefs, then write back
+        walkieBestQuality.isSaveEnabled = false
         walkieBestQuality.isChecked = BarkyPrefs.isBestQualityVideo(this)
         walkieBestQuality.setOnCheckedChangeListener { _, checked ->
             BarkyPrefs.setBestQualityVideo(this, checked)
+            android.util.Log.i("BarkyVideoUI", "BEST quality checkbox → prefs=$checked")
             updatePttLabel()
         }
+        // Ensure prefs match UI even if state was weird
+        BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
 
         walkieFlipCamera.setOnClickListener {
             walkieService?.switchCamera()
@@ -307,6 +312,8 @@ class MainActivity : AppCompatActivity() {
                         return@setOnTouchListener true
                     }
                     if (isReplaying) walkieService?.stopReplay()
+                    // Sync BEST checkbox → prefs immediately before engine reads it
+                    BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
                     v.isPressed = true
                     walkieService?.startTalking()
                     true
