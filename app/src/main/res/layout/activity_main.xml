@@ -32,7 +32,8 @@
         android:background="#0B141A">
 
         <!-- Self-view box: full-bleed local cam, or floating PiP during SEE.
-             Soft rectangular perimeter fade (not rounded) via SoftRectEdgeFadeView. -->
+             During PiP, TextureView stays for camera Surface; ImageView shows
+             frames with true few-pixel transparent rectangular perimeter. -->
         <FrameLayout
             android:id="@+id/walkie_pip_box"
             android:layout_width="match_parent"
@@ -44,13 +45,15 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
 
-            <!-- DST_OUT perimeter eraser; needs hardware layer on walkie_pip_box -->
-            <com.example.barky.SoftRectEdgeFadeView
-                android:id="@+id/walkie_pip_fade"
+            <!-- Soft-edge display (true alpha perimeter); covers TextureView in PiP -->
+            <ImageView
+                android:id="@+id/walkie_pip_soft"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:clickable="false"
+                android:contentDescription="@null"
                 android:focusable="false"
+                android:scaleType="fitXY"
                 android:visibility="gone" />
         </FrameLayout>
 

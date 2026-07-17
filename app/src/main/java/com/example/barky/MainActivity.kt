@@ -12,7 +12,9 @@ import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
@@ -69,8 +71,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieFlipCamera: ImageButton
     private lateinit var walkiePipBox: android.widget.FrameLayout
     private lateinit var walkiePreview: TextureView
-    private lateinit var walkiePipFade: SoftRectEdgeFadeView
+    /** Soft-edge PiP display (true perimeter alpha); TextureView feeds the camera Surface. */
+    private lateinit var walkiePipSoft: ImageView
     private lateinit var walkieVideo: ImageView
+    private val pipSoftHandler = Handler(Looper.getMainLooper())
+    private var pipSoftLoop: Runnable? = null
+    private var pipSoftLastBmp: Bitmap? = null
     private lateinit var walkieVideoHint: TextView
     private lateinit var walkieMap: WebView
     private lateinit var walkieLockHint: TextView
@@ -444,7 +450,7 @@ class MainActivity : AppCompatActivity() {
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
         walkiePipBox = findViewById(R.id.walkie_pip_box)
         walkiePreview = findViewById(R.id.walkie_preview)
-        walkiePipFade = findViewById(R.id.walkie_pip_fade)
+        walkiePipSoft = findViewById(R.id.walkie_pip_soft)
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
         walkieMap = findViewById(R.id.walkie_map)
@@ -908,6 +914,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        stopPipSoftLoop()
         walkieService?.stopLocalPreview()
         if (walkieBound) {
             walkieService?.removeListener(walkieUiListener)
@@ -1071,23 +1078,68 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Soft **full rectangular perimeter** fade of the self-view into remote video.
-     * Not rounded corners — alpha eases out along all four straight edges via
-     * [SoftRectEdgeFadeView] DST_OUT on a hardware-layered [walkiePipBox].
+     * Soft rectangular perimeter: a few pixels of **true alpha transparency**
+     * around all four edges (not rounded corners, not a dark vignette).
+     *
+     * TextureView surfaces are composited outside the normal view draw path, so
+     * overlay DST_OUT cannot punch them. We snapshot the TextureView into an
+     * [ImageView] with perimeter alpha, and hide the opaque TextureView.
      */
     private fun applyPipSoftEdges(enabled: Boolean) {
-        if (!::walkiePipBox.isInitialized || !::walkiePipFade.isInitialized) return
+        if (!::walkiePipBox.isInitialized || !::walkiePipSoft.isInitialized) return
+        walkiePipBox.clipToOutline = false
+        walkiePreview.clipToOutline = false
         if (enabled) {
-            walkiePipBox.clipToOutline = false
-            walkiePreview.clipToOutline = false
-            walkiePipBox.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            walkiePipFade.visibility = View.VISIBLE
-            walkiePipFade.bringToFront()
-            walkiePipFade.invalidate()
+            // Keep TextureView laid out for camera Surface, but do not show its hard edges
+            walkiePreview.alpha = 0f
+            walkiePipSoft.visibility = View.VISIBLE
+            walkiePipSoft.bringToFront()
+            startPipSoftLoop()
         } else {
-            walkiePipFade.visibility = View.GONE
-            walkiePipBox.setLayerType(View.LAYER_TYPE_NONE, null)
+            stopPipSoftLoop()
+            walkiePreview.alpha = 1f
+            walkiePipSoft.visibility = View.GONE
+            walkiePipSoft.setImageDrawable(null)
         }
+    }
+
+    private fun startPipSoftLoop() {
+        stopPipSoftLoop()
+        // Few-pixel band: ~10dp, clamped so small PiP still has a clear center
+        val edgePx = (10f * resources.displayMetrics.density).toInt().coerceIn(6, 18)
+        val loop = object : Runnable {
+            override fun run() {
+                if (!isSeeing || !pipLayoutActive || !::walkiePreview.isInitialized) return
+                try {
+                    if (walkiePreview.isAvailable && walkiePreview.width > 2 && walkiePreview.height > 2) {
+                        val raw = walkiePreview.getBitmap(walkiePreview.width, walkiePreview.height)
+                        if (raw != null && !raw.isRecycled) {
+                            val soft = SoftEdgeBitmaps.applyPerimeterFade(raw, edgePx)
+                            if (raw !== soft && !raw.isRecycled) raw.recycle()
+                            val prev = pipSoftLastBmp
+                            pipSoftLastBmp = soft
+                            walkiePipSoft.setImageBitmap(soft)
+                            if (prev != null && prev !== soft && !prev.isRecycled) {
+                                // Delay recycle one frame so ImageView finishes bind
+                                pipSoftHandler.post { if (!prev.isRecycled) prev.recycle() }
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                }
+                pipSoftHandler.postDelayed(this, 66L) // ~15 fps soft PiP
+            }
+        }
+        pipSoftLoop = loop
+        pipSoftHandler.post(loop)
+    }
+
+    private fun stopPipSoftLoop() {
+        pipSoftLoop?.let { pipSoftHandler.removeCallbacks(it) }
+        pipSoftLoop = null
+        val prev = pipSoftLastBmp
+        pipSoftLastBmp = null
+        if (prev != null && !prev.isRecycled) prev.recycle()
     }
 
     private fun pipSizeDp(): Pair<Int, Int> {
@@ -1232,8 +1284,12 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.elevation = 0f
         walkiePreview.translationX = 0f
         walkiePreview.translationY = 0f
-        if (::walkiePipFade.isInitialized) walkiePipFade.visibility = View.GONE
-        walkiePipBox.setLayerType(View.LAYER_TYPE_NONE, null)
+        stopPipSoftLoop()
+        if (::walkiePipSoft.isInitialized) {
+            walkiePipSoft.visibility = View.GONE
+            walkiePipSoft.setImageDrawable(null)
+        }
+        if (::walkiePreview.isInitialized) walkiePreview.alpha = 1f
         applyNaturalPreviewTransform()
     }
 
