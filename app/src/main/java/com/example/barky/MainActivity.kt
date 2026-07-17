@@ -30,7 +30,9 @@ import com.example.barky.walkie.LocationTracker
 import com.example.barky.walkie.WalkiePeer
 import com.example.barky.walkie.WalkieProtocol
 import com.example.barky.walkie.WalkieTalkieService
-import com.example.barky.BuildConfig
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -369,16 +371,8 @@ class MainActivity : AppCompatActivity() {
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
         supportActionBar?.title = getString(R.string.app_name)
-        // Title line shows app name; subtitle = version + build timestamp
-        supportActionBar?.subtitle = try {
-            BuildConfig.VERSION_LABEL
-        } catch (_: Throwable) {
-            try {
-                packageManager.getPackageInfo(packageName, 0).versionName ?: ""
-            } catch (_: Exception) {
-                ""
-            }
-        }
+        // Subtitle under Barky: versionName + last install/update time
+        supportActionBar?.subtitle = appVersionSubtitle()
 
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
@@ -714,6 +708,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun openSettings() {
         startActivity(Intent(this, SettingsActivity::class.java))
+    }
+
+    /** e.g. "5.1-wa-mic-listen-gps · 2026-07-17 14:51" from package version + install time */
+    private fun appVersionSubtitle(): String {
+        return try {
+            val pi = if (Build.VERSION.SDK_INT >= 33) {
+                packageManager.getPackageInfo(
+                    packageName,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+            val ver = pi.versionName ?: "?"
+            val whenMs = pi.lastUpdateTime
+            val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+            "$ver · ${fmt.format(Date(whenMs))}"
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     override fun onStart() {
