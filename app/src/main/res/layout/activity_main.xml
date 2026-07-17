@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- WhatsApp-like shell: video/map stage + multi-action footer -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_layout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/barky_background"
-    android:fitsSystemWindows="true"
+    android:fitsSystemWindows="true">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
     android:orientation="vertical">
 
     <com.google.android.material.appbar.MaterialToolbar
@@ -239,7 +243,7 @@
                 android:textSize="11sp" />
         </LinearLayout>
 
-        <!-- LISTEN + SEE (remote mic / remote cam) -->
+        <!-- LISTEN + SEE -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -277,11 +281,11 @@
                 app:strokeColor="@color/barky_accent" />
         </LinearLayout>
 
-        <!-- Wakeup LEFT; Speaker + Headset HOLD split RIGHT (positions swapped) -->
+        <!-- WAKEUP left · classic round mic HOLD (WA-style drag) right -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="10dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -289,56 +293,99 @@
                 android:id="@+id/walkie_wakeup"
                 style="@style/Widget.MaterialComponents.Button"
                 android:layout_width="0dp"
-                android:layout_height="58dp"
-                android:layout_marginEnd="6dp"
-                android:layout_weight="0.9"
+                android:layout_height="56dp"
+                android:layout_marginEnd="12dp"
+                android:layout_weight="1"
                 android:enabled="false"
                 android:text="@string/walkie_wakeup"
                 android:textAllCaps="false"
                 android:textColor="@color/barky_on_primary"
-                android:textSize="12sp"
+                android:textSize="13sp"
                 android:textStyle="bold"
                 app:backgroundTint="@color/walkie_wakeup"
-                app:cornerRadius="29dp" />
+                app:cornerRadius="28dp" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/walkie_ptt_speaker"
-                style="@style/Widget.MaterialComponents.Button"
-                android:layout_width="0dp"
-                android:layout_height="58dp"
-                android:layout_marginEnd="4dp"
-                android:layout_weight="1.05"
-                android:enabled="false"
-                android:text="@string/walkie_speaker"
-                android:textAllCaps="false"
-                android:textColor="@color/barky_on_primary"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                app:backgroundTint="@color/walkie_ptt"
-                app:cornerRadius="29dp"
-                app:icon="@android:drawable/ic_lock_silent_mode_off"
-                app:iconGravity="textStart"
-                app:iconPadding="4dp"
-                app:iconTint="@color/barky_on_primary" />
+            <FrameLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/walkie_ptt_headset"
-                style="@style/Widget.MaterialComponents.Button"
-                android:layout_width="0dp"
-                android:layout_height="58dp"
-                android:layout_weight="1.05"
-                android:enabled="false"
-                android:text="@string/walkie_headset"
-                android:textAllCaps="false"
-                android:textColor="@color/barky_on_primary"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                app:backgroundTint="@color/walkie_headset"
-                app:cornerRadius="29dp"
-                app:icon="@android:drawable/stat_sys_headset"
-                app:iconGravity="textStart"
-                app:iconPadding="4dp"
-                app:iconTint="@color/barky_on_primary" />
+                <ImageButton
+                    android:id="@+id/walkie_mic"
+                    android:layout_width="72dp"
+                    android:layout_height="72dp"
+                    android:background="@drawable/bg_mic_circle"
+                    android:contentDescription="@string/walkie_mic_desc"
+                    android:elevation="6dp"
+                    android:enabled="false"
+                    android:padding="18dp"
+                    android:scaleType="centerInside"
+                    android:src="@android:drawable/ic_btn_speak_now"
+                    android:tint="@color/barky_on_primary" />
+            </FrameLayout>
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/walkie_mic_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:paddingEnd="8dp"
+            android:paddingTop="4dp"
+            android:text="@string/walkie_mic_hint"
+            android:textColor="@color/barky_on_surface_muted"
+            android:textSize="11sp" />
     </LinearLayout>
+
 </LinearLayout>
+
+    <!-- Blocks the whole app until every required permission is granted -->
+    <FrameLayout
+        android:id="@+id/permission_gate"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#F00B141A"
+        android:clickable="true"
+        android:elevation="24dp"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:padding="28dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="@string/walkie_perm_gate_title"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/permission_gate_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="start"
+                android:lineSpacingExtra="4dp"
+                android:textColor="@color/barky_on_surface_muted"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/permission_gate_btn"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="20dp"
+                android:text="@string/walkie_perm_gate_action"
+                android:textAllCaps="false"
+                app:backgroundTint="@color/barky_secondary"
+                app:cornerRadius="28dp" />
+        </LinearLayout>
+    </FrameLayout>
+</FrameLayout>

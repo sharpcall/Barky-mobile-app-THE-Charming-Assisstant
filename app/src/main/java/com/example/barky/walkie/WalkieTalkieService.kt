@@ -256,6 +256,32 @@ class WalkieTalkieService : Service() {
                 Log.i(TAG, "TEST_WAKEUP via adb")
                 engine?.sendWakeup()
             }
+            ACTION_TEST_LISTEN_START -> {
+                Log.i(TAG, "TEST_LISTEN_START via adb")
+                engine?.startListenRemote()
+            }
+            ACTION_TEST_LISTEN_STOP -> {
+                Log.i(TAG, "TEST_LISTEN_STOP via adb")
+                engine?.stopListenRemote()
+            }
+            ACTION_TEST_SEE_START -> {
+                Log.i(TAG, "TEST_SEE_START via adb")
+                engine?.startSeeRemote()
+            }
+            ACTION_TEST_SEE_STOP -> {
+                Log.i(TAG, "TEST_SEE_STOP via adb")
+                engine?.stopSeeRemote()
+            }
+            ACTION_TEST_GPS_ON -> {
+                Log.i(TAG, "TEST_GPS_ON via adb")
+                BarkyPrefs.setGpsEnabled(this, true)
+                engine?.setGpsEnabled(true)
+            }
+            ACTION_TEST_GPS_OFF -> {
+                Log.i(TAG, "TEST_GPS_OFF via adb")
+                BarkyPrefs.setGpsEnabled(this, false)
+                engine?.setGpsEnabled(false)
+            }
             ACTION_SET_BEST_QUALITY -> {
                 val on = intent.getBooleanExtra(EXTRA_BEST_QUALITY, true)
                 BarkyPrefs.setBestQualityVideo(this, on)
@@ -401,6 +427,12 @@ class WalkieTalkieService : Service() {
         const val ACTION_TEST_TALK_STOP = "com.example.barky.TEST_TALK_STOP"
         const val ACTION_TEST_REPLAY = "com.example.barky.TEST_REPLAY"
         const val ACTION_TEST_WAKEUP = "com.example.barky.TEST_WAKEUP"
+        const val ACTION_TEST_LISTEN_START = "com.example.barky.TEST_LISTEN_START"
+        const val ACTION_TEST_LISTEN_STOP = "com.example.barky.TEST_LISTEN_STOP"
+        const val ACTION_TEST_SEE_START = "com.example.barky.TEST_SEE_START"
+        const val ACTION_TEST_SEE_STOP = "com.example.barky.TEST_SEE_STOP"
+        const val ACTION_TEST_GPS_ON = "com.example.barky.TEST_GPS_ON"
+        const val ACTION_TEST_GPS_OFF = "com.example.barky.TEST_GPS_OFF"
         const val ACTION_SET_BEST_QUALITY = "com.example.barky.SET_BEST_QUALITY"
         const val ACTION_APPLY_NETWORK_MODE = "com.example.barky.APPLY_NETWORK_MODE"
         const val ACTION_CONNECT_INVITE = "com.example.barky.CONNECT_INVITE"

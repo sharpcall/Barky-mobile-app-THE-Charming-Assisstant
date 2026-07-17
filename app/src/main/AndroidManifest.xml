@@ -102,6 +102,12 @@
                 <action android:name="com.example.barky.TEST_TALK_STOP" />
                 <action android:name="com.example.barky.TEST_REPLAY" />
                 <action android:name="com.example.barky.TEST_WAKEUP" />
+                <action android:name="com.example.barky.TEST_LISTEN_START" />
+                <action android:name="com.example.barky.TEST_LISTEN_STOP" />
+                <action android:name="com.example.barky.TEST_SEE_START" />
+                <action android:name="com.example.barky.TEST_SEE_STOP" />
+                <action android:name="com.example.barky.TEST_GPS_ON" />
+                <action android:name="com.example.barky.TEST_GPS_OFF" />
                 <action android:name="com.example.barky.SET_BEST_QUALITY" />
                 <action android:name="com.example.barky.APPLY_NETWORK_MODE" />
                 <action android:name="com.example.barky.CONNECT_INVITE" />

@@ -124,7 +124,12 @@ class WalkieTalkieEngine(
         override fun run() {
             if (!running.get()) return
             if (locationTracker?.isEnabled() == true) {
-                locationTracker?.latest()?.let { sendGpsPoint(it) }
+                val latest = locationTracker?.latest()
+                if (latest != null) {
+                    sendGpsPoint(latest)
+                } else {
+                    Log.w(TAG, "GPS share tick: enabled but no fix yet peers=${getPeers().size}")
+                }
             }
             mainHandler.postDelayed(this, GPS_SHARE_INTERVAL_MS)
         }
@@ -542,6 +547,13 @@ class WalkieTalkieEngine(
     fun startTalking(playbackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER) {
         if (!running.get()) {
             postError("Walkie is not running")
+            return
+        }
+        // Mid-hold mode change (slide left/right on mic) — re-signal privacy mode only
+        if (talking.get()) {
+            pendingTxPlaybackMode = playbackMode
+            currentPeer()?.let { sendTalkStart(it) }
+            Log.i(TAG, "playback mode update while talking → $playbackMode")
             return
         }
         if (flushingRecorded.get()) {
@@ -1379,6 +1391,10 @@ class WalkieTalkieEngine(
         }
         postPeers()
         Log.i(TAG, "HELLO from $fromHost videoPort=$vport udpPort=$fromUdpPort")
+        // Push latest GPS whenever we learn a peer (mutual map paths)
+        if (locationTracker?.isEnabled() == true) {
+            locationTracker?.latest()?.let { sendGpsPoint(it) }
+        }
     }
 
     private fun closeVideoOut() {
@@ -1895,9 +1911,9 @@ class WalkieTalkieEngine(
                         }
                         WalkieProtocol.TYPE_TALK_END -> handleTalkEndFrom(from)
                         WalkieProtocol.TYPE_PING -> sendPongTo(from, fromPort)
-                        WalkieProtocol.TYPE_LISTEN_REQ -> handleListenReq(from)
+                        WalkieProtocol.TYPE_LISTEN_REQ -> handleListenReq(snapshot, from, fromPort)
                         WalkieProtocol.TYPE_LISTEN_STOP -> stopServingListen()
-                        WalkieProtocol.TYPE_SEE_REQ -> handleSeeReq(from)
+                        WalkieProtocol.TYPE_SEE_REQ -> handleSeeReq(snapshot, from, fromPort)
                         WalkieProtocol.TYPE_SEE_STOP -> stopServingSee()
                         WalkieProtocol.TYPE_GPS -> handleGpsPacket(snapshot)
                         WalkieProtocol.TYPE_MONITOR_AUDIO -> handleMonitorAudio(snapshot)
@@ -2600,7 +2616,18 @@ class WalkieTalkieEngine(
     fun getPeerGpsTrail(): List<LocationTracker.GpsPoint> = peerGpsTrail.toList()
 
     private fun sendGpsPoint(pt: LocationTracker.GpsPoint) {
-        val peer = currentPeer() ?: getPeers().firstOrNull() ?: return
+        // Deduplicate peers by host (keep highest known UDP port / latest entry)
+        val byHost = LinkedHashMap<String, WalkiePeer>()
+        for (p in getPeers()) {
+            val prev = byHost[p.host]
+            if (prev == null || p.port > 0) byHost[p.host] = p
+        }
+        currentPeer()?.let { byHost[it.host] = it }
+        val targets = byHost.values.filter { it.port > 0 }
+        if (targets.isEmpty()) {
+            Log.w(TAG, "sendGpsPoint: no peers yet lat=${pt.lat}")
+            return
+        }
         thread(name = "walkie-gps", isDaemon = true) {
             try {
                 val buf = ByteBuffer.allocate(WalkieProtocol.GPS_PAYLOAD_BYTES)
@@ -2610,10 +2637,25 @@ class WalkieTalkieEngine(
                 buf.putDouble(pt.lon)
                 buf.putLong(pt.timeMs)
                 val bytes = buf.array()
-                val packet = DatagramPacket(
-                    bytes, bytes.size, InetAddress.getByName(peer.host), peer.port
+                for (peer in targets) {
+                    try {
+                        val packet = DatagramPacket(
+                            bytes, bytes.size, InetAddress.getByName(peer.host), peer.port
+                        )
+                        // Burst so one dropped packet does not leave peer blind
+                        repeat(3) {
+                            sendUdp(packet)
+                            Thread.sleep(5)
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "sendGpsPoint → ${peer.host}:${peer.port}", t)
+                    }
+                }
+                Log.i(
+                    TAG,
+                    "GPS_TX lat=${"%.5f".format(pt.lat)} lon=${"%.5f".format(pt.lon)} " +
+                        "peers=${targets.joinToString { "${it.host}:${it.port}" }}"
                 )
-                sendUdp(packet)
             } catch (t: Throwable) {
                 Log.w(TAG, "sendGpsPoint", t)
             }
@@ -2636,6 +2678,7 @@ class WalkieTalkieEngine(
                 peerGpsTrail.removeAt(0)
             }
             while (peerGpsTrail.size > 2_000) peerGpsTrail.removeAt(0)
+            Log.i(TAG, "GPS_RX lat=${"%.5f".format(lat)} lon=${"%.5f".format(lon)} trail=${peerGpsTrail.size}")
             mainHandler.post {
                 listener.onGpsUpdated(
                     locationTracker?.trailSnapshot().orEmpty(),
@@ -2655,6 +2698,9 @@ class WalkieTalkieEngine(
     fun isServingListen(): Boolean = servingListen.get()
     fun isServingSee(): Boolean = servingSee.get()
 
+    /** Peer we are currently streaming monitor audio/video to (the requester). */
+    @Volatile private var monitorTarget: WalkiePeer? = null
+
     fun startListenRemote() {
         val peer = currentPeer() ?: getPeers().firstOrNull()
         if (peer == null) {
@@ -2666,11 +2712,13 @@ class WalkieTalkieEngine(
             return
         }
         monitorReceiving.set(true)
+        monitorAudioRxCount = 0
         preparePlaybackAudio(headset = false)
-        sendControl(peer, WalkieProtocol.TYPE_LISTEN_REQ)
+        // Include our UDP port so the peer streams audio back to the right socket
+        sendControlWithPort(peer, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
         mainHandler.post { listener.onListenStateChanged(true, servingListen.get()) }
         postStatus("LISTEN — hearing peer mic…")
-        Log.i(TAG, "LISTEN_REQ → ${peer.host}")
+        Log.i(TAG, "LISTEN_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
     }
 
     fun stopListenRemote() {
@@ -2696,10 +2744,10 @@ class WalkieTalkieEngine(
         monitorReceiving.set(true)
         stopLocalPreviewInternal()
         preparePlaybackAudio(headset = false)
-        sendControl(peer, WalkieProtocol.TYPE_SEE_REQ)
+        sendControlWithPort(peer, WalkieProtocol.TYPE_SEE_REQ, localPort)
         mainHandler.post { listener.onSeeStateChanged(true, servingSee.get()) }
         postStatus("SEE — watching peer…")
-        Log.i(TAG, "SEE_REQ → ${peer.host}")
+        Log.i(TAG, "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
     }
 
     fun stopSeeRemote() {
@@ -2713,27 +2761,63 @@ class WalkieTalkieEngine(
         Log.i(TAG, "SEE_STOP")
     }
 
-    private fun handleListenReq(from: String) {
-        ensurePeerFromHost(from)
-        Log.i(TAG, "LISTEN_REQ from $from — starting mic serve")
-        startServingListen()
+    private fun handleListenReq(data: ByteArray, from: String, fromPort: Int) {
+        val replyPort = parseControlPort(data, fromPort)
+        val peer = resolvePeerForStream(from, replyPort)
+        Log.i(TAG, "LISTEN_REQ from $from replyPort=$replyPort peerPort=${peer.port}")
+        startServingListen(peer)
     }
 
-    private fun handleSeeReq(from: String) {
-        ensurePeerFromHost(from)
-        Log.i(TAG, "SEE_REQ from $from — starting cam+mic serve")
-        startServingSee()
+    private fun handleSeeReq(data: ByteArray, from: String, fromPort: Int) {
+        val replyPort = parseControlPort(data, fromPort)
+        val peer = resolvePeerForStream(from, replyPort)
+        Log.i(TAG, "SEE_REQ from $from replyPort=$replyPort")
+        startServingSee(peer)
     }
 
-    private fun startServingListen() {
-        if (servingListen.getAndSet(true)) return
-        mainHandler.post { listener.onListenStateChanged(requestingListen.get(), true) }
-        val peer = currentPeer() ?: getPeers().firstOrNull() ?: run {
+    private fun parseControlPort(data: ByteArray, fallback: Int): Int {
+        if (data.size >= 3) {
+            val p = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+            if (p in 1..65535) return p
+        }
+        return fallback
+    }
+
+    private fun resolvePeerForStream(fromHost: String, udpPort: Int): WalkiePeer {
+        val existing = peers.values.firstOrNull { it.host == fromHost }
+        val vport = learnedVideoPorts[fromHost] ?: existing?.videoPort ?: 0
+        val peer = WalkiePeer(
+            serviceName = existing?.serviceName ?: "peer-$fromHost",
+            host = fromHost,
+            port = if (udpPort > 0) udpPort else (existing?.port ?: 0),
+            videoPort = vport
+        )
+        if (peer.port > 0) {
+            peers[key(peer)] = peer
+            if (selectedPeerKey == null) selectedPeerKey = key(peer)
+            postPeers()
+        }
+        return peer
+    }
+
+    private fun startServingListen(target: WalkiePeer? = null) {
+        val peer = target ?: currentPeer() ?: getPeers().firstOrNull()
+        if (peer == null || peer.port <= 0) {
+            Log.w(TAG, "startServingListen: no target peer")
             servingListen.set(false)
             return
         }
+        if (servingListen.getAndSet(true)) {
+            // Already serving — retarget
+            monitorTarget = peer
+            Log.i(TAG, "LISTEN serve retarget ${peer.host}:${peer.port}")
+            return
+        }
+        monitorTarget = peer
+        mainHandler.post { listener.onListenStateChanged(requestingListen.get(), true) }
         monitorAudioThread = thread(name = "walkie-serve-listen", isDaemon = true) {
             try {
+                // Prefer voice recognition / mic on Pixel; fall back sources
                 recordMonitorAudio(peer)
             } catch (t: Throwable) {
                 Log.w(TAG, "serve listen", t)
@@ -2743,6 +2827,7 @@ class WalkieTalkieEngine(
             }
         }
         postStatus("Mic open for peer (LISTEN)")
+        Log.i(TAG, "LISTEN serve → ${peer.host}:${peer.port}")
     }
 
     private fun stopServingListen() {
@@ -2752,18 +2837,19 @@ class WalkieTalkieEngine(
         Log.i(TAG, "stopServingListen")
     }
 
-    private fun startServingSee() {
+    private fun startServingSee(target: WalkiePeer? = null) {
         if (servingSee.getAndSet(true)) return
         if (talking.get()) {
             // Prefer active PTT over SEE serve
             servingSee.set(false)
             return
         }
-        mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), true) }
-        val peer = currentPeer() ?: getPeers().firstOrNull() ?: run {
+        val peer = target ?: currentPeer() ?: getPeers().firstOrNull() ?: run {
             servingSee.set(false)
             return
         }
+        monitorTarget = peer
+        mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), true) }
         stopLocalPreviewInternal()
         // Stream mic for SEE (loop watches servingSee — do not steal LISTEN flag)
         if (monitorAudioThread?.isAlive != true) {
@@ -2828,33 +2914,63 @@ class WalkieTalkieEngine(
                 AudioFormat.ENCODING_PCM_16BIT
             )
             val bufferSize = max(minBuf, WalkieProtocol.BYTES_PER_FRAME * 4)
-            recorder = AudioRecord(
+            // Pixel 8 is picky: try VOICE_COMMUNICATION then MIC then DEFAULT
+            val sources = intArrayOf(
                 MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                WalkieProtocol.SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
+                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.DEFAULT
             )
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                Log.w(TAG, "monitor mic not init")
+            for (src in sources) {
+                try {
+                    val r = AudioRecord(
+                        src,
+                        WalkieProtocol.SAMPLE_RATE,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        bufferSize
+                    )
+                    if (r.state == AudioRecord.STATE_INITIALIZED) {
+                        recorder = r
+                        Log.i(TAG, "monitor mic source=$src OK")
+                        break
+                    }
+                    r.release()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "monitor mic source=$src fail", t)
+                }
+            }
+            if (recorder == null) {
+                Log.e(TAG, "monitor mic not init on any source")
+                postError("Mic unavailable for LISTEN/SEE")
                 return
             }
             recorder.startRecording()
             val frame = ByteArray(WalkieProtocol.BYTES_PER_FRAME)
             val packetBuf = ByteArray(1 + WalkieProtocol.BYTES_PER_FRAME)
             packetBuf[0] = WalkieProtocol.TYPE_MONITOR_AUDIO
+            var sent = 0
             while (running.get() && (servingListen.get() || servingSee.get())) {
+                val dest = monitorTarget ?: peer
+                if (dest.port <= 0) {
+                    Thread.sleep(50)
+                    continue
+                }
                 val n = recorder.read(frame, 0, frame.size)
                 if (n <= 0) continue
                 System.arraycopy(frame, 0, packetBuf, 1, n)
                 try {
                     val packet = DatagramPacket(
-                        packetBuf, 1 + n, InetAddress.getByName(peer.host), peer.port
+                        packetBuf, 1 + n, InetAddress.getByName(dest.host), dest.port
                     )
                     sendUdp(packet)
+                    sent++
+                    if (sent == 1 || sent % 50 == 0) {
+                        Log.i(TAG, "MONITOR_AUDIO_TX frames=$sent → ${dest.host}:${dest.port}")
+                    }
                 } catch (_: Exception) {
                 }
             }
+            Log.i(TAG, "monitor audio end sent=$sent")
         } catch (t: Throwable) {
             Log.w(TAG, "recordMonitorAudio", t)
         } finally {
@@ -2869,12 +2985,28 @@ class WalkieTalkieEngine(
         }
     }
 
+    @Volatile private var monitorAudioRxCount = 0
+
     private fun handleMonitorAudio(data: ByteArray) {
         if (data.size < 3) return
-        if (!requestingListen.get() && !requestingSee.get()) return
+        // Accept monitor audio if we requested LISTEN/SEE
+        if (!requestingListen.get() && !requestingSee.get()) {
+            return
+        }
         monitorReceiving.set(true)
         val pcm = data.copyOfRange(1, data.size)
-        if (!replaying.get()) playPcm(pcm)
+        if (!replaying.get()) {
+            playPcm(pcm)
+            monitorAudioRxCount++
+            // Always log first packets so dual-device smoke cannot miss RX proof
+            if (monitorAudioRxCount <= 5 || monitorAudioRxCount % 25 == 0) {
+                Log.i(
+                    TAG,
+                    "MONITOR_AUDIO_RX n=$monitorAudioRxCount bytes=${pcm.size} " +
+                        "listening=${requestingListen.get()} seeing=${requestingSee.get()}"
+                )
+            }
+        }
     }
 
     private fun handleMonitorVideo(data: ByteArray, from: String) {
@@ -2949,16 +3081,29 @@ class WalkieTalkieEngine(
     }
 
     private fun sendControl(peer: WalkiePeer, type: Byte) {
+        sendControlWithPort(peer, type, 0)
+    }
+
+    private fun sendControlWithPort(peer: WalkiePeer, type: Byte, replyUdpPort: Int) {
         thread(name = "walkie-ctrl-$type", isDaemon = true) {
             try {
-                val payload = byteArrayOf(type)
+                val payload = if (replyUdpPort > 0) {
+                    byteArrayOf(
+                        type,
+                        ((replyUdpPort shr 8) and 0xFF).toByte(),
+                        (replyUdpPort and 0xFF).toByte()
+                    )
+                } else {
+                    byteArrayOf(type)
+                }
                 val packet = DatagramPacket(
                     payload, payload.size, InetAddress.getByName(peer.host), peer.port
                 )
-                repeat(3) {
+                repeat(5) {
                     sendUdp(packet)
-                    Thread.sleep(20)
+                    Thread.sleep(25)
                 }
+                Log.i(TAG, "CTRL sent type=$type to ${peer.host}:${peer.port} replyPort=$replyUdpPort")
             } catch (t: Throwable) {
                 Log.w(TAG, "sendControl $type", t)
             }
@@ -3014,6 +3159,6 @@ class WalkieTalkieEngine(
         /** Live RX: idle before treating a gap as end-of-message (was 600 — cut last second). */
         private const val RECEIVE_IDLE_MS = 1_500L
         private const val GAIN = 3.5f
-        private const val GPS_SHARE_INTERVAL_MS = 5_000L
+        private const val GPS_SHARE_INTERVAL_MS = 2_500L
     }
 }

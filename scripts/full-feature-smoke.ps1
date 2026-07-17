@@ -65,6 +65,23 @@ $rxM = (& $adb -s $rx shell getprop ro.product.model).Trim()
 Info "TX=$txM  RX=$rxM"
 
 foreach ($s in $devices) {
+    # Quiet + full permission grant so gate opens and GPS/LISTEN work both ways
+    foreach ($st in 1,2,3,4,5) {
+        & $adb -s $s shell media volume --show --stream $st --set 1 2>$null | Out-Null
+    }
+    foreach ($p in @(
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.READ_CONTACTS",
+        "android.permission.CALL_PHONE",
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.READ_PHONE_NUMBERS"
+    )) {
+        & $adb -s $s shell pm grant $Package $p 2>$null | Out-Null
+    }
     & $adb -s $s logcat -c | Out-Null
     & $adb -s $s shell am force-stop $Package
     & $adb -s $s shell am start -n $Activity | Out-Null
@@ -220,17 +237,82 @@ if (Has-Line $rxLogs "onWakeupReceived" -or Has-Line $rxLogs "WAKEUP" -or Has-Li
     Ok "F RX ring/wakeup signal"
 } else { Bad "F no WAKEUP evidence on RX logs" }
 
-# --- G: Service alive / no fatal ---
-Info "G Stability"
+# --- G: LISTEN both directions (must work on Pixel and Samsung) ---
+Info "G LISTEN RX hears TX mic"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $rx "com.example.barky.TEST_LISTEN_START"
+Start-Sleep -Seconds 4
+$txLogs = Get-Logs $tx
+$rxLogs = Get-Logs $rx
+if (Has-Line $rxLogs "LISTEN_REQ") { Ok "G RX sent LISTEN_REQ" } else { Bad "G RX LISTEN_REQ missing" }
+if (Has-Line $txLogs "LISTEN_REQ from" -or Has-Line $txLogs "LISTEN serve") { Ok "G TX serving LISTEN" } else { Bad "G TX not serving LISTEN" }
+if (Has-Line $txLogs "MONITOR_AUDIO_TX") { Ok "G TX MONITOR_AUDIO_TX" } else { Bad "G TX no MONITOR_AUDIO_TX" }
+if (Has-Line $rxLogs "MONITOR_AUDIO_RX" -or Has-Line $rxLogs "MONITOR_AUDIO") { Ok "G RX got monitor audio" } else { Bad "G RX no monitor audio RX" }
+Adb-Svc $rx "com.example.barky.TEST_LISTEN_STOP"
+Start-Sleep -Seconds 1
+
+Info "G2 LISTEN reverse TX hears RX mic"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $tx "com.example.barky.TEST_LISTEN_START"
+Start-Sleep -Seconds 4
+$txLogs = Get-Logs $tx
+$rxLogs = Get-Logs $rx
+if (Has-Line $txLogs "LISTEN_REQ") { Ok "G2 TX sent LISTEN_REQ" } else { Bad "G2 TX LISTEN_REQ missing" }
+if (Has-Line $rxLogs "LISTEN serve" -or Has-Line $rxLogs "LISTEN_REQ from") { Ok "G2 RX serving LISTEN" } else { Bad "G2 RX not serving LISTEN" }
+if (Has-Line $rxLogs "MONITOR_AUDIO_TX") { Ok "G2 RX MONITOR_AUDIO_TX" } else { Bad "G2 RX no MONITOR_AUDIO_TX" }
+if (Has-Line $txLogs "MONITOR_AUDIO_RX" -or Has-Line $txLogs "MONITOR_AUDIO") { Ok "G2 TX got monitor audio" } else { Bad "G2 TX no monitor audio RX" }
+Adb-Svc $tx "com.example.barky.TEST_LISTEN_STOP"
+Start-Sleep -Seconds 1
+
+# --- H: SEE both directions ---
+Info "H SEE TX requests remote"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $tx "com.example.barky.TEST_SEE_START"
+Start-Sleep -Seconds 4
+$txLogs = Get-Logs $tx
+$rxLogs = Get-Logs $rx
+if (Has-Line $txLogs "SEE_REQ") { Ok "H TX SEE_REQ" } else { Bad "H TX SEE_REQ missing" }
+if (Has-Line $rxLogs "SEE_REQ from" -or Has-Line $rxLogs "serve see" -or Has-Line $rxLogs "Camera+mic open") { Ok "H RX serving SEE" } else { Bad "H RX not serving SEE" }
+Adb-Svc $tx "com.example.barky.TEST_SEE_STOP"
+Start-Sleep -Seconds 1
+
+Info "H2 SEE reverse"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $rx "com.example.barky.TEST_SEE_START"
+Start-Sleep -Seconds 4
+$txLogs = Get-Logs $tx
+$rxLogs = Get-Logs $rx
+if (Has-Line $rxLogs "SEE_REQ") { Ok "H2 RX SEE_REQ" } else { Bad "H2 RX SEE_REQ missing" }
+if (Has-Line $txLogs "SEE_REQ from" -or Has-Line $txLogs "serve see" -or Has-Line $txLogs "Camera+mic open") { Ok "H2 TX serving SEE" } else { Bad "H2 TX not serving SEE" }
+Adb-Svc $rx "com.example.barky.TEST_SEE_STOP"
+Start-Sleep -Seconds 1
+
+# --- I: GPS both directions ---
+Info "I GPS both phones ON mutual share"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $tx "com.example.barky.TEST_GPS_ON"
+Adb-Svc $rx "com.example.barky.TEST_GPS_ON"
+Start-Sleep -Seconds 14
+$txLogs = Get-Logs $tx
+$rxLogs = Get-Logs $rx
+if (Has-Line $txLogs "GPS ON" -or Has-Line $txLogs "GPS_TX") { Ok "I TX GPS on/tx" } else { Bad "I TX GPS not active" }
+if (Has-Line $rxLogs "GPS ON" -or Has-Line $rxLogs "GPS_TX") { Ok "I RX GPS on/tx" } else { Bad "I RX GPS not active" }
+if (Has-Line $txLogs "GPS_RX") { Ok "I TX received peer GPS" } else { Bad "I TX missing GPS_RX peer path" }
+if (Has-Line $rxLogs "GPS_RX") { Ok "I RX received peer GPS" } else { Bad "I RX missing GPS_RX peer path" }
+
+# --- J: Service alive / no fatal ---
+Info "J Stability"
 foreach ($s in $devices) {
     $m = (& $adb -s $s shell getprop ro.product.model).Trim()
     $logs = Get-Logs $s
-    $fatal = $logs | Select-String -Pattern "FATAL EXCEPTION|AndroidRuntime: FATAL" | Select-Object -Last 3
+    $fatal = $logs | Select-String -Pattern "FATAL EXCEPTION|AndroidRuntime: FATAL|Fatal signal" | Select-Object -Last 3
+    $procId = (& $adb -s $s shell pidof $Package).Trim()
     if ($fatal) {
-        Bad "G FATAL on $m"
+        Bad "J FATAL on $m"
         $fatal | ForEach-Object { Write-Output $_.Line }
-    } else { Ok "G no FATAL on $m" }
+    } else { Ok "J no FATAL on $m" }
+    if ($procId) { Ok "J $m alive pid=$procId" } else { Bad "J $m process dead" }
 }
 
-Write-Output "========== RESULTS pass=$pass fail=$fail =========="
+Write-Output ("========== RESULTS pass={0} fail={1} ==========" -f $pass, $fail)
 if ($fail -gt 0) { exit 1 } else { exit 0 }

@@ -51,8 +51,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connectInvite: MaterialButton
     private lateinit var walkieBestQuality: MaterialCheckBox
     private lateinit var walkieGps: MaterialCheckBox
-    private lateinit var walkiePttSpeaker: MaterialButton
-    private lateinit var walkiePttHeadset: MaterialButton
+    private lateinit var walkieMic: ImageButton
+    private lateinit var walkieMicMode: TextView
     private lateinit var walkieWakeup: MaterialButton
     private lateinit var walkieListen: MaterialButton
     private lateinit var walkieSee: MaterialButton
@@ -63,6 +63,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieVideoHint: TextView
     private lateinit var walkieMap: WebView
     private lateinit var walkieLockHint: TextView
+    private lateinit var permissionGate: View
+    private lateinit var permissionGateList: TextView
+    private lateinit var permissionGateBtn: MaterialButton
 
     private var walkieService: WalkieTalkieService? = null
     private var walkieBound = false
@@ -90,21 +93,15 @@ class MainActivity : AppCompatActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        if (hasWalkiePermissions()) {
+    ) {
+        // Keep asking until every required permission is granted — never open fully without them
+        if (hasAllRequiredPermissions()) {
+            permissionGate.visibility = View.GONE
             reallyStartWalkie()
         } else {
-            walkieStatus.text = getString(R.string.walkie_need_mic)
-            Toast.makeText(this, R.string.walkie_need_camera, Toast.LENGTH_LONG).show()
-        }
-        // GPS toggle may have triggered this
-        if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-            result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        ) {
-            if (walkieGps.isChecked) enableGps(true)
-        } else if (walkieGps.isChecked && !hasLocationPermission()) {
-            walkieGps.isChecked = false
-            Toast.makeText(this, R.string.walkie_gps_need_perm, Toast.LENGTH_LONG).show()
+            showPermissionGate()
+            // Re-prompt continuously
+            walkieStatus.text = getString(R.string.walkie_perm_gate_title)
         }
     }
 
@@ -380,8 +377,8 @@ class MainActivity : AppCompatActivity() {
         connectInvite = findViewById(R.id.connect_invite)
         walkieBestQuality = findViewById(R.id.walkie_best_quality)
         walkieGps = findViewById(R.id.walkie_gps)
-        walkiePttSpeaker = findViewById(R.id.walkie_ptt_speaker)
-        walkiePttHeadset = findViewById(R.id.walkie_ptt_headset)
+        walkieMic = findViewById(R.id.walkie_mic)
+        walkieMicMode = findViewById(R.id.walkie_mic_mode)
         walkieWakeup = findViewById(R.id.walkie_wakeup)
         walkieListen = findViewById(R.id.walkie_listen)
         walkieSee = findViewById(R.id.walkie_see)
@@ -392,7 +389,12 @@ class MainActivity : AppCompatActivity() {
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
         walkieMap = findViewById(R.id.walkie_map)
         walkieLockHint = findViewById(R.id.walkie_lock_hint)
+        permissionGate = findViewById(R.id.permission_gate)
+        permissionGateList = findViewById(R.id.permission_gate_list)
+        permissionGateBtn = findViewById(R.id.permission_gate_btn)
         walkieVideo.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
+        permissionGateBtn.setOnClickListener { requestAllRequiredPermissions() }
 
         walkieMap.settings.javaScriptEnabled = true
         walkieMap.settings.domStorageEnabled = true
@@ -472,8 +474,7 @@ class MainActivity : AppCompatActivity() {
             else walkieService?.replayLastMessage()
         }
 
-        bindPtt(walkiePttSpeaker, WalkieProtocol.AUDIO_MODE_SPEAKER)
-        bindPtt(walkiePttHeadset, WalkieProtocol.AUDIO_MODE_HEADSET)
+        bindWhatsAppMic()
 
         walkieWakeup.setOnClickListener {
             if (wakeupRinging || remoteWakeupActive) {
@@ -504,20 +505,38 @@ class MainActivity : AppCompatActivity() {
         }
 
         updateControls()
+        updateMicChrome()
+
+        // Hard gate: do not open walkie until every required permission is granted
+        if (!hasAllRequiredPermissions()) {
+            showPermissionGate()
+        } else {
+            permissionGate.visibility = View.GONE
+        }
     }
 
+    /**
+     * WhatsApp-style single mic:
+     * hold = send video; slide ↑ = lock; slide ← = private; slide → = speaker.
+     * Tap again while locked = send/stop.
+     */
     @SuppressLint("ClickableViewAccessibility")
-    private fun bindPtt(button: MaterialButton, mode: Byte) {
+    private fun bindWhatsAppMic() {
+        var downX = 0f
         var downY = 0f
-        button.setOnTouchListener { v, event ->
+        var modeLive = WalkieProtocol.AUDIO_MODE_SPEAKER
+        walkieMic.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     if (pttLocked && isTalking) {
-                        // Second tap while locked = send/stop
                         pttLocked = false
                         walkieLockHint.visibility = View.GONE
-                        v.isPressed = false
                         walkieService?.stopTalking()
+                        updateMicChrome()
+                        return@setOnTouchListener true
+                    }
+                    if (!hasAllRequiredPermissions()) {
+                        showPermissionGate()
                         return@setOnTouchListener true
                     }
                     if (selectedPeer == null) {
@@ -530,42 +549,88 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (isReplaying) walkieService?.stopReplay()
                     BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
-                    // HOLD → leave map, show camera
                     showMap = false
                     applyStageVisibility()
                     showLocalCameraSurface(true)
                     walkieService?.startLocalPreview()
+                    downX = event.rawX
                     downY = event.rawY
-                    activePttMode = mode
+                    modeLive = WalkieProtocol.AUDIO_MODE_SPEAKER
+                    activePttMode = modeLive
                     pttLocked = false
-                    v.isPressed = true
                     walkieLockHint.visibility = View.VISIBLE
-                    walkieService?.startTalking(mode)
+                    walkieLockHint.text = getString(R.string.walkie_swipe_lock_hint)
+                    walkieService?.startTalking(modeLive)
+                    updateMicChrome()
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (isTalking && !pttLocked && downY - event.rawY > 90f) {
+                    if (!isTalking) return@setOnTouchListener true
+                    val dx = event.rawX - downX
+                    val dy = downY - event.rawY // up is positive
+                    if (!pttLocked && dy > 100f && dy > kotlin.math.abs(dx)) {
                         pttLocked = true
-                        walkieLockHint.text = getString(R.string.walkie_ptt_locked)
-                        Toast.makeText(this, R.string.walkie_ptt_locked, Toast.LENGTH_SHORT).show()
-                        updatePttLabels()
+                        walkieLockHint.text = getString(R.string.walkie_mic_locked)
+                        Toast.makeText(this, R.string.walkie_mic_locked, Toast.LENGTH_SHORT).show()
+                        updateMicChrome()
+                    } else if (!pttLocked) {
+                        // Horizontal drag chooses privacy mode (like WA slide gestures)
+                        val newMode = if (dx < -70f) {
+                            WalkieProtocol.AUDIO_MODE_HEADSET
+                        } else if (dx > 70f) {
+                            WalkieProtocol.AUDIO_MODE_SPEAKER
+                        } else {
+                            modeLive
+                        }
+                        if (newMode != modeLive) {
+                            modeLive = newMode
+                            activePttMode = modeLive
+                            // Mode applies on this transmission's TALK_START already sent —
+                            // store for UI; next HOLD uses it. Also re-signal for RX privacy.
+                            walkieService?.startTalking(modeLive) // no-op if already talking
+                            updateMicChrome()
+                        }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (pttLocked) {
-                        // Keep recording until second tap
-                        v.isPressed = true
                         walkieLockHint.visibility = View.VISIBLE
-                        walkieLockHint.text = getString(R.string.walkie_ptt_locked)
+                        walkieLockHint.text = getString(R.string.walkie_mic_locked)
+                        updateMicChrome()
                         return@setOnTouchListener true
                     }
-                    v.isPressed = false
                     walkieLockHint.visibility = View.GONE
                     walkieService?.stopTalking()
+                    updateMicChrome()
                     true
                 }
                 else -> false
+            }
+        }
+    }
+
+    private fun updateMicChrome() {
+        if (!::walkieMic.isInitialized) return
+        val private = activePttMode == WalkieProtocol.AUDIO_MODE_HEADSET
+        when {
+            pttLocked || isTalking -> {
+                walkieMic.setBackgroundResource(R.drawable.bg_mic_circle_active)
+                walkieMicMode.text = if (pttLocked) {
+                    getString(R.string.walkie_mic_locked)
+                } else if (private) {
+                    getString(R.string.walkie_mic_mode_private)
+                } else {
+                    getString(R.string.walkie_mic_mode_speaker)
+                }
+            }
+            private -> {
+                walkieMic.setBackgroundResource(R.drawable.bg_mic_circle_private)
+                walkieMicMode.text = getString(R.string.walkie_mic_mode_private)
+            }
+            else -> {
+                walkieMic.setBackgroundResource(R.drawable.bg_mic_circle)
+                walkieMicMode.text = getString(R.string.walkie_mic_hint)
             }
         }
     }
@@ -648,7 +713,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!showMap) walkieService?.startLocalPreview()
+        // Continuously re-check: missing any permission → block UI and re-prompt
+        if (!hasAllRequiredPermissions()) {
+            showPermissionGate()
+        } else {
+            if (::permissionGate.isInitialized) permissionGate.visibility = View.GONE
+            if (!showMap) walkieService?.startLocalPreview()
+        }
     }
 
     private fun updateInternetPairUi(inviteCode: String?) {
@@ -678,63 +749,79 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureWalkieRunning() {
-        if (hasWalkiePermissions()) {
+        if (!hasAllRequiredPermissions()) {
+            showPermissionGate()
+            return
+        }
+        permissionGate.visibility = View.GONE
+        reallyStartWalkie()
+    }
+
+    /** Every permission required by any Barky feature (walkie, GPS, future call). */
+    private fun requiredPermissions(): List<String> {
+        val list = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.CAMERA,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.READ_PHONE_STATE
+        )
+        if (Build.VERSION.SDK_INT >= 26) {
+            list += Manifest.permission.READ_PHONE_NUMBERS
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            list += Manifest.permission.POST_NOTIFICATIONS
+        }
+        return list
+    }
+
+    private fun hasAllRequiredPermissions(): Boolean {
+        return requiredPermissions().all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun missingPermissions(): List<String> {
+        return requiredPermissions().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun showPermissionGate() {
+        if (!::permissionGate.isInitialized) return
+        permissionGate.visibility = View.VISIBLE
+        val missing = missingPermissions()
+        val lines = missing.joinToString("\n") { "• " + friendlyPermName(it) }
+        permissionGateList.text = getString(R.string.walkie_perm_gate_body, lines.ifBlank { "• (checking…)" })
+        // Auto-launch system dialog so the user is prompted continuously
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    private fun requestAllRequiredPermissions() {
+        val missing = missingPermissions()
+        if (missing.isEmpty()) {
+            permissionGate.visibility = View.GONE
             reallyStartWalkie()
-            requestFutureCallingPermissionsIfNeeded()
-        } else if (!startRequested) {
-            startRequested = true
-            walkieStatus.text = getString(R.string.walkie_status_connecting)
-            val needed = mutableListOf(
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.CAMERA,
-                Manifest.permission.READ_CONTACTS,
-                Manifest.permission.CALL_PHONE,
-                Manifest.permission.READ_PHONE_STATE
-            )
-            if (Build.VERSION.SDK_INT >= 26) {
-                needed += Manifest.permission.READ_PHONE_NUMBERS
-            }
-            if (Build.VERSION.SDK_INT >= 33) {
-                needed += Manifest.permission.POST_NOTIFICATIONS
-            }
-            permissionLauncher.launch(needed.toTypedArray())
+        } else {
+            permissionLauncher.launch(missing.toTypedArray())
         }
     }
 
-    private fun requestFutureCallingPermissionsIfNeeded() {
-        val extra = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            extra += Manifest.permission.READ_CONTACTS
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            extra += Manifest.permission.CALL_PHONE
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            extra += Manifest.permission.READ_PHONE_STATE
-        }
-        if (Build.VERSION.SDK_INT >= 26 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            extra += Manifest.permission.READ_PHONE_NUMBERS
-        }
-        if (extra.isNotEmpty()) {
-            permissionLauncher.launch(extra.toTypedArray())
-        }
-    }
-
-    private fun hasWalkiePermissions(): Boolean {
-        val mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        val cam = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
-        return mic && cam
+    private fun friendlyPermName(perm: String): String = when (perm) {
+        Manifest.permission.RECORD_AUDIO -> "Microphone (HOLD / LISTEN / SEE)"
+        Manifest.permission.CAMERA -> "Camera (video messages / SEE)"
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION -> "Location (GPS map + peer path)"
+        Manifest.permission.POST_NOTIFICATIONS -> "Notifications (walkie status / WAKEUP)"
+        Manifest.permission.READ_CONTACTS -> "Contacts (calling features)"
+        Manifest.permission.CALL_PHONE,
+        Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.READ_PHONE_NUMBERS -> "Phone (calling features)"
+        else -> perm.substringAfterLast('.')
     }
 
     private fun hasLocationPermission(): Boolean {
@@ -799,52 +886,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateControls() {
-        val ready = walkieRunning && selectedPeer != null
-        walkiePttSpeaker.isEnabled = ready && (isTalking || !channelBusy)
-        walkiePttHeadset.isEnabled = ready && (isTalking || !channelBusy)
+        val ready = walkieRunning && selectedPeer != null && hasAllRequiredPermissions()
+        if (::walkieMic.isInitialized) {
+            walkieMic.isEnabled = ready && (isTalking || !channelBusy)
+        }
         walkieWakeup.isEnabled = ready || wakeupRinging || remoteWakeupActive
         walkieListen.isEnabled = ready
         walkieSee.isEnabled = ready
         updateWakeupButton()
         updateReplayButton()
         updateReplayVisibility()
-        updatePttLabels()
+        updateMicChrome()
         updateListenSeeButtons()
     }
 
     private fun updatePttLabels() {
-        if (!::walkiePttSpeaker.isInitialized) return
-        fun style(btn: MaterialButton, idleColor: Int, mode: Byte) {
-            when {
-                isTalking && activePttMode == mode -> {
-                    btn.text = if (pttLocked) {
-                        getString(R.string.walkie_ptt_locked)
-                    } else if (walkieBestQuality.isChecked) {
-                        getString(R.string.walkie_ptt_recording)
-                    } else {
-                        getString(R.string.walkie_ptt_tx)
-                    }
-                    btn.backgroundTintList =
-                        ContextCompat.getColorStateList(this, R.color.walkie_ptt_active)
-                }
-                channelBusy -> {
-                    btn.text = getString(R.string.walkie_ptt_busy)
-                    btn.backgroundTintList =
-                        ContextCompat.getColorStateList(this, R.color.barky_hint)
-                }
-                else -> {
-                    btn.text = if (mode == WalkieProtocol.AUDIO_MODE_HEADSET) {
-                        getString(R.string.walkie_headset)
-                    } else {
-                        getString(R.string.walkie_speaker)
-                    }
-                    btn.backgroundTintList =
-                        ContextCompat.getColorStateList(this, idleColor)
-                }
-            }
-        }
-        style(walkiePttSpeaker, R.color.walkie_ptt, WalkieProtocol.AUDIO_MODE_SPEAKER)
-        style(walkiePttHeadset, R.color.walkie_headset, WalkieProtocol.AUDIO_MODE_HEADSET)
+        updateMicChrome()
     }
 
     private fun updateListenSeeButtons() {

@@ -97,17 +97,27 @@ class LocationTracker(
             } catch (t: Throwable) {
                 Log.w(TAG, "best provider", t)
             }
-            // Seed with last known from each source
+            // Seed with last known from each source (force emit for peer share)
             for (p in listOf(
                 LocationManager.GPS_PROVIDER,
                 LocationManager.NETWORK_PROVIDER,
                 LocationManager.PASSIVE_PROVIDER
             )) {
                 try {
-                    lm.getLastKnownLocation(p)?.let { ingest(it) }
+                    lm.getLastKnownLocation(p)?.let { ingest(it, force = true) }
                 } catch (_: Exception) {
                 }
             }
+            // One more forced emit after short delay if providers are slow
+            main.postDelayed({
+                if (!enabled) return@postDelayed
+                for (p in lm.getProviders(true).orEmpty()) {
+                    try {
+                        lm.getLastKnownLocation(p)?.let { ingest(it, force = true) }
+                    } catch (_: Exception) {
+                    }
+                }
+            }, 1_500L)
             return true
         } catch (t: Throwable) {
             Log.e(TAG, "start failed", t)
@@ -138,7 +148,7 @@ class LocationTracker(
         return fine || coarse
     }
 
-    private fun ingest(location: Location) {
+    private fun ingest(location: Location, force: Boolean = false) {
         if (!enabled) return
         val pt = GpsPoint(
             lat = location.latitude,
@@ -147,9 +157,9 @@ class LocationTracker(
             accuracyM = location.accuracy,
             provider = location.provider.orEmpty()
         )
-        // Debounce noisy same-spot updates
+        // Debounce noisy same-spot updates (unless forced seed for peer share)
         val last = trail.lastOrNull()
-        if (last != null &&
+        if (!force && last != null &&
             pt.timeMs - last.timeMs < 1_000L &&
             haversineM(last.lat, last.lon, pt.lat, pt.lon) < 2.0
         ) {
@@ -158,7 +168,7 @@ class LocationTracker(
         trail.add(pt)
         prune()
         val now = System.currentTimeMillis()
-        if (now - lastEmit >= EMIT_MIN_MS) {
+        if (force || now - lastEmit >= EMIT_MIN_MS) {
             lastEmit = now
             val snap = trail.toList()
             main.post { onUpdate(snap, pt) }
