@@ -314,7 +314,7 @@ class WalkieTalkieEngine(
 
     /**
      * Ask peer to flip *their* camera (front/back). Works for one-way SEE and dual SEE.
-     * Same code path on every device.
+     * Sends a **single** control (not the 5× reliable burst) so the peer toggles once.
      */
     fun requestPeerCameraFlip(): Boolean {
         val peer = currentPeer() ?: getPeers().firstOrNull()
@@ -324,11 +324,11 @@ class WalkieTalkieEngine(
         }
         thread(name = "walkie-cam-flip-req", isDaemon = true) {
             try {
-                sendControl(peer, WalkieProtocol.TYPE_CAMERA_FLIP)
-                // Retry once for stale ports
-                Thread.sleep(80)
-                val p = currentPeer() ?: peer
-                sendControl(p, WalkieProtocol.TYPE_CAMERA_FLIP)
+                // One-shot: multi-burst would toggle front/back many times and look like no-op
+                sendControlOnce(peer, WalkieProtocol.TYPE_CAMERA_FLIP)
+                // Extra ports (stale peer map) — still once each, peer debounces
+                peers.values.filter { it.host == peer.host && it.port > 0 && it.port != peer.port }
+                    .forEach { sendControlOnce(it, WalkieProtocol.TYPE_CAMERA_FLIP) }
             } catch (t: Throwable) {
                 Log.w(TAG, "requestPeerCameraFlip", t)
             }
@@ -338,8 +338,17 @@ class WalkieTalkieEngine(
         return true
     }
 
+    /** Debounce peer flip storms (UDP duplicates / multi-port fan-out). */
+    @Volatile private var lastCameraFlipAt = 0L
+
     /** Peer asked us to flip our lens (while we serve SEE / have a camera open). */
     private fun handleCameraFlipReq(from: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastCameraFlipAt < 900L) {
+            Log.i(TAG, "CAMERA_FLIP from $from ignored (debounce)")
+            return
+        }
+        lastCameraFlipAt = now
         Log.i(TAG, "CAMERA_FLIP from $from servingSee=${servingSee.get()} talking=${talking.get()}")
         val ok = switchCamera()
         postStatus(if (ok) "Camera flipped (peer request)" else "Camera flip requested")
@@ -3446,6 +3455,20 @@ class WalkieTalkieEngine(
         sendControlWithPort(peer, type, 0)
     }
 
+    /** Single UDP control (for toggle commands like camera flip). */
+    private fun sendControlOnce(peer: WalkiePeer, type: Byte) {
+        try {
+            val payload = byteArrayOf(type)
+            val packet = DatagramPacket(
+                payload, payload.size, InetAddress.getByName(peer.host), peer.port
+            )
+            sendUdp(packet)
+            Log.i(TAG, "CTRL once type=$type to ${peer.host}:${peer.port}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "sendControlOnce $type", t)
+        }
+    }
+
     private fun sendControlWithPort(peer: WalkiePeer, type: Byte, replyUdpPort: Int) {
         thread(name = "walkie-ctrl-$type", isDaemon = true) {
             try {
@@ -3461,11 +3484,13 @@ class WalkieTalkieEngine(
                 val packet = DatagramPacket(
                     payload, payload.size, InetAddress.getByName(peer.host), peer.port
                 )
-                repeat(5) {
+                // Reliable burst for session control — NOT for toggle/flip (use sendControlOnce)
+                val times = if (type == WalkieProtocol.TYPE_CAMERA_FLIP) 1 else 5
+                repeat(times) {
                     sendUdp(packet)
-                    Thread.sleep(25)
+                    if (times > 1) Thread.sleep(25)
                 }
-                Log.i(TAG, "CTRL sent type=$type to ${peer.host}:${peer.port} replyPort=$replyUdpPort")
+                Log.i(TAG, "CTRL sent type=$type to ${peer.host}:${peer.port} replyPort=$replyUdpPort n=$times")
             } catch (t: Throwable) {
                 Log.w(TAG, "sendControl $type", t)
             }

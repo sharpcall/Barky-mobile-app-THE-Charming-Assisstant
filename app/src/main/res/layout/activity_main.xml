@@ -43,17 +43,19 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
 
-            <!-- Local flip: switches THIS phone's camera (top-right of self PiP). -->
+            <!-- Local flip on self-picture (top-right). Clickable above TextureView drag. -->
             <ImageButton
                 android:id="@+id/walkie_pip_flip"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:layout_gravity="top|end"
-                android:layout_margin="6dp"
+                android:layout_margin="8dp"
                 android:background="@drawable/bg_flip_camera_circle"
+                android:clickable="true"
                 android:contentDescription="@string/walkie_flip_self_camera"
-                android:elevation="8dp"
-                android:padding="6dp"
+                android:elevation="12dp"
+                android:focusable="true"
+                android:padding="8dp"
                 android:scaleType="centerInside"
                 android:src="@drawable/ic_flip_camera"
                 android:visibility="gone" />

@@ -1109,12 +1109,12 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Natural PiP size from camera buffer + display orientation (no stretch).
-     * Phone portrait: sensor landscape buffer becomes tall upright (e.g. 720×1280).
+     * Large enough for a clear self-view + flip button; not full-screen.
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        // Width of PiP; height derived from upright aspect so faces are not wide-squashed
-        val baseW = ((if (pipEnlarged) 140f else 100f) * density).toInt()
+        // Comfortable self-view (was ~100dp — too small); enlarge mode ~half stage width
+        val baseW = ((if (pipEnlarged) 200f else 148f) * density).toInt()
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1123,22 +1123,20 @@ class MainActivity : AppCompatActivity() {
                 uprightW = previewBufW.toFloat()
                 uprightH = previewBufH.toFloat()
             } else {
-                // 90° / 270°: swap for upright phone view
                 uprightW = previewBufH.toFloat()
                 uprightH = previewBufW.toFloat()
             }
-            (uprightH / uprightW).coerceIn(1.0f, 2.2f)
+            (uprightH / uprightW).coerceIn(1.15f, 2.0f)
         } else {
-            4f / 3f // default phone portrait selfie
+            4f / 3f
         }
         var pipW = baseW
         var pipH = (baseW * uprightAspectHOverW).toInt()
-        // Cap so PiP never covers most of remote video
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val maxW = (parentW * (if (pipEnlarged) 0.42f else 0.32f)).toInt().coerceAtLeast(baseW)
-        val maxH = (parentH * (if (pipEnlarged) 0.50f else 0.38f)).toInt().coerceAtLeast(baseW)
+        val maxW = (parentW * (if (pipEnlarged) 0.48f else 0.40f)).toInt().coerceAtLeast(baseW)
+        val maxH = (parentH * (if (pipEnlarged) 0.55f else 0.42f)).toInt().coerceAtLeast(baseW)
         if (pipW > maxW) {
             val s = maxW.toFloat() / pipW
             pipW = maxW
@@ -1210,10 +1208,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Drag PiP box around; short tap toggles enlarged size. Position is remembered. */
+    /**
+     * Drag/tap on the **TextureView** only so the PiP flip button still receives clicks.
+     * (A touch listener on the whole [walkiePipBox] was eating flip-button taps.)
+     */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindFloatingPip() {
-        if (pipDragBound || !::walkiePipBox.isInitialized) return
+        if (pipDragBound || !::walkiePipBox.isInitialized || !::walkiePreview.isInitialized) return
         pipDragBound = true
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
         var downX = 0f
@@ -1221,14 +1222,16 @@ class MainActivity : AppCompatActivity() {
         var startLeft = 0
         var startTop = 0
         var moved = false
-        walkiePipBox.setOnTouchListener { v, event ->
+        walkiePreview.isClickable = true
+        walkiePreview.setOnTouchListener { _, event ->
             if (!isSeeing) return@setOnTouchListener false
-            val lp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
+            val box = walkiePipBox
+            val lp = box.layoutParams as? android.widget.FrameLayout.LayoutParams
                 ?: return@setOnTouchListener false
-            val parent = v.parent as? android.view.ViewGroup ?: return@setOnTouchListener false
+            val parent = box.parent as? android.view.ViewGroup ?: return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    box.parent?.requestDisallowInterceptTouchEvent(true)
                     downX = event.rawX
                     downY = event.rawY
                     startLeft = if (pipLastLeft >= 0) pipLastLeft else lp.leftMargin
@@ -1241,8 +1244,8 @@ class MainActivity : AppCompatActivity() {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
                     if (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop) moved = true
-                    val maxL = (parent.width - v.width).coerceAtLeast(0)
-                    val maxT = (parent.height - v.height).coerceAtLeast(0)
+                    val maxL = (parent.width - box.width).coerceAtLeast(0)
+                    val maxT = (parent.height - box.height).coerceAtLeast(0)
                     lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
                     lp.leftMargin = (startLeft + dx).coerceIn(0, maxL)
                     lp.topMargin = (startTop + dy).coerceIn(0, maxT)
@@ -1250,12 +1253,12 @@ class MainActivity : AppCompatActivity() {
                     lp.bottomMargin = 0
                     pipLastLeft = lp.leftMargin
                     pipLastTop = lp.topMargin
-                    v.layoutParams = lp
+                    box.layoutParams = lp
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    v.parent?.requestDisallowInterceptTouchEvent(false)
-                    val cur = v.layoutParams as? android.widget.FrameLayout.LayoutParams
+                    box.parent?.requestDisallowInterceptTouchEvent(false)
+                    val cur = box.layoutParams as? android.widget.FrameLayout.LayoutParams
                     if (cur != null) {
                         pipLastLeft = cur.leftMargin
                         pipLastTop = cur.topMargin
