@@ -29,6 +29,9 @@ local.properties
 *.token
 secrets/
 
+# Per-machine wireless adb endpoints (copy from devices-wifi.example.json)
+scripts/devices-wifi.json
+
 # Proguard
 proguard/
 

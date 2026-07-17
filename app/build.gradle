@@ -18,8 +18,13 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 33
-        versionName "5.1-wa-mic-listen-gps"
+        versionCode 34
+        def vn = "5.1-wa-mic-listen-gps"
+        versionName vn
+        // Shown in toolbar: version + build time (local)
+        def buildTime = new Date().format("yyyy-MM-dd HH:mm")
+        buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
+        buildConfigField "String", "VERSION_LABEL", "\"${vn} · ${buildTime}\""
     }
 
     compileOptions {
@@ -32,9 +37,8 @@ android {
     }
 
     buildFeatures {
-        // Not used; keeps sync/config simpler
         viewBinding false
-        buildConfig false
+        buildConfig true
     }
 
     packaging {

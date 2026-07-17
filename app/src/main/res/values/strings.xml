@@ -5,6 +5,12 @@
     <string name="accessibility_desc">Barky detects length units (cm, in/&quot;, ft/&apos;, m) on screen and shows conversions</string>
 
     <string name="settings">Settings</string>
+    <string name="action_lan_update">Install update via Wi‑Fi</string>
+    <string name="lan_update_searching">Looking for update server on Wi‑Fi…</string>
+    <string name="lan_update_found">Update found — installing…</string>
+    <string name="lan_update_none">No update server found. On the PC run scripts/serve-apk.ps1 (same Wi‑Fi).</string>
+    <string name="lan_update_fail">Update failed: %1$s</string>
+    <string name="lan_update_need_install_perm">Allow Barky to install updates, then try again</string>
     <string name="settings_conversion_title">On-screen unit conversion</string>
     <string name="settings_conversion_help">Grant permissions, then enable Barky in Accessibility settings so conversions can appear over other apps.</string>
     <string name="settings_grant_overlay">1. Grant display over other apps</string>

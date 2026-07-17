@@ -1,0 +1,7 @@
+{
+  "devices": [
+    { "name": "Pixel8", "address": "192.168.4.200:5555" },
+    { "name": "S20", "address": "192.168.4.202:43123" }
+  ],
+  "notes": "Copy to devices-wifi.json (gitignored). Use IP:PORT from each phone Developer options > Wireless debugging. Keep Wireless debugging ON. Pair once with: adb pair IP:PAIRING_PORT"
+}

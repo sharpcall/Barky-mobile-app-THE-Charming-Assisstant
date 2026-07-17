@@ -19,6 +19,8 @@ object BarkyPrefs {
     const val KEY_CONVERSION_ENABLED = "unit_conversion_enabled"
     /** When true: share GPS trail with peer and show map. */
     const val KEY_GPS_ENABLED = "walkie_gps_enabled"
+    /** Optional PC host/IP for LAN APK updates (scripts/serve-apk.ps1). */
+    const val KEY_LAN_UPDATE_HOST = "lan_update_host"
 
     fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)

@@ -6,10 +6,13 @@ param(
     [string]$Activity = "com.example.barky/.MainActivity",
     [string]$Service = "com.example.barky/.walkie.WalkieTalkieService",
     [int]$WaitSeconds = 12,
-    [int]$TalkSeconds = 4
+    [int]$TalkSeconds = 4,
+    # Hard wall-clock limit so agent never hangs with no output
+    [int]$OverallTimeoutSec = 300
 )
 
 $ErrorActionPreference = "Continue"
+$script:smokeStart = Get-Date
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) { $adb = "adb" }
 $fail = 0
@@ -17,7 +20,18 @@ $pass = 0
 
 function Ok([string]$msg) { $script:pass++; Write-Output "PASS: $msg" }
 function Bad([string]$msg) { $script:fail++; Write-Output "FAIL: $msg" }
-function Info([string]$msg) { Write-Output "INFO: $msg" }
+function Info([string]$msg) {
+    $t = [int]((Get-Date) - $script:smokeStart).TotalSeconds
+    Write-Output ("INFO [t={0}s]: {1}" -f $t, $msg)
+}
+function Assert-NotTimedOut {
+    $t = [int]((Get-Date) - $script:smokeStart).TotalSeconds
+    if ($t -ge $OverallTimeoutSec) {
+        Bad ("OVERALL TIMEOUT after {0}s (limit {1}s) — aborting remaining steps" -f $t, $OverallTimeoutSec)
+        Write-Output ("========== RESULTS pass={0} fail={1} timeout=1 ==========" -f $pass, $fail)
+        exit 3
+    }
+}
 
 function Adb-Svc([string]$serial, [string]$action, [string[]]$extra = @()) {
     $a = @("-s", $serial, "shell", "am", "start-foreground-service", "-n", $Service, "-a", $action) + $extra
@@ -50,12 +64,24 @@ function Has-Line([object[]]$logs, [string]$pattern) {
     return ($logs | Where-Object { $_ -match $pattern } | Select-Object -First 1) -ne $null
 }
 
-Write-Output "========== FULL FEATURE SMOKE =========="
+Write-Output ("========== FULL FEATURE SMOKE limit={0}s ==========" -f $OverallTimeoutSec)
+# Optional wireless reconnect before smoke
+$wifiList = Join-Path $PSScriptRoot "devices-wifi.json"
+if (Test-Path $wifiList) {
+    try {
+        $cfg = Get-Content $wifiList -Raw | ConvertFrom-Json
+        foreach ($d in $cfg.devices) {
+            if ($d.address) { & $adb connect $d.address 2>$null | Out-Null }
+        }
+        Start-Sleep -Seconds 2
+    } catch {}
+}
 & $adb devices -l
 $devices = @()
 & $adb devices | ForEach-Object { if ($_ -match "^(\S+)\s+device\s*$") { $devices += $Matches[1] } }
 if ($devices.Count -lt 2) {
-    Bad "Need 2 devices for full dual-phone smoke (found $($devices.Count))"
+    Bad ("Need 2 devices for full dual-phone smoke (found {0}). Keep Wireless debugging ON; use scripts/devices-wifi.json" -f $devices.Count)
+    Write-Output ("========== RESULTS pass={0} fail={1} ==========" -f $pass, $fail)
     exit 2
 }
 $tx = $devices[0]
@@ -237,6 +263,7 @@ if (Has-Line $rxLogs "onWakeupReceived" -or Has-Line $rxLogs "WAKEUP" -or Has-Li
     Ok "F RX ring/wakeup signal"
 } else { Bad "F no WAKEUP evidence on RX logs" }
 
+Assert-NotTimedOut
 # --- G: LISTEN both directions (must work on Pixel and Samsung) ---
 Info "G LISTEN RX hears TX mic"
 foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
@@ -287,6 +314,7 @@ if (Has-Line $txLogs "SEE_REQ from" -or Has-Line $txLogs "serve see" -or Has-Lin
 Adb-Svc $rx "com.example.barky.TEST_SEE_STOP"
 Start-Sleep -Seconds 1
 
+Assert-NotTimedOut
 # --- I: GPS both directions ---
 Info "I GPS both phones ON mutual share"
 foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }

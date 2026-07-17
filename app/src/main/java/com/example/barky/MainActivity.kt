@@ -30,6 +30,7 @@ import com.example.barky.walkie.LocationTracker
 import com.example.barky.walkie.WalkiePeer
 import com.example.barky.walkie.WalkieProtocol
 import com.example.barky.walkie.WalkieTalkieService
+import com.example.barky.BuildConfig
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -368,6 +369,16 @@ class MainActivity : AppCompatActivity() {
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
         supportActionBar?.title = getString(R.string.app_name)
+        // Title line shows app name; subtitle = version + build timestamp
+        supportActionBar?.subtitle = try {
+            BuildConfig.VERSION_LABEL
+        } catch (_: Throwable) {
+            try {
+                packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+        }
 
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
@@ -691,6 +702,10 @@ class MainActivity : AppCompatActivity() {
         return when (item.itemId) {
             R.id.action_settings -> {
                 openSettings()
+                true
+            }
+            R.id.action_lan_update -> {
+                LanApkUpdater(this).checkAndInstallFromLan()
                 true
             }
             else -> super.onOptionsItemSelected(item)
