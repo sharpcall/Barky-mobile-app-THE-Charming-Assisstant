@@ -95,7 +95,11 @@ class WalkieTalkieEngine(
     private var registeredName: String? = null
 
     private val peers = ConcurrentHashMap<String, WalkiePeer>()
+    /** Last HELLO wall-clock per host — used to drop stale ghost peers. */
+    private val peerLastHelloMs = ConcurrentHashMap<String, Long>()
     @Volatile private var selectedPeerKey: String? = null
+    /** Peer we asked to SEE (so peer-flip targets the phone we are watching). */
+    @Volatile private var seeWatchPeer: WalkiePeer? = null
 
     private val running = AtomicBoolean(false)
     private val talking = AtomicBoolean(false)
@@ -317,29 +321,40 @@ class WalkieTalkieEngine(
      * Sends a **single** control (not the 5× reliable burst) so the peer toggles once.
      */
     fun requestPeerCameraFlip(): Boolean {
-        val peer = currentPeer() ?: getPeers().firstOrNull()
-        if (peer == null || peer.port <= 0) {
+        // Prefer the phone we are actively watching (SEE), not a stale selected ghost
+        val primary = seeWatchPeer ?: bestLivePeer() ?: currentPeer() ?: getPeers().firstOrNull()
+        if (primary == null || primary.port <= 0) {
             postError("No peer to flip camera")
             return false
         }
         thread(name = "walkie-cam-flip-req", isDaemon = true) {
             try {
-                // Small reliable burst; peer debounces so it still toggles only once
-                val ports = linkedSetOf(peer.port)
-                peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
-                for (port in ports.filter { it > 0 }) {
-                    val p = peer.copy(port = port)
-                    repeat(3) {
-                        sendControlOnce(p, WalkieProtocol.TYPE_CAMERA_FLIP)
-                        Thread.sleep(30)
+                // Fan-out to all live hosts (ghost IPs pruned) — each debounces to one toggle
+                val targets = linkedMapOf<String, WalkiePeer>()
+                targets[primary.host] = primary
+                bestLivePeer()?.let { targets[it.host] = it }
+                getPeers().forEach { p ->
+                    val age = System.currentTimeMillis() - (peerLastHelloMs[p.host] ?: 0L)
+                    if (age < 12_000L) targets[p.host] = p
+                }
+                for (peer in targets.values) {
+                    val ports = linkedSetOf(peer.port)
+                    peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
+                    for (port in ports.filter { it > 0 }) {
+                        val p = peer.copy(port = port)
+                        repeat(3) {
+                            sendControlOnce(p, WalkieProtocol.TYPE_CAMERA_FLIP)
+                            Thread.sleep(25)
+                        }
                     }
+                    Log.i(TAG, "CAMERA_FLIP_REQ → ${peer.host} ports=$ports")
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "requestPeerCameraFlip", t)
             }
         }
         postStatus("Asked peer to flip camera…")
-        Log.i(TAG, "CAMERA_FLIP_REQ → ${peer.host}:${peer.port}")
+        Log.i(TAG, "CAMERA_FLIP_REQ primary → ${primary.host}:${primary.port}")
         return true
     }
 
@@ -1498,15 +1513,69 @@ class WalkieTalkieEngine(
                 videoPort = vport
             )
         peers[key(peer)] = peer
+        peerLastHelloMs[fromHost] = System.currentTimeMillis()
+        // Prefer freshest peer when nothing selected, or selected host went stale
         if (selectedPeerKey == null || peers.size == 1) {
             selectedPeerKey = key(peer)
+        } else {
+            // If selected key is a different host that is older, promote this HELLO
+            val sel = selectedPeerKey?.let { peers[it] }
+            if (sel != null && sel.host != fromHost) {
+                val selAge = peerLastHelloMs[sel.host] ?: 0L
+                val thisAge = peerLastHelloMs[fromHost] ?: 0L
+                if (thisAge - selAge > 4000L) {
+                    selectedPeerKey = key(peer)
+                    Log.i(TAG, "peer select → $fromHost (fresher HELLO than ${sel.host})")
+                }
+            }
         }
+        pruneStalePeers()
         postPeers()
         Log.i(TAG, "HELLO from $fromHost videoPort=$vport udpPort=$fromUdpPort")
         // Push latest GPS whenever we learn a peer (mutual map paths)
         if (locationTracker?.isEnabled() == true) {
             locationTracker?.latest()?.let { sendGpsPoint(it) }
         }
+    }
+
+    /** Drop peer hosts that have not HELLO'd recently (ghosts break flip/SEE targeting). */
+    private fun pruneStalePeers() {
+        val now = System.currentTimeMillis()
+        val keepHosts = HashSet<String>()
+        seeWatchPeer?.host?.let { keepHosts.add(it) }
+        monitorTarget?.host?.let { keepHosts.add(it) }
+        selectedPeerKey?.let { peers[it]?.host?.let { h -> keepHosts.add(h) } }
+        val staleHosts = peerLastHelloMs.entries
+            .filter { (host, t) -> now - t > 12_000L && host !in keepHosts }
+            .map { it.key }
+            .toSet()
+        if (staleHosts.isEmpty()) return
+        val removeKeys = peers.keys.filter { k ->
+            val host = peers[k]?.host
+            host != null && host in staleHosts
+        }
+        removeKeys.forEach { peers.remove(it) }
+        staleHosts.forEach { peerLastHelloMs.remove(it) }
+        if (removeKeys.isNotEmpty()) {
+            Log.i(TAG, "pruned stale peers hosts=$staleHosts")
+            if (selectedPeerKey != null && peers[selectedPeerKey] == null) {
+                selectedPeerKey = peers.keys.firstOrNull()
+            }
+        }
+    }
+
+    /** Prefer peer with newest HELLO (live device over ghost IP). */
+    private fun bestLivePeer(): WalkiePeer? {
+        pruneStalePeers()
+        val live = peers.values.filter { p ->
+            val t = peerLastHelloMs[p.host] ?: 0L
+            System.currentTimeMillis() - t < 12_000L
+        }
+        if (live.isEmpty()) return currentPeer() ?: getPeers().firstOrNull()
+        // One entry per host — newest HELLO, highest port as tie-break
+        return live.groupBy { it.host }.values.mapNotNull { group ->
+            group.maxWithOrNull(compareBy<WalkiePeer> { peerLastHelloMs[it.host] ?: 0L }.thenBy { it.port })
+        }.maxByOrNull { peerLastHelloMs[it.host] ?: 0L }
     }
 
     private fun closeVideoOut() {
@@ -1670,6 +1739,12 @@ class WalkieTalkieEngine(
                     frames++
                     videoRxOk++
                     monitorVideoRxCount++
+                    // Lock flip target to the host actually sending us video
+                    if (monitorVideoRxCount == 1 || seeWatchPeer?.host != from) {
+                        val live = peers.values.firstOrNull { it.host == from }
+                            ?: WalkiePeer("see-$from", from, 0, learnedVideoPorts[from] ?: 0)
+                        seeWatchPeer = live
+                    }
                     if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
                         Log.i(TAG, "SEE_VIDEO_TCP_RX n=$monitorVideoRxCount bytes=${jpeg.size} from=$from")
                     }
@@ -2996,7 +3071,7 @@ class WalkieTalkieEngine(
     }
 
     fun startSeeRemote() {
-        var peer = currentPeer() ?: getPeers().firstOrNull()
+        var peer = bestLivePeer() ?: currentPeer() ?: getPeers().firstOrNull()
         if (peer == null) {
             postError("No peer for SEE")
             return
@@ -3007,6 +3082,7 @@ class WalkieTalkieEngine(
             stopSeeRemote()
             return
         }
+        seeWatchPeer = peer
         // SEE = video only. Audio is independent (LISTEN button). Same code path on every phone.
         monitorVideoRxCount = 0
         // Keep local camera for PiP (WhatsApp-style)
@@ -3067,7 +3143,8 @@ class WalkieTalkieEngine(
             mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
             return
         }
-        val peer = currentPeer() ?: getPeers().firstOrNull()
+        val peer = seeWatchPeer ?: currentPeer() ?: getPeers().firstOrNull()
+        seeWatchPeer = null
         peer?.let { sendControl(it, WalkieProtocol.TYPE_SEE_STOP) }
         // LISTEN is independent — leave requestingListen / audio alone
         if (!requestingListen.get()) monitorReceiving.set(false)
