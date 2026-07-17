@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- WhatsApp-like chat shell: dark video stage + compact bottom actions -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_layout"
@@ -15,123 +16,134 @@
         android:background="@color/barky_primary"
         android:elevation="4dp"
         app:title="@string/app_name"
-        app:titleTextColor="@color/barky_on_primary" />
+        app:titleTextColor="@color/barky_on_primary"
+        app:subtitleTextColor="#B3FFFFFF" />
 
-    <!-- Almost full-screen video -->
-    <com.google.android.material.card.MaterialCardView
+    <!-- Full chat stage -->
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginHorizontal="8dp"
-        android:layout_marginTop="8dp"
         android:layout_weight="1"
-        app:cardBackgroundColor="#111111"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="2dp">
+        android:background="#0B141A">
 
-        <FrameLayout
+        <TextureView
+            android:id="@+id/walkie_preview"
             android:layout_width="match_parent"
-            android:layout_height="match_parent">
+            android:layout_height="match_parent" />
 
-            <!-- Hardware camera preview (local TX / idle) — no JPEG flicker -->
-            <TextureView
-                android:id="@+id/walkie_preview"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent" />
+        <ImageView
+            android:id="@+id/walkie_video"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/walkie_video_desc"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
 
-            <!-- Remote / replay frames (MJPEG) -->
-            <ImageView
-                android:id="@+id/walkie_video"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@string/walkie_video_desc"
-                android:scaleType="centerCrop"
-                android:src="@color/barky_primary_dark"
-                android:visibility="gone" />
+        <TextView
+            android:id="@+id/walkie_video_hint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="@drawable/bg_status_chip"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
+            android:text="@string/walkie_video_placeholder"
+            android:textColor="@color/barky_on_surface_muted"
+            android:textSize="14sp" />
+
+        <!-- Floating peer/status chip top-left -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_margin="12dp"
+            android:background="@drawable/bg_status_chip"
+            android:orientation="vertical"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="8dp">
 
             <TextView
-                android:id="@+id/walkie_video_hint"
+                android:id="@+id/walkie_status"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:padding="12dp"
-                android:text="@string/walkie_video_placeholder"
-                android:textColor="#CCFFFFFF"
-                android:textSize="14sp" />
+                android:ellipsize="end"
+                android:maxWidth="220dp"
+                android:maxLines="1"
+                android:text="@string/walkie_status_connecting"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="13sp"
+                android:textStyle="bold" />
 
-            <ImageButton
-                android:id="@+id/walkie_flip_camera"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_gravity="top|end"
-                android:layout_margin="10dp"
-                android:background="@drawable/bg_flip_camera_circle"
-                android:contentDescription="@string/walkie_flip_camera"
-                android:padding="10dp"
-                android:scaleType="centerInside"
-                android:src="@drawable/ic_flip_camera" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/walkie_replay"
-                style="@style/Widget.MaterialComponents.Button"
+            <TextView
+                android:id="@+id/walkie_peers"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:enabled="false"
-                android:minWidth="148dp"
-                android:minHeight="52dp"
-                android:text="@string/walkie_replay"
-                android:textAllCaps="false"
-                android:textColor="@color/barky_on_primary"
-                app:backgroundTint="#CC2F5D50"
-                app:cornerRadius="26dp" />
-        </FrameLayout>
-    </com.google.android.material.card.MaterialCardView>
+                android:ellipsize="end"
+                android:maxWidth="220dp"
+                android:maxLines="1"
+                android:text="@string/walkie_peers_searching"
+                android:textColor="@color/barky_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
 
-    <!-- Compact status strip -->
+        <ImageButton
+            android:id="@+id/walkie_flip_camera"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
+            android:background="@drawable/bg_flip_camera_circle"
+            android:contentDescription="@string/walkie_flip_camera"
+            android:padding="10dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_flip_camera" />
+
+        <!-- Center replay like a media control over the bubble -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/walkie_replay"
+            style="@style/Widget.MaterialComponents.Button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:enabled="false"
+            android:minWidth="132dp"
+            android:minHeight="48dp"
+            android:text="@string/walkie_replay"
+            android:textAllCaps="false"
+            android:textColor="@color/barky_on_primary"
+            app:backgroundTint="#CC075E54"
+            app:cornerRadius="24dp"
+            app:icon="@android:drawable/ic_media_play"
+            app:iconGravity="textStart"
+            app:iconTint="@color/barky_on_primary" />
+    </FrameLayout>
+
+    <!-- Composer-style footer -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:background="@color/barky_surface"
+        android:elevation="8dp"
         android:orientation="vertical"
-        android:paddingHorizontal="12dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="4dp">
-
-        <TextView
-            android:id="@+id/walkie_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="@string/walkie_status_connecting"
-            android:textColor="@color/barky_on_surface"
-            android:textSize="13sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/walkie_peers"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="@string/walkie_peers_searching"
-            android:textColor="@color/barky_on_surface_muted"
-            android:textSize="12sp" />
+        android:paddingHorizontal="10dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="10dp">
 
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/internet_pair_card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
+            android:layout_marginBottom="6dp"
             android:visibility="gone"
-            app:cardBackgroundColor="@color/barky_surface"
-            app:cardCornerRadius="10dp"
-            app:cardElevation="1dp">
+            app:cardBackgroundColor="@color/barky_surface_elevated"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="8dp">
+                android:padding="10dp">
 
                 <TextView
                     android:layout_width="match_parent"
@@ -147,7 +159,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:text="@string/walkie_my_code_waiting"
-                    android:textColor="@color/barky_on_surface"
+                    android:textColor="@color/barky_on_surface_muted"
                     android:textIsSelectable="true"
                     android:textSize="11sp" />
 
@@ -156,7 +168,9 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:hint="@string/walkie_peer_code_hint"
-                    app:boxBackgroundMode="outline">
+                    app:boxBackgroundMode="outline"
+                    app:boxStrokeColor="@color/barky_primary_light"
+                    app:hintTextColor="@color/barky_hint">
 
                     <com.google.android.material.textfield.TextInputEditText
                         android:id="@+id/peer_invite_edit"
@@ -184,44 +198,49 @@
             android:id="@+id/walkie_best_quality"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:buttonTint="@color/barky_secondary"
             android:minHeight="36dp"
             android:text="@string/walkie_best_quality"
-            android:textColor="@color/barky_on_surface"
-            android:textSize="13sp" />
-    </LinearLayout>
+            android:textColor="@color/barky_on_surface_muted"
+            android:textSize="12sp" />
 
-    <!-- Main actions side by side at bottom -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingHorizontal="10dp"
-        android:paddingBottom="12dp"
-        android:paddingTop="2dp">
+        <!-- Side-by-side round actions like WA mic + call -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/walkie_ptt"
-            style="@style/Widget.Barky.Button"
-            android:layout_width="0dp"
-            android:layout_height="64dp"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:text="@string/walkie_ptt"
-            android:textSize="14sp"
-            app:backgroundTint="@color/walkie_ptt" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_ptt"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="58dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1.35"
+                android:enabled="false"
+                android:text="@string/walkie_ptt"
+                android:textAllCaps="false"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/walkie_ptt"
+                app:cornerRadius="29dp" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/walkie_wakeup"
-            style="@style/Widget.Barky.Button"
-            android:layout_width="0dp"
-            android:layout_height="64dp"
-            android:layout_marginStart="6dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:text="@string/walkie_wakeup"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            app:backgroundTint="@color/walkie_wakeup" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_wakeup"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="58dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:text="@string/walkie_wakeup"
+                android:textAllCaps="false"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/walkie_wakeup"
+                app:cornerRadius="29dp" />
+        </LinearLayout>
     </LinearLayout>
 </LinearLayout>

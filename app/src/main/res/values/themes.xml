@@ -10,7 +10,7 @@
         <item name="colorSurface">@color/barky_surface</item>
         <item name="colorOnSurface">@color/barky_on_surface</item>
         <item name="android:statusBarColor">@color/barky_primary_dark</item>
-        <item name="android:navigationBarColor">@color/barky_background</item>
+        <item name="android:navigationBarColor">@color/barky_surface</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowBackground">@color/barky_background</item>
         <item name="materialButtonStyle">@style/Widget.Barky.Button</item>

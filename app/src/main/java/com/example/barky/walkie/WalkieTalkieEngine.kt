@@ -87,6 +87,8 @@ class WalkieTalkieEngine(
     private val replaying = AtomicBoolean(false)
     /** Remote peer is transmitting — local PTT must stay locked. */
     private val channelBusy = AtomicBoolean(false)
+    /** Message that arrived while Replay was active — play when Replay ends. */
+    @Volatile private var pendingAfterReplay: WalkieMessage? = null
     /** Current HOLD is BEST-quality local record (send after release). */
     private val bestQualitySession = AtomicBoolean(false)
     /** True while bulk-uploading a recorded BEST clip. */
@@ -972,11 +974,14 @@ class WalkieTalkieEngine(
         if (msg.frames.isEmpty()) {
             videoDebug("Replay WARNING: last message has audio but 0 video frames stored")
         }
+        // Snapshot now so an incoming message can safely overwrite lastMessage during replay
+        val audioSnap = msg.audioPcm.copyOf()
+        val framesSnap = msg.frames.map { WalkieVideoFrame(it.timeOffsetMs, it.jpeg.copyOf()) }
         thread(name = "walkie-replay", isDaemon = true) {
             try {
                 playSyncedClip(
-                    audio = msg.audioPcm.copyOf(),
-                    frames = msg.frames.map { WalkieVideoFrame(it.timeOffsetMs, it.jpeg.copyOf()) },
+                    audio = audioSnap,
+                    frames = framesSnap,
                     active = { replaying.get() },
                     label = "Replay"
                 )
@@ -990,7 +995,8 @@ class WalkieTalkieEngine(
                     listener.onStatus("Ready")
                 }
                 Log.i(TAG, "Replay finished — UI should show Replay not Stop")
-                maybeResumeLocalPreview()
+                // If a new video arrived mid-replay, play it next (no crash / no drop)
+                playPendingAfterReplayIfAny()
             }
         }
     }
@@ -1003,7 +1009,50 @@ class WalkieTalkieEngine(
         }
         mainHandler.post { listener.onReplayStateChanged(false) }
         postStatus("Replay stopped")
-        maybeResumeLocalPreview()
+        playPendingAfterReplayIfAny()
+    }
+
+    private fun playPendingAfterReplayIfAny() {
+        val next = pendingAfterReplay
+        pendingAfterReplay = null
+        if (next == null || !next.hasContent) {
+            maybeResumeLocalPreview()
+            return
+        }
+        if (talking.get() || flushingRecorded.get()) {
+            maybeResumeLocalPreview()
+            return
+        }
+        Log.i(TAG, "Auto-playing queued message after replay frames=${next.frames.size}")
+        videoDebug("Playing next video that arrived during Replay…")
+        if (!replaying.compareAndSet(false, true)) {
+            maybeResumeLocalPreview()
+            return
+        }
+        stopLocalPreviewInternal()
+        mainHandler.post { listener.onReplayStateChanged(true) }
+        postStatus("Playing next message…")
+        val audioSnap = next.audioPcm.copyOf()
+        val framesSnap = next.frames.map { WalkieVideoFrame(it.timeOffsetMs, it.jpeg.copyOf()) }
+        thread(name = "walkie-replay-queued", isDaemon = true) {
+            try {
+                playSyncedClip(
+                    audio = audioSnap,
+                    frames = framesSnap,
+                    active = { replaying.get() },
+                    label = "QueuedReplay"
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "queued replay failed", t)
+            } finally {
+                replaying.set(false)
+                mainHandler.post {
+                    listener.onReplayStateChanged(false)
+                    listener.onStatus("Ready")
+                }
+                playPendingAfterReplayIfAny()
+            }
+        }
     }
 
     /**
@@ -1433,7 +1482,9 @@ class WalkieTalkieEngine(
                     if (frames == 1 || frames % 15 == 0) {
                         videoDebug("RX OK frames=$frames lastJpeg=${jpeg.size}B via=TCP from=$from")
                     }
-                    decodeAndEmit(jpeg, live = true)
+                    if (!replaying.get()) {
+                        decodeAndEmit(jpeg, live = true)
+                    }
                 } else {
                     lastVideoError = "RX TCP payload not JPEG (${jpeg.size}B)"
                     videoDebug(lastVideoError)
@@ -1518,25 +1569,35 @@ class WalkieTalkieEngine(
                 "BEST RX single-file ready frames=${normalized.size} " +
                     "videoMs=${metrics.videoMs} audioMs=${metrics.audioMs}"
             )
+            // If replaying, message is already stored + queued in finalizeIncoming — do not interrupt
+            if (replaying.get()) {
+                Log.i(TAG, "BEST RX stored while replaying — will play after Replay ends")
+                videoDebug("New video queued — finishes after current Replay")
+                return
+            }
             // Play as one synced clip after full download (not partial/live A/V race)
-            if (!replaying.get() && !talking.get()) {
+            if (!talking.get()) {
                 thread(name = "walkie-best-rx-play", isDaemon = true) {
                     val playing = AtomicBoolean(true)
                     try {
-                        // Surface as temporary "replay" so Stop works if we add it later
                         mainHandler.post { listener.onReceivingChanged(true) }
                         playSyncedClip(
                             audio = audio.copyOf(),
                             frames = normalized.map { WalkieVideoFrame(it.timeOffsetMs, it.jpeg.copyOf()) },
-                            active = { playing.get() && running.get() && !talking.get() },
+                            active = {
+                                playing.get() && running.get() && !talking.get() && !replaying.get()
+                            },
                             label = "BEST_RX"
                         )
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "BEST_RX play failed", t)
                     } finally {
                         playing.set(false)
                         mainHandler.post {
                             listener.onReceivingChanged(false)
                             listener.onStatus("Ready")
                         }
+                        maybeResumeLocalPreview()
                     }
                 }
             }
@@ -1782,11 +1843,19 @@ class WalkieTalkieEngine(
                     setChannelBusy(true, "receiving from $from")
                 }
                 preparePlaybackAudio()
-                mainHandler.post { listener.onReceivingChanged(true) }
-                postStatus("Receiving message… (expecting video)")
+                if (replaying.get()) {
+                    // Buffer only — do not yank UI off Replay (that caused crashes)
+                    Log.i(TAG, "Incoming while replaying — buffering, play after Replay")
+                    videoDebug("Receiving during Replay — will play next when Replay ends")
+                    postStatus("Receiving new video (plays after Replay)…")
+                } else {
+                    mainHandler.post { listener.onReceivingChanged(true) }
+                    postStatus("Receiving message… (expecting video)")
+                }
                 videoDebug(
                     "RX: audio/control from $from — waiting for video " +
-                        "(tcpInOpen=$tcpInOpen learnedVport=${learnedVideoPorts[from]})"
+                        "(tcpInOpen=$tcpInOpen learnedVport=${learnedVideoPorts[from]} " +
+                        "replaying=${replaying.get()})"
                 )
                 // If we get audio but no video, surface why
                 val check = Runnable {
@@ -1899,7 +1968,10 @@ class WalkieTalkieEngine(
             if (videoRxOk == 1 || videoRxOk % 15 == 0) {
                 videoDebug("RX OK frames=$videoRxOk lastJpeg=${jpeg.size}B via=UDP from=$from")
             }
-            decodeAndEmit(jpeg, live = true)
+            // Never paint live RX frames over an active Replay (crash / flicker)
+            if (!replaying.get()) {
+                decodeAndEmit(jpeg, live = true)
+            }
         }
     }
 
@@ -1949,10 +2021,17 @@ class WalkieTalkieEngine(
         val dur = max(metrics.videoMs, metrics.audioMs)
         val msg = WalkieMessage(audio, frames, dur, from)
         storeLastMessage(msg)
+        if (replaying.get()) {
+            pendingAfterReplay = msg
+            Log.i(TAG, "Queued incoming clip while replaying frames=${frames.size}")
+            videoDebug("New video saved — will play right after Replay")
+            postStatus("New video queued (after Replay)…")
+        }
         Log.i(
             TAG,
             "CLIP_RX mode=$mode frames=${frames.size} videoMs=${metrics.videoMs} " +
-                "audioMs=${metrics.audioMs} audioBytes=${audio.size} from=$from"
+                "audioMs=${metrics.audioMs} audioBytes=${audio.size} from=$from " +
+                "queued=${replaying.get()}"
         )
         // Seal so late frames / duplicate TALK_END cannot replace this clip with junk
         if (msg.frames.isNotEmpty() || msg.audioPcm.isNotEmpty()) {
@@ -2026,11 +2105,18 @@ class WalkieTalkieEngine(
                 videoDebug("RX done: $videoRxOk video frames")
             }
             setChannelBusy(false, "receive finished")
-            mainHandler.post {
-                listener.onReceivingChanged(false)
-                listener.onStatus("Ready")
+            // If still replaying, don't reset UI to "Ready"/preview yet
+            if (!replaying.get()) {
+                mainHandler.post {
+                    listener.onReceivingChanged(false)
+                    listener.onStatus("Ready")
+                }
+                maybeResumeLocalPreview()
+            } else {
+                mainHandler.post {
+                    listener.onReceivingChanged(false)
+                }
             }
-            maybeResumeLocalPreview()
         }
     }
 
@@ -2162,6 +2248,8 @@ class WalkieTalkieEngine(
 
     private fun decodeAndEmit(jpeg: ByteArray, live: Boolean, localPreview: Boolean = false) {
         try {
+            // Never interrupt Replay UI with live/remote frames (crash + flicker source)
+            if (live && replaying.get()) return
             if (live) {
                 val now = android.os.SystemClock.elapsedRealtime()
                 // Fewer UI paints = less flicker (encode still full rate for send/store)
