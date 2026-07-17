@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body, #map { margin:0; padding:0; height:100%; width:100%; background:#0B141A; }
+    .leaflet-control-attribution { font-size:9px !important; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+  var map = L.map('map', { zoomControl: true, attributionControl: true }).setView([0,0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+  var pathLayer = null;
+  var meMarker = null;
+  var peerMarker = null;
+  var peerPathLayer = null;
+
+  function setTrail(points, peerPoints) {
+    try {
+      if (pathLayer) { map.removeLayer(pathLayer); pathLayer = null; }
+      if (peerPathLayer) { map.removeLayer(peerPathLayer); peerPathLayer = null; }
+      if (meMarker) { map.removeLayer(meMarker); meMarker = null; }
+      if (peerMarker) { map.removeLayer(peerMarker); peerMarker = null; }
+      var bounds = [];
+      if (points && points.length) {
+        var latlngs = points.map(function(p){ return [p.lat, p.lon]; });
+        pathLayer = L.polyline(latlngs, { color: '#25D366', weight: 4, opacity: 0.9 }).addTo(map);
+        var last = points[points.length-1];
+        meMarker = L.circleMarker([last.lat, last.lon], {
+          radius: 8, color: '#075E54', fillColor: '#25D366', fillOpacity: 1, weight: 2
+        }).addTo(map).bindTooltip('You');
+        latlngs.forEach(function(ll){ bounds.push(ll); });
+      }
+      if (peerPoints && peerPoints.length) {
+        var pl = peerPoints.map(function(p){ return [p.lat, p.lon]; });
+        peerPathLayer = L.polyline(pl, { color: '#53BDEB', weight: 4, opacity: 0.85 }).addTo(map);
+        var plast = peerPoints[peerPoints.length-1];
+        peerMarker = L.circleMarker([plast.lat, plast.lon], {
+          radius: 8, color: '#0B6E99', fillColor: '#53BDEB', fillOpacity: 1, weight: 2
+        }).addTo(map).bindTooltip('Peer');
+        pl.forEach(function(ll){ bounds.push(ll); });
+      }
+      if (bounds.length === 1) {
+        map.setView(bounds[0], 16);
+      } else if (bounds.length > 1) {
+        map.fitBounds(bounds, { padding: [28, 28], maxZoom: 17 });
+      }
+    } catch (e) { console.log(e); }
+  }
+  window.setTrail = setTrail;
+</script>
+</body>
+</html>

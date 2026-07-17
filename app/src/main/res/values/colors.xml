@@ -19,8 +19,11 @@
 
     <color name="walkie_ptt">#25D366</color>
     <color name="walkie_ptt_active">#F15C6D</color>
+    <color name="walkie_headset">#128C7E</color>
     <color name="walkie_wakeup">#53BDEB</color>
     <color name="walkie_rx">#53BDEB</color>
+    <color name="walkie_listen_active">#F15C6D</color>
+    <color name="walkie_see_active">#F15C6D</color>
 
     <color name="ic_launcher_background">#075E54</color>
 </resources>

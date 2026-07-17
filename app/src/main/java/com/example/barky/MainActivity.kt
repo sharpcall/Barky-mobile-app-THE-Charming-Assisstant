@@ -1,39 +1,46 @@
 package com.example.barky
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.SurfaceTexture
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
+import android.view.TextureView
 import android.view.View
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.example.barky.walkie.LocationTracker
 import com.example.barky.walkie.WalkiePeer
+import com.example.barky.walkie.WalkieProtocol
 import com.example.barky.walkie.WalkieTalkieService
 import com.google.android.material.appbar.MaterialToolbar
-import android.graphics.SurfaceTexture
-import android.view.TextureView
-import android.widget.ImageButton
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.textfield.TextInputEditText
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
- * Main screen is video walkie only. Overlay/delay live under Settings (toolbar gear).
- * Half-duplex: while one phone transmits, the other cannot send.
+ * Main screen: video walkie with speaker/private hold, LISTEN/SEE, GPS map.
+ * Half-duplex for HOLD messages; LISTEN/SEE can run both ways.
  */
 class MainActivity : AppCompatActivity() {
     private lateinit var walkieStatus: TextView
@@ -43,13 +50,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var peerInviteEdit: TextInputEditText
     private lateinit var connectInvite: MaterialButton
     private lateinit var walkieBestQuality: MaterialCheckBox
-    private lateinit var walkiePtt: MaterialButton
+    private lateinit var walkieGps: MaterialCheckBox
+    private lateinit var walkiePttSpeaker: MaterialButton
+    private lateinit var walkiePttHeadset: MaterialButton
     private lateinit var walkieWakeup: MaterialButton
+    private lateinit var walkieListen: MaterialButton
+    private lateinit var walkieSee: MaterialButton
     private lateinit var walkieReplay: MaterialButton
     private lateinit var walkieFlipCamera: ImageButton
     private lateinit var walkiePreview: TextureView
     private lateinit var walkieVideo: ImageView
     private lateinit var walkieVideoHint: TextView
+    private lateinit var walkieMap: WebView
+    private lateinit var walkieLockHint: TextView
 
     private var walkieService: WalkieTalkieService? = null
     private var walkieBound = false
@@ -65,15 +78,33 @@ class MainActivity : AppCompatActivity() {
     private var hasLastMessage = false
     private var hasStickyFrame = false
     private var startRequested = false
+    private var gpsEnabled = false
+    private var showMap = false
+    private var mapReady = false
+    private var isListening = false
+    private var isSeeing = false
+    private var pttLocked = false
+    private var activePttMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER
+    private var myTrail: List<LocationTracker.GpsPoint> = emptyList()
+    private var peerTrail: List<LocationTracker.GpsPoint> = emptyList()
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    ) { result ->
         if (hasWalkiePermissions()) {
             reallyStartWalkie()
         } else {
             walkieStatus.text = getString(R.string.walkie_need_mic)
             Toast.makeText(this, R.string.walkie_need_camera, Toast.LENGTH_LONG).show()
+        }
+        // GPS toggle may have triggered this
+        if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        ) {
+            if (walkieGps.isChecked) enableGps(true)
+        } else if (walkieGps.isChecked && !hasLocationPermission()) {
+            walkieGps.isChecked = false
+            Toast.makeText(this, R.string.walkie_gps_need_perm, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -84,7 +115,10 @@ class MainActivity : AppCompatActivity() {
                 !message.contains("WAKEUP", true) &&
                 !message.contains("Replaying", true) &&
                 !message.contains("Ringing", true) &&
-                !message.contains("busy", true)
+                !message.contains("busy", true) &&
+                !message.contains("LISTEN", true) &&
+                !message.contains("SEE", true) &&
+                !message.contains("GPS", true)
             ) {
                 walkieStatus.text = getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
             } else {
@@ -102,16 +136,23 @@ class MainActivity : AppCompatActivity() {
         override fun onTalkingChanged(talking: Boolean) {
             isTalking = talking
             if (talking) {
-                walkiePtt.text = getString(R.string.walkie_ptt_tx)
-                walkiePtt.backgroundTintList =
-                    ContextCompat.getColorStateList(this@MainActivity, R.color.walkie_ptt_active)
+                showMap = false
+                applyStageVisibility()
                 walkieVideoHint.visibility = View.GONE
                 walkieReplay.visibility = View.GONE
                 showLocalCameraSurface(true)
             } else {
-                updatePttLabel()
+                pttLocked = false
+                updatePttLabels()
                 updateReplayVisibility()
-                if (!isReceiving && !isReplaying) showLocalCameraSurface(true)
+                if (!isReceiving && !isReplaying && !isSeeing) {
+                    if (gpsEnabled) {
+                        showMap = true
+                        applyStageVisibility()
+                    } else {
+                        showLocalCameraSurface(true)
+                    }
+                }
             }
             updateControls()
         }
@@ -122,42 +163,48 @@ class MainActivity : AppCompatActivity() {
                 walkieStatus.text = getString(R.string.walkie_receiving)
                 walkieVideoHint.visibility = View.GONE
                 walkieReplay.visibility = View.GONE
-                showLocalCameraSurface(false) // ImageView for remote MJPEG
+                showMap = false
+                showLocalCameraSurface(false)
             } else if (walkieRunning) {
                 walkieStatus.text = if (selectedPeer != null) {
                     getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
                 } else {
                     getString(R.string.walkie_status_waiting)
                 }
-                if (hasStickyFrame) {
-                    walkieVideoHint.visibility = View.GONE
-                }
+                if (hasStickyFrame) walkieVideoHint.visibility = View.GONE
                 updateReplayVisibility()
-                if (!isTalking && !isReplaying) showLocalCameraSurface(true)
+                if (!isTalking && !isReplaying && !isSeeing) {
+                    if (gpsEnabled) {
+                        showMap = true
+                        applyStageVisibility()
+                    } else {
+                        showLocalCameraSurface(true)
+                    }
+                }
             }
             updateControls()
         }
 
         override fun onChannelBusyChanged(busy: Boolean) {
             channelBusy = busy
-            updatePttLabel()
+            updatePttLabels()
             updateControls()
-            // Do not hide Replay solely for channelBusy — only when actively talking/receiving
             if (!busy) updateReplayVisibility()
         }
 
         override fun onVideoFrame(bitmap: Bitmap, live: Boolean) {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
-            // Remote / replay use ImageView; local self-view uses TextureView
-            if (isReceiving || isReplaying || !isTalking) {
-                if (isReceiving || isReplaying) {
+            showMap = false
+            if (isReceiving || isReplaying || isSeeing || !isTalking) {
+                if (isReceiving || isReplaying || isSeeing) {
                     showLocalCameraSurface(false)
                 }
                 walkieVideo.setImageBitmap(bitmap)
                 walkieVideo.visibility = View.VISIBLE
+                walkieMap.visibility = View.GONE
             }
-            if ((isTalking || isReceiving) && live && !isReplaying) {
+            if ((isTalking || isReceiving || isSeeing) && live && !isReplaying) {
                 walkieReplay.visibility = View.GONE
             } else if (!isTalking && !isReceiving && !isReplaying) {
                 updateReplayVisibility()
@@ -197,9 +244,15 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 isReplaying = replaying
                 if (replaying) {
+                    showMap = false
                     showLocalCameraSurface(false)
-                } else if (!isReceiving && !isTalking) {
-                    showLocalCameraSurface(true)
+                } else if (!isReceiving && !isTalking && !isSeeing) {
+                    if (gpsEnabled) {
+                        showMap = true
+                        applyStageVisibility()
+                    } else {
+                        showLocalCameraSurface(true)
+                    }
                 }
                 updateReplayButton()
                 updateReplayVisibility()
@@ -213,8 +266,48 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onInternetInviteChanged(inviteCode: String?) {
+            runOnUiThread { updateInternetPairUi(inviteCode) }
+        }
+
+        override fun onGpsUpdated(
+            myTrail: List<LocationTracker.GpsPoint>,
+            peerTrail: List<LocationTracker.GpsPoint>,
+            gpsEnabled: Boolean
+        ) {
             runOnUiThread {
-                updateInternetPairUi(inviteCode)
+                this@MainActivity.myTrail = myTrail
+                this@MainActivity.peerTrail = peerTrail
+                this@MainActivity.gpsEnabled = gpsEnabled
+                if (gpsEnabled && !isTalking && !isReceiving && !isReplaying && !isSeeing) {
+                    showMap = true
+                    applyStageVisibility()
+                }
+                pushMapTrail()
+            }
+        }
+
+        override fun onListenStateChanged(listening: Boolean, serving: Boolean) {
+            runOnUiThread {
+                isListening = listening
+                updateListenSeeButtons()
+            }
+        }
+
+        override fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {
+            runOnUiThread {
+                isSeeing = seeing
+                if (seeing) {
+                    showMap = false
+                    showLocalCameraSurface(false)
+                } else if (!isTalking && !isReceiving && !isReplaying) {
+                    if (gpsEnabled) {
+                        showMap = true
+                        applyStageVisibility()
+                    } else {
+                        showLocalCameraSurface(true)
+                    }
+                }
+                updateListenSeeButtons()
             }
         }
     }
@@ -231,16 +324,26 @@ class MainActivity : AppCompatActivity() {
             hasLastMessage = walkieService?.hasLastMessage == true
             isReplaying = walkieService?.isReplaying == true
             isTalking = walkieService?.isTalking == true
+            isListening = walkieService?.isListeningRemote() == true
+            isSeeing = walkieService?.isSeeingRemote() == true
+            gpsEnabled = walkieService?.isGpsEnabled() == true
+            walkieGps.isChecked = gpsEnabled
             autoSelectPeer()
             renderPeers()
             updateControls()
             updateReplayButton()
+            updateListenSeeButtons()
             updateInternetPairUi(walkieService?.getMyInviteCode() ?: walkieService?.internetInviteCode)
             if (walkiePreview.isAvailable) {
                 walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
             }
-            walkieService?.startLocalPreview()
-            showLocalCameraSurface(!isReceiving && !isReplaying)
+            if (!gpsEnabled) {
+                walkieService?.startLocalPreview()
+                showLocalCameraSurface(!isReceiving && !isReplaying && !isSeeing)
+            } else {
+                showMap = true
+                applyStageVisibility()
+            }
             walkieStatus.text = if (selectedPeer != null) {
                 getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
             } else {
@@ -260,6 +363,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -275,49 +379,78 @@ class MainActivity : AppCompatActivity() {
         peerInviteEdit = findViewById(R.id.peer_invite_edit)
         connectInvite = findViewById(R.id.connect_invite)
         walkieBestQuality = findViewById(R.id.walkie_best_quality)
-        walkiePtt = findViewById(R.id.walkie_ptt)
+        walkieGps = findViewById(R.id.walkie_gps)
+        walkiePttSpeaker = findViewById(R.id.walkie_ptt_speaker)
+        walkiePttHeadset = findViewById(R.id.walkie_ptt_headset)
         walkieWakeup = findViewById(R.id.walkie_wakeup)
+        walkieListen = findViewById(R.id.walkie_listen)
+        walkieSee = findViewById(R.id.walkie_see)
         walkieReplay = findViewById(R.id.walkie_replay)
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
         walkiePreview = findViewById(R.id.walkie_preview)
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
+        walkieMap = findViewById(R.id.walkie_map)
+        walkieLockHint = findViewById(R.id.walkie_lock_hint)
         walkieVideo.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
+        walkieMap.settings.javaScriptEnabled = true
+        walkieMap.settings.domStorageEnabled = true
+        walkieMap.setBackgroundColor(0xFF0B141A.toInt())
+        walkieMap.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                mapReady = true
+                pushMapTrail()
+            }
+        }
+        walkieMap.loadUrl("file:///android_asset/gps_map.html")
+
         walkiePreview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
                 walkieService?.setUiPreviewTexture(surface)
-                walkieService?.startLocalPreview()
-                showLocalCameraSurface(true)
+                if (!showMap) {
+                    walkieService?.startLocalPreview()
+                    showLocalCameraSurface(true)
+                }
             }
 
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
                 walkieService?.setUiPreviewTexture(null)
-                // Return false so TextureView releases; we clear engine ref first
                 return true
             }
 
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
         }
-        if (walkiePreview.isAvailable) {
-            walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
-        }
 
-        // Don't restore checkbox from activity state — always trust prefs, then write back
         walkieBestQuality.isSaveEnabled = false
         walkieBestQuality.isChecked = BarkyPrefs.isBestQualityVideo(this)
         walkieBestQuality.setOnCheckedChangeListener { _, checked ->
             BarkyPrefs.setBestQualityVideo(this, checked)
-            android.util.Log.i("BarkyVideoUI", "BEST quality checkbox → prefs=$checked")
-            updatePttLabel()
+            updatePttLabels()
         }
-        // Ensure prefs match UI even if state was weird
         BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
+
+        walkieGps.isChecked = BarkyPrefs.isGpsEnabled(this)
+        walkieGps.setOnCheckedChangeListener { _, checked ->
+            if (checked) {
+                if (!hasLocationPermission()) {
+                    permissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                    return@setOnCheckedChangeListener
+                }
+                enableGps(true)
+            } else {
+                enableGps(false)
+            }
+        }
 
         walkieFlipCamera.setOnClickListener {
             walkieService?.switchCamera()
-            // Brief feedback; preview / TX stream should flip immediately
             walkieFlipCamera.animate().rotationBy(180f).setDuration(200).start()
             updateFlipCameraLabel()
         }
@@ -335,39 +468,12 @@ class MainActivity : AppCompatActivity() {
         updateInternetPairUi(null)
 
         walkieReplay.setOnClickListener {
-            if (isReplaying) {
-                walkieService?.stopReplay()
-            } else {
-                walkieService?.replayLastMessage()
-            }
+            if (isReplaying) walkieService?.stopReplay()
+            else walkieService?.replayLastMessage()
         }
 
-        walkiePtt.setOnTouchListener { v, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    if (selectedPeer == null) {
-                        Toast.makeText(this, R.string.walkie_status_waiting, Toast.LENGTH_SHORT).show()
-                        return@setOnTouchListener true
-                    }
-                    if (channelBusy || walkieService?.isChannelBusy == true) {
-                        Toast.makeText(this, R.string.walkie_channel_busy_toast, Toast.LENGTH_SHORT).show()
-                        return@setOnTouchListener true
-                    }
-                    if (isReplaying) walkieService?.stopReplay()
-                    // Sync BEST checkbox → prefs immediately before engine reads it
-                    BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
-                    v.isPressed = true
-                    walkieService?.startTalking()
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    v.isPressed = false
-                    walkieService?.stopTalking()
-                    true
-                }
-                else -> false
-            }
-        }
+        bindPtt(walkiePttSpeaker, WalkieProtocol.AUDIO_MODE_SPEAKER)
+        bindPtt(walkiePttHeadset, WalkieProtocol.AUDIO_MODE_HEADSET)
 
         walkieWakeup.setOnClickListener {
             if (wakeupRinging || remoteWakeupActive) {
@@ -379,7 +485,136 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        walkieListen.setOnClickListener {
+            if (selectedPeer == null) {
+                Toast.makeText(this, R.string.walkie_status_waiting, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (isListening) walkieService?.stopListenRemote()
+            else walkieService?.startListenRemote()
+        }
+
+        walkieSee.setOnClickListener {
+            if (selectedPeer == null) {
+                Toast.makeText(this, R.string.walkie_status_waiting, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (isSeeing) walkieService?.stopSeeRemote()
+            else walkieService?.startSeeRemote()
+        }
+
         updateControls()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun bindPtt(button: MaterialButton, mode: Byte) {
+        var downY = 0f
+        button.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (pttLocked && isTalking) {
+                        // Second tap while locked = send/stop
+                        pttLocked = false
+                        walkieLockHint.visibility = View.GONE
+                        v.isPressed = false
+                        walkieService?.stopTalking()
+                        return@setOnTouchListener true
+                    }
+                    if (selectedPeer == null) {
+                        Toast.makeText(this, R.string.walkie_status_waiting, Toast.LENGTH_SHORT).show()
+                        return@setOnTouchListener true
+                    }
+                    if (channelBusy || walkieService?.isChannelBusy == true) {
+                        Toast.makeText(this, R.string.walkie_channel_busy_toast, Toast.LENGTH_SHORT).show()
+                        return@setOnTouchListener true
+                    }
+                    if (isReplaying) walkieService?.stopReplay()
+                    BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
+                    // HOLD → leave map, show camera
+                    showMap = false
+                    applyStageVisibility()
+                    showLocalCameraSurface(true)
+                    walkieService?.startLocalPreview()
+                    downY = event.rawY
+                    activePttMode = mode
+                    pttLocked = false
+                    v.isPressed = true
+                    walkieLockHint.visibility = View.VISIBLE
+                    walkieService?.startTalking(mode)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isTalking && !pttLocked && downY - event.rawY > 90f) {
+                        pttLocked = true
+                        walkieLockHint.text = getString(R.string.walkie_ptt_locked)
+                        Toast.makeText(this, R.string.walkie_ptt_locked, Toast.LENGTH_SHORT).show()
+                        updatePttLabels()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (pttLocked) {
+                        // Keep recording until second tap
+                        v.isPressed = true
+                        walkieLockHint.visibility = View.VISIBLE
+                        walkieLockHint.text = getString(R.string.walkie_ptt_locked)
+                        return@setOnTouchListener true
+                    }
+                    v.isPressed = false
+                    walkieLockHint.visibility = View.GONE
+                    walkieService?.stopTalking()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun enableGps(on: Boolean) {
+        if (on) {
+            walkieService?.setGpsEnabled(true)
+            gpsEnabled = true
+            showMap = !isTalking && !isReceiving && !isSeeing
+            applyStageVisibility()
+            BarkyPrefs.setGpsEnabled(this, true)
+        } else {
+            walkieService?.setGpsEnabled(false)
+            gpsEnabled = false
+            showMap = false
+            applyStageVisibility()
+            showLocalCameraSurface(!isReceiving && !isReplaying && !isSeeing)
+            walkieService?.startLocalPreview()
+            BarkyPrefs.setGpsEnabled(this, false)
+        }
+    }
+
+    private fun applyStageVisibility() {
+        if (showMap && gpsEnabled) {
+            walkieMap.visibility = View.VISIBLE
+            walkiePreview.visibility = View.GONE
+            walkieVideo.visibility = View.GONE
+            walkieVideoHint.visibility = View.GONE
+            walkieService?.stopLocalPreview()
+            pushMapTrail()
+        }
+    }
+
+    private fun pushMapTrail() {
+        if (!mapReady || !::walkieMap.isInitialized) return
+        try {
+            val mine = JSONArray()
+            for (p in myTrail) {
+                mine.put(JSONObject().put("lat", p.lat).put("lon", p.lon).put("t", p.timeMs))
+            }
+            val peer = JSONArray()
+            for (p in peerTrail) {
+                peer.put(JSONObject().put("lat", p.lat).put("lon", p.lon).put("t", p.timeMs))
+            }
+            val js = "setTrail($mine, $peer);"
+            walkieMap.evaluateJavascript(js, null)
+        } catch (t: Throwable) {
+            android.util.Log.w("BarkyVideoUI", "pushMapTrail", t)
+        }
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -404,18 +639,16 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         ensureWalkieRunning()
-        // Refresh internet pair card after returning from Settings
         updateInternetPairUi(walkieService?.getMyInviteCode() ?: walkieService?.internetInviteCode)
         if (!BarkyPrefs.isWifiOnly(this)) {
             walkieService?.applyNetworkMode()
         }
-        // Live viewfinder so flip works before HOLD
-        walkieService?.startLocalPreview()
+        if (!showMap) walkieService?.startLocalPreview()
     }
 
     override fun onResume() {
         super.onResume()
-        walkieService?.startLocalPreview()
+        if (!showMap) walkieService?.startLocalPreview()
     }
 
     private fun updateInternetPairUi(inviteCode: String?) {
@@ -447,7 +680,6 @@ class MainActivity : AppCompatActivity() {
     private fun ensureWalkieRunning() {
         if (hasWalkiePermissions()) {
             reallyStartWalkie()
-            // Ask for future-calling permissions without blocking walkie start
             requestFutureCallingPermissionsIfNeeded()
         } else if (!startRequested) {
             startRequested = true
@@ -505,21 +737,28 @@ class MainActivity : AppCompatActivity() {
         return mic && cam
     }
 
+    private fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
     private fun updateFlipCameraLabel() {
         if (!::walkieFlipCamera.isInitialized) return
-        // Icon stays; content description reflects current preferred lens
         val front = BarkyPrefs.isCameraFront(this)
         walkieFlipCamera.contentDescription = getString(
             if (front) R.string.walkie_camera_front else R.string.walkie_camera_back
         )
     }
 
-    /** true = TextureView local camera; false = ImageView remote/replay */
     private fun showLocalCameraSurface(local: Boolean) {
         if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
+        showMap = false
+        walkieMap.visibility = View.GONE
         if (local) {
             walkiePreview.visibility = View.VISIBLE
-            // Keep last remote frame under if any, but hide ImageView while previewing
             walkieVideo.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
         } else {
@@ -561,37 +800,76 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateControls() {
         val ready = walkieRunning && selectedPeer != null
-        val canSend = ready && !channelBusy && !isTalking
-        // Keep enabled for release if currently talking; disable if busy and not talking
-        walkiePtt.isEnabled = ready && (isTalking || !channelBusy)
+        walkiePttSpeaker.isEnabled = ready && (isTalking || !channelBusy)
+        walkiePttHeadset.isEnabled = ready && (isTalking || !channelBusy)
         walkieWakeup.isEnabled = ready || wakeupRinging || remoteWakeupActive
+        walkieListen.isEnabled = ready
+        walkieSee.isEnabled = ready
         updateWakeupButton()
         updateReplayButton()
         updateReplayVisibility()
-        updatePttLabel()
+        updatePttLabels()
+        updateListenSeeButtons()
     }
 
-    private fun updatePttLabel() {
-        if (!::walkiePtt.isInitialized) return
-        when {
-            isTalking -> {
-                val best = ::walkieBestQuality.isInitialized && walkieBestQuality.isChecked
-                walkiePtt.text = getString(
-                    if (best) R.string.walkie_ptt_recording else R.string.walkie_ptt_tx
-                )
-                walkiePtt.backgroundTintList =
-                    ContextCompat.getColorStateList(this, R.color.walkie_ptt_active)
+    private fun updatePttLabels() {
+        if (!::walkiePttSpeaker.isInitialized) return
+        fun style(btn: MaterialButton, idleColor: Int, mode: Byte) {
+            when {
+                isTalking && activePttMode == mode -> {
+                    btn.text = if (pttLocked) {
+                        getString(R.string.walkie_ptt_locked)
+                    } else if (walkieBestQuality.isChecked) {
+                        getString(R.string.walkie_ptt_recording)
+                    } else {
+                        getString(R.string.walkie_ptt_tx)
+                    }
+                    btn.backgroundTintList =
+                        ContextCompat.getColorStateList(this, R.color.walkie_ptt_active)
+                }
+                channelBusy -> {
+                    btn.text = getString(R.string.walkie_ptt_busy)
+                    btn.backgroundTintList =
+                        ContextCompat.getColorStateList(this, R.color.barky_hint)
+                }
+                else -> {
+                    btn.text = if (mode == WalkieProtocol.AUDIO_MODE_HEADSET) {
+                        getString(R.string.walkie_headset)
+                    } else {
+                        getString(R.string.walkie_speaker)
+                    }
+                    btn.backgroundTintList =
+                        ContextCompat.getColorStateList(this, idleColor)
+                }
             }
-            channelBusy -> {
-                walkiePtt.text = getString(R.string.walkie_ptt_busy)
-                walkiePtt.backgroundTintList =
-                    ContextCompat.getColorStateList(this, R.color.barky_hint)
-            }
-            else -> {
-                walkiePtt.text = getString(R.string.walkie_ptt)
-                walkiePtt.backgroundTintList =
-                    ContextCompat.getColorStateList(this, R.color.walkie_ptt)
-            }
+        }
+        style(walkiePttSpeaker, R.color.walkie_ptt, WalkieProtocol.AUDIO_MODE_SPEAKER)
+        style(walkiePttHeadset, R.color.walkie_headset, WalkieProtocol.AUDIO_MODE_HEADSET)
+    }
+
+    private fun updateListenSeeButtons() {
+        if (!::walkieListen.isInitialized) return
+        if (isListening) {
+            walkieListen.text = getString(R.string.walkie_listen_on)
+            walkieListen.setBackgroundColor(
+                ContextCompat.getColor(this, R.color.walkie_listen_active)
+            )
+            walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
+        } else {
+            walkieListen.text = getString(R.string.walkie_listen)
+            walkieListen.setBackgroundColor(0)
+            walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
+        }
+        if (isSeeing) {
+            walkieSee.text = getString(R.string.walkie_see_on)
+            walkieSee.setBackgroundColor(
+                ContextCompat.getColor(this, R.color.walkie_see_active)
+            )
+            walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
+        } else {
+            walkieSee.text = getString(R.string.walkie_see)
+            walkieSee.setBackgroundColor(0)
+            walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
         }
     }
 
@@ -623,8 +901,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateReplayVisibility() {
         if (!::walkieReplay.isInitialized) return
-        // Show whenever we have a stored clip and are not mid TX/RX/replay UI lock
-        val show = hasLastMessage && !isTalking && !isReceiving
+        val show = hasLastMessage && !isTalking && !isReceiving && !isSeeing
         walkieReplay.visibility = if (show || isReplaying) View.VISIBLE else View.GONE
         walkieReplay.isEnabled = (show || isReplaying) && walkieRunning
         if (show || isReplaying) {

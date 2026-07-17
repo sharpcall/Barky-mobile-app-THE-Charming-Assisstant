@@ -71,6 +71,13 @@ class WalkieTalkieService : Service() {
         fun onError(message: String)
         fun onVideoDebug(message: String)
         fun onInternetInviteChanged(inviteCode: String?)
+        fun onGpsUpdated(
+            myTrail: List<LocationTracker.GpsPoint>,
+            peerTrail: List<LocationTracker.GpsPoint>,
+            gpsEnabled: Boolean
+        ) {}
+        fun onListenStateChanged(listening: Boolean, serving: Boolean) {}
+        fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {}
     }
 
     fun addListener(l: UiListener) {
@@ -93,7 +100,8 @@ class WalkieTalkieService : Service() {
     }
 
     fun selectPeer(peer: WalkiePeer?) = engine?.selectPeer(peer)
-    fun startTalking() = engine?.startTalking()
+    fun startTalking(playbackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER) =
+        engine?.startTalking(playbackMode)
     fun stopTalking() = engine?.stopTalking()
     fun sendWakeup() = engine?.sendWakeup()
     fun stopWakeupRinging() = engine?.stopWakeupRinging()
@@ -109,6 +117,14 @@ class WalkieTalkieService : Service() {
     fun stopLocalPreview() = engine?.stopLocalPreview()
     fun setUiPreviewTexture(texture: android.graphics.SurfaceTexture?) =
         engine?.setUiPreviewTexture(texture)
+    fun setGpsEnabled(enabled: Boolean) = engine?.setGpsEnabled(enabled)
+    fun isGpsEnabled(): Boolean = engine?.isGpsEnabled() == true
+    fun startListenRemote() = engine?.startListenRemote()
+    fun stopListenRemote() = engine?.stopListenRemote()
+    fun startSeeRemote() = engine?.startSeeRemote()
+    fun stopSeeRemote() = engine?.stopSeeRemote()
+    fun isListeningRemote(): Boolean = engine?.isListeningRemote() == true
+    fun isSeeingRemote(): Boolean = engine?.isSeeingRemote() == true
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -190,8 +206,28 @@ class WalkieTalkieService : Service() {
                 internetInviteCode = inviteCode
                 uiListeners.forEach { it.onInternetInviteChanged(inviteCode) }
             }
+
+            override fun onGpsUpdated(
+                myTrail: List<LocationTracker.GpsPoint>,
+                peerTrail: List<LocationTracker.GpsPoint>,
+                gpsEnabled: Boolean
+            ) {
+                uiListeners.forEach { it.onGpsUpdated(myTrail, peerTrail, gpsEnabled) }
+            }
+
+            override fun onListenStateChanged(listening: Boolean, serving: Boolean) {
+                uiListeners.forEach { it.onListenStateChanged(listening, serving) }
+            }
+
+            override fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {
+                uiListeners.forEach { it.onSeeStateChanged(seeing, serving) }
+            }
         })
         engine?.start()
+        // Restore GPS preference after engine is up
+        if (BarkyPrefs.isGpsEnabled(this)) {
+            engine?.setGpsEnabled(true)
+        }
         Log.i(TAG, "WalkieTalkieService created")
     }
 
@@ -266,6 +302,17 @@ class WalkieTalkieService : Service() {
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             try {
                 type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            } catch (_: Throwable) {
+            }
+            // Only claim location FGS type when permission is granted (Android 14+)
+            try {
+                val fine = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                val coarse = checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (fine || coarse) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                }
             } catch (_: Throwable) {
             }
             startForeground(NOTIF_ID, notification, type)

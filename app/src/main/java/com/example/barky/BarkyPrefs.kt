@@ -17,6 +17,8 @@ object BarkyPrefs {
     const val KEY_CAMERA_FRONT = "walkie_camera_front"
     /** When true: accessibility unit conversion overlay is active. */
     const val KEY_CONVERSION_ENABLED = "unit_conversion_enabled"
+    /** When true: share GPS trail with peer and show map. */
+    const val KEY_GPS_ENABLED = "walkie_gps_enabled"
 
     fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -54,5 +56,12 @@ object BarkyPrefs {
 
     fun setConversionEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_CONVERSION_ENABLED, enabled).apply()
+    }
+
+    fun isGpsEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_GPS_ENABLED, false)
+
+    fun setGpsEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_GPS_ENABLED, enabled).apply()
     }
 }

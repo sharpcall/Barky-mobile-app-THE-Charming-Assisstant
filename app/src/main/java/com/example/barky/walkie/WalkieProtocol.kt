@@ -20,8 +20,29 @@ object WalkieProtocol {
     const val TYPE_VIDEO: Byte = 0x06
     const val TYPE_WAKEUP_STOP: Byte = 0x07
     const val TYPE_HELLO: Byte = 0x08
-    /** Half-duplex: peer started transmitting — lock local PTT */
+    /** Half-duplex: peer started transmitting — lock local PTT.
+     * Optional 2nd byte: AUDIO_MODE_SPEAKER (0) or AUDIO_MODE_HEADSET (1). */
     const val TYPE_TALK_START: Byte = 0x09
+    /** Request peer to stream mic continuously (LISTEN). */
+    const val TYPE_LISTEN_REQ: Byte = 0x0A
+    const val TYPE_LISTEN_STOP: Byte = 0x0B
+    /** Request peer to stream camera + mic continuously (SEE). */
+    const val TYPE_SEE_REQ: Byte = 0x0C
+    const val TYPE_SEE_STOP: Byte = 0x0D
+    /**
+     * GPS share: [type][lat:double LE][lon:double LE][timeMs:long LE]
+     * 1 + 8 + 8 + 8 = 25 bytes.
+     */
+    const val TYPE_GPS: Byte = 0x0E
+    /** Continuous monitor audio (LISTEN/SEE) — play live, do not store as message. */
+    const val TYPE_MONITOR_AUDIO: Byte = 0x0F
+    /** Continuous monitor JPEG part (same layout as TYPE_VIDEO) — live only. */
+    const val TYPE_MONITOR_VIDEO: Byte = 0x10
+
+    const val AUDIO_MODE_SPEAKER: Byte = 0
+    const val AUDIO_MODE_HEADSET: Byte = 1
+    const val GPS_PAYLOAD_BYTES = 1 + 8 + 8 + 8
+    const val GPS_TRAIL_HOURS = 5
 
     const val SAMPLE_RATE = 16_000
     const val FRAME_MS = 40
