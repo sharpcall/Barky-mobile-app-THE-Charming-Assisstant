@@ -270,12 +270,10 @@ class WalkieTalkieService : Service() {
                 engine?.replayLastMessage()
             }
             ACTION_TEST_WAKEUP -> {
-                // Adb smoke defaults quiet=true; real UI uses loud ring
+                // Adb smoke defaults quiet=true (packet flag); UI sendWakeup() is loud
                 val quiet = intent.getBooleanExtra(EXTRA_QUIET, true)
-                BarkyPrefs.setQuietTests(this, quiet)
-                engine?.quietWakeup = quiet
                 Log.i(TAG, "TEST_WAKEUP via adb quiet=$quiet")
-                engine?.sendWakeup()
+                engine?.sendWakeup(quiet = quiet)
             }
             ACTION_TEST_LISTEN_START -> {
                 Log.i(TAG, "TEST_LISTEN_START via adb")

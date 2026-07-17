@@ -985,7 +985,10 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onRemoteWakeupActive(false) }
     }
 
-    fun sendWakeup() {
+    /**
+     * @param quiet true only for automated smoke (soft beep). UI always uses loud.
+     */
+    fun sendWakeup(quiet: Boolean = false) {
         val peer = currentPeer()
         if (peer == null) {
             postError("Select a peer first")
@@ -995,7 +998,12 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onRemoteWakeupActive(true) }
         thread(name = "walkie-wakeup", isDaemon = true) {
             try {
-                val payload = byteArrayOf(WalkieProtocol.TYPE_WAKEUP)
+                // Optional 2nd byte: 1 = quiet smoke ring (receiver does not blast)
+                val payload = if (quiet) {
+                    byteArrayOf(WalkieProtocol.TYPE_WAKEUP, 1)
+                } else {
+                    byteArrayOf(WalkieProtocol.TYPE_WAKEUP, 0)
+                }
                 val packet = DatagramPacket(
                     payload, payload.size, InetAddress.getByName(peer.host), peer.port
                 )
@@ -1003,8 +1011,8 @@ class WalkieTalkieEngine(
                     sendUdp(packet)
                     Thread.sleep(40)
                 }
-                Log.i(TAG, "WAKEUP sent to ${peer.displayName} host=${peer.host}")
-                postStatus("WAKEUP sent to ${peer.displayName}")
+                Log.i(TAG, "WAKEUP RING sent quiet=$quiet to ${peer.displayName} host=${peer.host}")
+                postStatus("WAKEUP RING sent to ${peer.displayName}")
                 // Match remote alarm duration
                 mainHandler.postDelayed(remoteWakeupClear, 12_000L)
             } catch (t: Throwable) {
@@ -1922,7 +1930,10 @@ class WalkieTalkieEngine(
                     when (snapshot[0]) {
                         WalkieProtocol.TYPE_AUDIO -> handleAudioBytes(snapshot, from)
                         WalkieProtocol.TYPE_VIDEO -> handleVideoBytes(snapshot, from)
-                        WalkieProtocol.TYPE_WAKEUP -> handleWakeupFrom(from)
+                        WalkieProtocol.TYPE_WAKEUP -> {
+                            val quiet = snapshot.size >= 2 && snapshot[1] != 0.toByte()
+                            handleWakeupFrom(from, quiet)
+                        }
                         WalkieProtocol.TYPE_WAKEUP_STOP -> {
                             wakeupPlayer.stop()
                             postStatus("Remote stopped ringing")
@@ -2143,12 +2154,10 @@ class WalkieTalkieEngine(
     /** When true, WAKEUP uses soft beep only (adb smoke / quiet house). */
     @Volatile var quietWakeup: Boolean = false
 
-    private fun handleWakeupFrom(from: String) {
+    private fun handleWakeupFrom(from: String, quiet: Boolean) {
         mainHandler.post {
             listener.onWakeupReceived(from)
-            // Quiet only for adb smoke (quietWakeup flag). Real UI ring is always loud.
-            val quiet = quietWakeup
-            Log.i(TAG, "WAKEUP RING quiet=$quiet")
+            Log.i(TAG, "WAKEUP RING from=$from quiet=$quiet")
             wakeupPlayer.start(quiet = quiet)
         }
     }
