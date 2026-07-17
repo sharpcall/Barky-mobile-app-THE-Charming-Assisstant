@@ -370,7 +370,7 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
-        // Same line as title: "Barky  5.1-… · 2026-07-17 14:52" (no subtitle)
+        // One compact line: "Barky  5.2 · 07-17 15:14" (no description, smaller title style)
         supportActionBar?.subtitle = null
         supportActionBar?.title = "${getString(R.string.app_name)}  ${appVersionSubtitle()}"
 
@@ -710,7 +710,7 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent(this, SettingsActivity::class.java))
     }
 
-    /** e.g. "5.1-wa-mic-listen-gps · 2026-07-17 14:51" from package version + install time */
+    /** Compact for title: "5.2 · 07-17 15:14" (no description text). */
     private fun appVersionSubtitle(): String {
         return try {
             val pi = if (Build.VERSION.SDK_INT >= 33) {
@@ -722,10 +722,11 @@ class MainActivity : AppCompatActivity() {
                 @Suppress("DEPRECATION")
                 packageManager.getPackageInfo(packageName, 0)
             }
-            val ver = pi.versionName ?: "?"
-            val whenMs = pi.lastUpdateTime
-            val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
-            "$ver · ${fmt.format(Date(whenMs))}"
+            val raw = pi.versionName ?: "?"
+            // "5.2-listen-see-quiet" → "5.2"
+            val shortVer = raw.substringBefore('-').ifBlank { raw }
+            val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+            "$shortVer · ${fmt.format(Date(pi.lastUpdateTime))}"
         } catch (_: Exception) {
             ""
         }

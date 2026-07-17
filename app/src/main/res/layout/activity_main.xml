@@ -20,8 +20,9 @@
         android:background="@color/barky_primary"
         android:elevation="4dp"
         app:title="@string/app_name"
+        app:titleTextAppearance="@style/TextAppearance.Barky.Toolbar.Title"
         app:titleTextColor="@color/barky_on_primary"
-        app:subtitleTextColor="#B3FFFFFF" />
+        app:subtitleCentered="false" />
 
     <!-- Full chat stage: camera / remote video / GPS map -->
     <FrameLayout
