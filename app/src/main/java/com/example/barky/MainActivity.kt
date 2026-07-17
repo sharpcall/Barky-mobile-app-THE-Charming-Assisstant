@@ -139,8 +139,8 @@ class MainActivity : AppCompatActivity() {
         override fun onVideoFrame(bitmap: Bitmap, live: Boolean) {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
+            // Keep previous frame until new one is set (reduces black flash)
             walkieVideo.setImageBitmap(bitmap)
-            // Hide replay while live stream is painting frames rapidly
             if (live && !isReplaying) {
                 walkieReplay.visibility = View.GONE
             }
@@ -254,6 +254,8 @@ class MainActivity : AppCompatActivity() {
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
+        // Smoother continuous video (less flash when swapping bitmaps)
+        walkieVideo.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
         walkieBestQuality.isChecked = BarkyPrefs.isBestQualityVideo(this)
         walkieBestQuality.setOnCheckedChangeListener { _, checked ->

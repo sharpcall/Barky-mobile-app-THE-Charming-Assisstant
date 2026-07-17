@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 23
-        versionName "3.5-preview-flip-conversion"
+        versionCode 24
+        versionName "3.6-fullscreen-smooth-video"
     }
 
     compileOptions {

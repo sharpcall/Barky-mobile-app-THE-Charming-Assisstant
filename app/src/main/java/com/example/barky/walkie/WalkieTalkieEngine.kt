@@ -922,6 +922,7 @@ class WalkieTalkieEngine(
             }
         }
         if (!replaying.compareAndSet(false, true)) return
+        stopLocalPreviewInternal()
         mainHandler.post { listener.onReplayStateChanged(true) }
         postStatus("Replaying last message…")
         val metrics = clipMetrics(msg.audioPcm, msg.frames)
@@ -955,6 +956,7 @@ class WalkieTalkieEngine(
                     listener.onStatus("Ready")
                 }
                 Log.i(TAG, "Replay finished — UI should show Replay not Stop")
+                maybeResumeLocalPreview()
             }
         }
     }
@@ -967,6 +969,7 @@ class WalkieTalkieEngine(
         }
         mainHandler.post { listener.onReplayStateChanged(false) }
         postStatus("Replay stopped")
+        maybeResumeLocalPreview()
     }
 
     /**
@@ -1703,6 +1706,7 @@ class WalkieTalkieEngine(
                         WalkieProtocol.TYPE_TALK_START -> {
                             // New remote clip — unseal and clear any trailing junk from previous
                             rxClipSealed = false
+                            stopLocalPreviewInternal() // avoid local/remote ImageView fight (flash)
                             synchronized(incomingAudio) {
                                 incomingAudio.reset()
                                 incomingFrames.clear()
@@ -1738,6 +1742,7 @@ class WalkieTalkieEngine(
             }
             videoRxOk = 0
             if (!receiving.getAndSet(true)) {
+                stopLocalPreviewInternal()
                 // Half-duplex: lock local send while receiving
                 if (!talking.get()) {
                     setChannelBusy(true, "receiving from $from")
@@ -1991,6 +1996,7 @@ class WalkieTalkieEngine(
                 listener.onReceivingChanged(false)
                 listener.onStatus("Ready")
             }
+            maybeResumeLocalPreview()
         }
     }
 
@@ -2116,11 +2122,36 @@ class WalkieTalkieEngine(
         return peak
     }
 
+    /** Drop UI frames if the main thread is still painting (stops flash/stutter). */
+    private val uiEmitBusy = AtomicBoolean(false)
+    @Volatile private var lastUiEmitAt = 0L
+
     private fun decodeAndEmit(jpeg: ByteArray, live: Boolean) {
         try {
-            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return
-            mainHandler.post { listener.onVideoFrame(bmp, live) }
+            if (live) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                // Cap display ~18 fps; encode/network can be faster without flooding ImageView
+                if (now - lastUiEmitAt < 55L) return
+                if (!uiEmitBusy.compareAndSet(false, true)) return
+                lastUiEmitAt = now
+            }
+            val opts = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
+            if (bmp == null) {
+                if (live) uiEmitBusy.set(false)
+                return
+            }
+            mainHandler.post {
+                try {
+                    listener.onVideoFrame(bmp, live)
+                } finally {
+                    if (live) uiEmitBusy.set(false)
+                }
+            }
         } catch (t: Throwable) {
+            if (live) uiEmitBusy.set(false)
             Log.w(TAG, "decode jpeg", t)
         }
     }
