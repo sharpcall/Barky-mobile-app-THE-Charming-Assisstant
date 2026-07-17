@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 41
-        versionName "5.3-pip-sticky"
+        versionCode 42
+        versionName "5.3-listen-matrix"
     }
 
     compileOptions {

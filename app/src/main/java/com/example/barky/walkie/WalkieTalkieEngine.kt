@@ -2769,6 +2769,7 @@ class WalkieTalkieEngine(
         // Loud speaker path for monitor; rebuild AudioTrack cleanly
         releaseAudioTrack()
         preparePlaybackAudio(headset = false)
+        forceListenVolume() // Pixel often left near-mute after adb smoke
         val target = peer
         val reply = localPort
         // All network off main thread (Pixel StrictMode)
@@ -2776,15 +2777,8 @@ class WalkieTalkieEngine(
             try {
                 sendHelloTo(target)
                 Thread.sleep(80)
-                sendControlWithPort(target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
-                Thread.sleep(200)
-                if (requestingListen.get()) {
-                    sendControlWithPort(currentPeer() ?: target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
-                }
-                Thread.sleep(300)
-                if (requestingListen.get()) {
-                    sendControlWithPort(currentPeer() ?: target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
-                }
+                // Burst to all known peer ports for this host (stale port was a common miss)
+                sendListenReqBurst(target, reply)
             } catch (t: Throwable) {
                 Log.e(TAG, "LISTEN_REQ send path", t)
             }
@@ -2792,6 +2786,47 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onListenStateChanged(true, servingListen.get()) }
         postStatus("LISTEN — hearing peer mic…")
         Log.i(TAG, "LISTEN_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
+    }
+
+    /** Raise media volume so LISTEN is actually audible (especially on Pixel). */
+    private fun forceListenVolume() {
+        try {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = true
+            audioManager.mode = AudioManager.MODE_NORMAL
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val target = max(max * 3 / 4, 2)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+            Log.i(TAG, "forceListenVolume music=$target/$max")
+        } catch (t: Throwable) {
+            Log.w(TAG, "forceListenVolume", t)
+        }
+    }
+
+    private fun sendListenReqBurst(peer: WalkiePeer, replyPort: Int) {
+        val hosts = linkedSetOf(peer.host)
+        val ports = linkedSetOf(peer.port)
+        peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
+        // Also try latest HELLO-learned peers
+        getPeers().forEach { p ->
+            if (p.host == peer.host) ports.add(p.port)
+        }
+        for (port in ports.filter { it > 0 }) {
+            val p = peer.copy(port = port)
+            sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, replyPort)
+            Thread.sleep(40)
+        }
+        Thread.sleep(200)
+        if (requestingListen.get()) {
+            for (port in ports.filter { it > 0 }) {
+                sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_LISTEN_REQ, replyPort)
+            }
+        }
+        Thread.sleep(250)
+        if (requestingListen.get()) {
+            val p = currentPeer() ?: peer
+            sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, replyPort)
+        }
     }
 
     fun stopListenRemote() {
@@ -2939,17 +2974,16 @@ class WalkieTalkieEngine(
             servingListen.set(false)
             return
         }
-        if (servingListen.getAndSet(true)) {
-            // Already serving — retarget
-            monitorTarget = peer
-            Log.i(TAG, "LISTEN serve retarget ${peer.host}:${peer.port}")
+        monitorTarget = peer
+        if (servingListen.get() && monitorAudioThread?.isAlive == true) {
+            Log.i(TAG, "LISTEN serve retarget (thread alive) ${peer.host}:${peer.port}")
             return
         }
-        monitorTarget = peer
+        // Flag stuck true with dead thread — restart
+        servingListen.set(true)
         mainHandler.post { listener.onListenStateChanged(requestingListen.get(), true) }
         monitorAudioThread = thread(name = "walkie-serve-listen", isDaemon = true) {
             try {
-                // Prefer voice recognition / mic on Pixel; fall back sources
                 recordMonitorAudio(peer)
             } catch (t: Throwable) {
                 Log.w(TAG, "serve listen", t)
@@ -2959,7 +2993,7 @@ class WalkieTalkieEngine(
             }
         }
         postStatus("Mic open for peer (LISTEN)")
-        Log.i(TAG, "LISTEN serve → ${peer.host}:${peer.port}")
+        Log.i(TAG, "LISTEN serve START → ${peer.host}:${peer.port}")
     }
 
     private fun stopServingListen() {
@@ -3131,8 +3165,12 @@ class WalkieTalkieEngine(
         monitorReceiving.set(true)
         val pcm = data.copyOfRange(1, data.size)
         if (!replaying.get()) {
-            playPcm(pcm)
+            // Soft sources often very quiet on Pixel — gain before play
+            playPcm(amplifyPcm16(pcm, MONITOR_GAIN))
             monitorAudioRxCount++
+            if (monitorAudioRxCount == 1) {
+                forceListenVolume()
+            }
             // Always log first packets so dual-device smoke cannot miss RX proof
             if (monitorAudioRxCount <= 5 || monitorAudioRxCount % 25 == 0) {
                 Log.i(
@@ -3142,6 +3180,21 @@ class WalkieTalkieEngine(
                 )
             }
         }
+    }
+
+    /** 16-bit little-endian PCM gain (clips to range). */
+    private fun amplifyPcm16(pcm: ByteArray, gain: Float): ByteArray {
+        if (gain == 1f || pcm.size < 2) return pcm
+        val out = ByteArray(pcm.size)
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val s = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toInt()
+            val g = (s * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            out[i] = (g and 0xFF).toByte()
+            out[i + 1] = ((g shr 8) and 0xFF).toByte()
+            i += 2
+        }
+        return out
     }
 
     private fun handleMonitorVideo(data: ByteArray, from: String) {
@@ -3295,5 +3348,7 @@ class WalkieTalkieEngine(
         private const val RECEIVE_IDLE_MS = 1_500L
         private const val GAIN = 3.5f
         private const val GPS_SHARE_INTERVAL_MS = 2_500L
+        /** Soft mic streams need gain so Pixel LISTEN is audible. */
+        private const val MONITOR_GAIN = 3.0f
     }
 }

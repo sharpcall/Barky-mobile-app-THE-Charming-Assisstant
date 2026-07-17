@@ -1054,13 +1054,40 @@ class MainActivity : AppCompatActivity() {
             walkiePreview.elevation = 24f
             walkiePreview.bringToFront()
             walkieMicStage.elevation = 8f
+            applyPipSoftEdges(true)
             walkiePreview.post { applyNaturalPreviewTransform() }
         } else {
             pipEnlarged = false
             pipLayoutActive = false
             pipLastLeft = -1
             pipLastTop = -1
+            applyPipSoftEdges(false)
             resetPreviewFullBleed()
+        }
+    }
+
+    /** Rounded soft outline so self-view blends into remote video (no hard rectangle). */
+    private fun applyPipSoftEdges(enabled: Boolean) {
+        if (!::walkiePreview.isInitialized) return
+        if (enabled) {
+            val r = 28f * resources.displayMetrics.density
+            walkiePreview.clipToOutline = true
+            walkiePreview.outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: android.graphics.Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, r)
+                }
+            }
+            // Soft shadow blend
+            walkiePreview.elevation = 20f
+            if (Build.VERSION.SDK_INT >= 28) {
+                walkiePreview.outlineAmbientShadowColor = 0x66000000.toInt()
+                walkiePreview.outlineSpotShadowColor = 0x88000000.toInt()
+            }
+            walkiePreview.invalidateOutline()
+        } else {
+            walkiePreview.clipToOutline = false
+            walkiePreview.outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            walkiePreview.elevation = 0f
         }
     }
 
