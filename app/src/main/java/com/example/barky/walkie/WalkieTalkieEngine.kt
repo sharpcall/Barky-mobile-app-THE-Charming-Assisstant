@@ -89,6 +89,11 @@ class WalkieTalkieEngine(
     private val channelBusy = AtomicBoolean(false)
     /** Message that arrived while Replay was active — play when Replay ends. */
     @Volatile private var pendingAfterReplay: WalkieMessage? = null
+    /**
+     * True if the current (or just finished) RX overlapped an active Replay.
+     * Clip may finalize *after* Replay ends; still auto-play then.
+     */
+    private val rxOverlappedReplay = AtomicBoolean(false)
     /** Current HOLD is BEST-quality local record (send after release). */
     private val bestQualitySession = AtomicBoolean(false)
     /** True while bulk-uploading a recorded BEST clip. */
@@ -1082,13 +1087,22 @@ class WalkieTalkieEngine(
         if (audio.isNotEmpty()) {
             thread(name = "walkie-sync-audio", isDaemon = true) {
                 try {
-                    val track = ensureAudioTrack()
-                    var off = 0
-                    val chunk = WalkieProtocol.BYTES_PER_FRAME
-                    while (active() && off < audio.size) {
-                        val n = min(chunk, audio.size - off)
-                        track.write(audio, off, n)
-                        off += n
+                    // Hold playbackLock for the whole stream so live RX cannot write
+                    // the same AudioTrack mid-replay (native SIGABRT / releaseBuffer).
+                    synchronized(playbackLock) {
+                        val track = ensureAudioTrack()
+                        var off = 0
+                        val chunk = WalkieProtocol.BYTES_PER_FRAME
+                        while (active() && off < audio.size) {
+                            val n = min(chunk, audio.size - off)
+                            val written = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                track.write(audio, off, n, AudioTrack.WRITE_BLOCKING)
+                            } else {
+                                track.write(audio, off, n)
+                            }
+                            if (written <= 0) break
+                            off += written
+                        }
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "$label audio", t)
@@ -1842,13 +1856,15 @@ class WalkieTalkieEngine(
                 if (!talking.get()) {
                     setChannelBusy(true, "receiving from $from")
                 }
-                preparePlaybackAudio()
                 if (replaying.get()) {
-                    // Buffer only — do not yank UI off Replay (that caused crashes)
+                    // Buffer only — do not yank UI or touch AudioTrack (Replay owns it).
+                    // Concurrent AudioTrack.write from live RX + Replay = native SIGABRT.
+                    rxOverlappedReplay.set(true)
                     Log.i(TAG, "Incoming while replaying — buffering, play after Replay")
                     videoDebug("Receiving during Replay — will play next when Replay ends")
                     postStatus("Receiving new video (plays after Replay)…")
                 } else {
+                    preparePlaybackAudio()
                     mainHandler.post { listener.onReceivingChanged(true) }
                     postStatus("Receiving message… (expecting video)")
                 }
@@ -1893,7 +1909,12 @@ class WalkieTalkieEngine(
             } catch (_: Exception) {
             }
         }
-        playPcm(pcm)
+        // Never write live RX audio while Replay owns AudioTrack — concurrent write
+        // aborts the process (releaseBuffer mUnreleased out of range / SIGABRT).
+        // Buffer-only while replaying; clip plays after Replay via pendingAfterReplay.
+        if (!replaying.get()) {
+            playPcm(pcm)
+        }
     }
 
     private fun ensurePeerFromHost(fromHost: String) {
@@ -2021,17 +2042,27 @@ class WalkieTalkieEngine(
         val dur = max(metrics.videoMs, metrics.audioMs)
         val msg = WalkieMessage(audio, frames, dur, from)
         storeLastMessage(msg)
-        if (replaying.get()) {
+        val overlapped = rxOverlappedReplay.getAndSet(false)
+        val stillReplaying = replaying.get()
+        if (stillReplaying) {
             pendingAfterReplay = msg
+            // Keep overlap flag so stop/end path also sees queue if needed
+            rxOverlappedReplay.set(true)
             Log.i(TAG, "Queued incoming clip while replaying frames=${frames.size}")
             videoDebug("New video saved — will play right after Replay")
             postStatus("New video queued (after Replay)…")
+        } else if (overlapped) {
+            // Clip finished after Replay already ended — auto-play now
+            Log.i(TAG, "Auto-play clip that overlapped Replay frames=${frames.size}")
+            videoDebug("Playing video that arrived during Replay…")
+            pendingAfterReplay = msg
+            playPendingAfterReplayIfAny()
         }
         Log.i(
             TAG,
             "CLIP_RX mode=$mode frames=${frames.size} videoMs=${metrics.videoMs} " +
                 "audioMs=${metrics.audioMs} audioBytes=${audio.size} from=$from " +
-                "queued=${replaying.get()}"
+                "queued=$stillReplaying overlapped=$overlapped"
         )
         // Seal so late frames / duplicate TALK_END cannot replace this clip with junk
         if (msg.frames.isNotEmpty() || msg.audioPcm.isNotEmpty()) {
