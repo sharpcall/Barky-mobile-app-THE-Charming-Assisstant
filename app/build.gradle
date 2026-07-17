@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 37
-        versionName "5.2-mic-drag-ui"
+        versionCode 38
+        versionName "5.2-natural-camera"
     }
 
     compileOptions {

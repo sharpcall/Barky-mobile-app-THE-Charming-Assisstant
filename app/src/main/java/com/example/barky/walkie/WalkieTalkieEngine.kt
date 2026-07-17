@@ -74,6 +74,13 @@ class WalkieTalkieEngine(
         ) {}
         fun onListenStateChanged(listening: Boolean, serving: Boolean) {}
         fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {}
+        /** Camera preview buffer size for natural TextureView center-crop. */
+        fun onLocalPreviewGeometry(
+            previewW: Int,
+            previewH: Int,
+            displayOrientation: Int,
+            front: Boolean
+        ) {}
     }
 
     private val appContext = context.applicationContext
@@ -321,6 +328,11 @@ class WalkieTalkieEngine(
                     BarkyPrefs.setCameraFront(appContext, front)
                     videoDebug("Preview camera: ${if (front) "front" else "back"}")
                     postStatus(if (front) "Front camera" else "Back camera")
+                },
+                onPreviewReady = { w, h, orient, front ->
+                    mainHandler.post {
+                        listener.onLocalPreviewGeometry(w, h, orient, front)
+                    }
                 },
                 onError = { msg -> videoDebug("Preview camera: $msg") }
             ) { jpeg ->
@@ -623,6 +635,9 @@ class WalkieTalkieEngine(
                         BarkyPrefs.setCameraFront(appContext, front)
                         videoDebug("Camera facing: ${if (front) "front" else "back"}")
                     },
+                    onPreviewReady = { w, h, orient, front ->
+                        mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
+                    },
                     onError = { msg -> videoDebug("Camera: $msg") }
                 ) { jpeg ->
                     if (!talking.get()) return@CameraFrameSource
@@ -677,6 +692,9 @@ class WalkieTalkieEngine(
                 onFacingChanged = { front ->
                     BarkyPrefs.setCameraFront(appContext, front)
                     videoDebug("Camera facing: ${if (front) "front" else "back"}")
+                },
+                onPreviewReady = { w, h, orient, front ->
+                    mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
                 },
                 onError = { msg -> videoDebug("Camera: $msg") }
             ) { jpeg ->
@@ -2960,6 +2978,9 @@ class WalkieTalkieEngine(
                     preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
                     externalSurfaceTexture = { uiPreviewTexture },
                     onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
+                    onPreviewReady = { w, h, orient, front ->
+                        mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
+                    },
                     onError = { msg -> videoDebug("SEE cam: $msg") }
                 ) { jpeg ->
                     if (!servingSee.get()) return@CameraFrameSource

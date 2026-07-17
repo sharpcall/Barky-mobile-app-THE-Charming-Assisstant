@@ -78,6 +78,12 @@ class WalkieTalkieService : Service() {
         ) {}
         fun onListenStateChanged(listening: Boolean, serving: Boolean) {}
         fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {}
+        fun onLocalPreviewGeometry(
+            previewW: Int,
+            previewH: Int,
+            displayOrientation: Int,
+            front: Boolean
+        ) {}
     }
 
     fun addListener(l: UiListener) {
@@ -221,6 +227,17 @@ class WalkieTalkieService : Service() {
 
             override fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {
                 uiListeners.forEach { it.onSeeStateChanged(seeing, serving) }
+            }
+
+            override fun onLocalPreviewGeometry(
+                previewW: Int,
+                previewH: Int,
+                displayOrientation: Int,
+                front: Boolean
+            ) {
+                uiListeners.forEach {
+                    it.onLocalPreviewGeometry(previewW, previewH, displayOrientation, front)
+                }
             }
         })
         engine?.start()

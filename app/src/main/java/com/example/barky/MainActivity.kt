@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.os.Build
 import android.os.Bundle
@@ -23,6 +24,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import kotlin.math.max
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -97,6 +99,10 @@ class MainActivity : AppCompatActivity() {
     private var activePttMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER
     private var myTrail: List<LocationTracker.GpsPoint> = emptyList()
     private var peerTrail: List<LocationTracker.GpsPoint> = emptyList()
+    /** Last camera preview geometry for natural TextureView crop. */
+    private var previewBufW = 0
+    private var previewBufH = 0
+    private var previewDisplayOrient = 90
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -314,6 +320,20 @@ class MainActivity : AppCompatActivity() {
                 updateListenSeeButtons()
             }
         }
+
+        override fun onLocalPreviewGeometry(
+            previewW: Int,
+            previewH: Int,
+            displayOrientation: Int,
+            front: Boolean
+        ) {
+            runOnUiThread {
+                previewBufW = previewW
+                previewBufH = previewH
+                previewDisplayOrient = displayOrientation
+                applyNaturalPreviewTransform()
+            }
+        }
     }
 
     private val connection = object : ServiceConnection {
@@ -427,9 +447,12 @@ class MainActivity : AppCompatActivity() {
                     walkieService?.startLocalPreview()
                     showLocalCameraSurface(true)
                 }
+                applyNaturalPreviewTransform()
             }
 
-            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                applyNaturalPreviewTransform()
+            }
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
                 walkieService?.setUiPreviewTexture(null)
                 return true
@@ -965,10 +988,45 @@ class MainActivity : AppCompatActivity() {
             walkiePreview.visibility = View.VISIBLE
             walkieVideo.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
+            applyNaturalPreviewTransform()
         } else {
             walkiePreview.visibility = View.GONE
             walkieVideo.visibility = View.VISIBLE
+            // Remote frames: centerCrop ImageView (no stretch)
+            walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
         }
+    }
+
+    /**
+     * Center-crop TextureView so faces/scenes keep natural proportions (no stretch).
+     * Matches Camera1 buffer (landscape) + setDisplayOrientation (usually 90° on phones).
+     */
+    private fun applyNaturalPreviewTransform() {
+        if (!::walkiePreview.isInitialized) return
+        val viewWidth = walkiePreview.width
+        val viewHeight = walkiePreview.height
+        if (viewWidth <= 0 || viewHeight <= 0 || previewBufW <= 0 || previewBufH <= 0) return
+        val matrix = Matrix()
+        val viewRect = android.graphics.RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
+        val centerX = viewRect.centerX()
+        val centerY = viewRect.centerY()
+        // Sensor buffer is landscape (e.g. 1280x720); after displayOrientation the visual is upright
+        val bufferRect = android.graphics.RectF(
+            0f,
+            0f,
+            previewBufH.toFloat(),
+            previewBufW.toFloat()
+        )
+        bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+        matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+        val scale = max(
+            viewHeight.toFloat() / previewBufW.toFloat(),
+            viewWidth.toFloat() / previewBufH.toFloat()
+        )
+        matrix.postScale(scale, scale, centerX, centerY)
+        // Front camera: mirror horizontally for natural selfie view
+        // (sensor may already mirror; only if it looks reversed in testing — skip by default)
+        walkiePreview.setTransform(matrix)
     }
 
     private fun reallyStartWalkie() {

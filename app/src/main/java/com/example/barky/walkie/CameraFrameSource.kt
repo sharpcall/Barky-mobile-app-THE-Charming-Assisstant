@@ -75,6 +75,12 @@ class CameraFrameSource(
      */
     private val externalSurfaceTexture: () -> SurfaceTexture? = { null },
     private val onFacingChanged: (front: Boolean) -> Unit = {},
+    /**
+     * Preview buffer size (sensor landscape) + display orientation applied via
+     * [Camera.setDisplayOrientation]. UI uses this to center-crop TextureView.
+     */
+    private val onPreviewReady: (previewW: Int, previewH: Int, displayOrientation: Int, front: Boolean) -> Unit =
+        { _, _, _, _ -> },
     private val onError: (String) -> Unit = {},
     private val onJpegFrame: (ByteArray) -> Unit
 ) {
@@ -195,9 +201,12 @@ class CameraFrameSource(
         } catch (_: Exception) {
         }
         cam.parameters = params
-        try {
-            cam.setDisplayOrientation(computeDisplayOrientation())
+        val displayOrientation = try {
+            val o = computeDisplayOrientation()
+            cam.setDisplayOrientation(o)
+            o
         } catch (_: Exception) {
+            90
         }
 
         val external = externalSurfaceTexture()
@@ -218,13 +227,10 @@ class CameraFrameSource(
         }
         surfaceTexture = st
         try {
-            // Default buffer size if TextureView already has size
+            // Buffer matches sensor preview; TextureView matrix handles letter/center crop
             if (!ownsSurfaceTexture) {
                 try {
-                    st.setDefaultBufferSize(
-                        size.width.coerceAtLeast(640),
-                        size.height.coerceAtLeast(480)
-                    )
+                    st.setDefaultBufferSize(size.width, size.height)
                 } catch (_: Exception) {
                 }
             }
@@ -232,6 +238,10 @@ class CameraFrameSource(
         } catch (t: Throwable) {
             onError("setPreviewTexture failed: ${t.message}")
             throw t
+        }
+        try {
+            onPreviewReady(size.width, size.height, displayOrientation, facingFront)
+        } catch (_: Exception) {
         }
 
         // Drop backlog: if encoder is busy, skip rather than queue lag
@@ -455,11 +465,14 @@ class CameraFrameSource(
     }
 
     private fun pickPreviewSize(sizes: List<Camera.Size>): Camera.Size {
-        val tw = WalkieProtocol.VIDEO_WIDTH
-        val th = WalkieProtocol.VIDEO_HEIGHT
-        return sizes
-            .filter { it.width * it.height in (640 * 480)..(1280 * 720) }
-            .minByOrNull { abs(it.width - tw) + abs(it.height - th) }
+        // Prefer 16:9 near 1280x720 — natural phone video look (no weird crop ratios)
+        val targetRatio = 16.0 / 9.0
+        val band = sizes.filter { it.width * it.height in (640 * 480)..(1920 * 1080) }
+        return band
+            .minByOrNull { s ->
+                val r = s.width.toDouble() / s.height.toDouble()
+                abs(r - targetRatio) * 2000.0 + abs(s.width - WalkieProtocol.VIDEO_WIDTH)
+            }
             ?: sizes
                 .filter { it.width * it.height <= 1280 * 720 }
                 .maxByOrNull { it.width * it.height }

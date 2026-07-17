@@ -122,6 +122,82 @@
             android:textSize="11sp"
             android:visibility="gone" />
 
+        <!-- Mic drag over camera (keeps stage tall; does not steal height from video) -->
+        <FrameLayout
+            android:id="@+id/walkie_mic_stage"
+            android:layout_width="match_parent"
+            android:layout_height="140dp"
+            android:layout_gravity="bottom"
+            android:background="#66000000"
+            android:clipChildren="false"
+            android:clipToPadding="false">
+
+            <TextView
+                android:id="@+id/mic_hint_lock"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|center_horizontal"
+                android:layout_marginTop="6dp"
+                android:alpha="0.35"
+                android:text="@string/mic_drag_lock"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:visibility="invisible" />
+
+            <TextView
+                android:id="@+id/mic_hint_private"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical|start"
+                android:layout_marginStart="12dp"
+                android:alpha="0.35"
+                android:text="@string/mic_drag_private"
+                android:textColor="@color/barky_secondary"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:visibility="invisible" />
+
+            <TextView
+                android:id="@+id/mic_hint_speaker"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical|end"
+                android:layout_marginEnd="12dp"
+                android:alpha="0.35"
+                android:text="@string/mic_drag_speaker"
+                android:textColor="@color/barky_accent"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:visibility="invisible" />
+
+            <TextView
+                android:id="@+id/walkie_mic_mode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|center_horizontal"
+                android:gravity="center"
+                android:paddingBottom="4dp"
+                android:text="@string/walkie_mic_hint"
+                android:textColor="#CCFFFFFF"
+                android:textSize="11sp" />
+
+            <ImageButton
+                android:id="@+id/walkie_mic"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_gravity="bottom|center_horizontal"
+                android:layout_marginBottom="22dp"
+                android:background="@drawable/bg_mic_circle"
+                android:contentDescription="@string/walkie_mic_desc"
+                android:elevation="8dp"
+                android:enabled="false"
+                android:padding="18dp"
+                android:scaleType="centerInside"
+                android:src="@android:drawable/ic_btn_speak_now"
+                android:tint="@color/barky_on_primary" />
+        </FrameLayout>
+
         <com.google.android.material.button.MaterialButton
             android:id="@+id/walkie_replay"
             style="@style/Widget.MaterialComponents.Button"
@@ -282,96 +358,29 @@
                 app:strokeColor="@color/barky_accent" />
         </LinearLayout>
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/walkie_wakeup"
-            style="@style/Widget.MaterialComponents.Button"
+        <!-- Compact row: LISTEN | SEE | WAKEUP (mic floats over camera) -->
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:enabled="false"
-            android:text="@string/walkie_wakeup"
-            android:textAllCaps="false"
-            android:textColor="@color/barky_on_primary"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            app:backgroundTint="@color/walkie_wakeup"
-            app:cornerRadius="24dp" />
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <!-- Wide drag stage: finger can leave the button (WA-style) -->
-        <FrameLayout
-            android:id="@+id/walkie_mic_stage"
-            android:layout_width="match_parent"
-            android:layout_height="168dp"
-            android:layout_marginTop="4dp"
-            android:clipChildren="false"
-            android:clipToPadding="false">
-
-            <!-- Slide targets (shown while holding) -->
-            <TextView
-                android:id="@+id/mic_hint_lock"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="top|center_horizontal"
-                android:layout_marginTop="4dp"
-                android:alpha="0.35"
-                android:text="@string/mic_drag_lock"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:visibility="invisible" />
-
-            <TextView
-                android:id="@+id/mic_hint_private"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center_vertical|start"
-                android:layout_marginStart="12dp"
-                android:alpha="0.35"
-                android:text="@string/mic_drag_private"
-                android:textColor="@color/barky_secondary"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:visibility="invisible" />
-
-            <TextView
-                android:id="@+id/mic_hint_speaker"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center_vertical|end"
-                android:layout_marginEnd="12dp"
-                android:alpha="0.35"
-                android:text="@string/mic_drag_speaker"
-                android:textColor="@color/barky_accent"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:visibility="invisible" />
-
-            <TextView
-                android:id="@+id/walkie_mic_mode"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_gravity="bottom|center_horizontal"
-                android:gravity="center"
-                android:paddingBottom="2dp"
-                android:text="@string/walkie_mic_hint"
-                android:textColor="@color/barky_on_surface_muted"
-                android:textSize="11sp" />
-
-            <ImageButton
-                android:id="@+id/walkie_mic"
-                android:layout_width="72dp"
-                android:layout_height="72dp"
-                android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="22dp"
-                android:background="@drawable/bg_mic_circle"
-                android:contentDescription="@string/walkie_mic_desc"
-                android:elevation="8dp"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_wakeup"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
                 android:enabled="false"
-                android:padding="18dp"
-                android:scaleType="centerInside"
-                android:src="@android:drawable/ic_btn_speak_now"
-                android:tint="@color/barky_on_primary" />
-        </FrameLayout>
+                android:text="@string/walkie_wakeup"
+                android:textAllCaps="false"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/walkie_wakeup"
+                app:cornerRadius="22dp" />
+        </LinearLayout>
     </LinearLayout>
 
 </LinearLayout>
