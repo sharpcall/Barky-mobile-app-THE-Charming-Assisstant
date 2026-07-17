@@ -237,6 +237,75 @@ if ((Has $la "GPS" -or Has $la "GPS_TX" -or Has $la "GPS_RX") -and (Has $la "LIS
     Ok "PAIR GPS+LISTEN on A"
 } else { Bad "PAIR GPS+LISTEN" }
 
+# --- Unrelated-feature pairs (still required in matrix) ---
+Info "Pairs: GPS + SEE"
+ClearLogs
+Svc $A "com.example.barky.TEST_GPS_ON"
+Svc $A "com.example.barky.TEST_SEE_START"
+Start-Sleep 3
+Svc $A "com.example.barky.TEST_SEE_STOP"
+$la = Logs $A
+if ((Has $la "GPS" -or Has $la "GPS_TX" -or Has $la "GPS_ON") -and (Has $la "SEE_REQ" -or Has $la "SEE")) {
+    Ok "PAIR GPS+SEE on A"
+} else { Bad "PAIR GPS+SEE" }
+
+Info "Pairs: REPLAY after TALK on A"
+ClearLogs
+Svc $A "com.example.barky.SET_BEST_QUALITY" @("--ez","best","false")
+Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec; Svc $A "com.example.barky.TEST_TALK_STOP"
+Start-Sleep 2
+Svc $A "com.example.barky.TEST_REPLAY"; Start-Sleep 3
+$la = Logs $A
+if ((Has $la "CLIP_TX" -or Has $la "startTalking") -and (Has $la "Replay")) {
+    Ok "PAIR TALK then REPLAY on A"
+} else { Bad "PAIR TALK then REPLAY" }
+
+Info "Pairs: dual LISTEN both phones"
+ClearLogs
+Svc $A "com.example.barky.TEST_LISTEN_START"
+Svc $B "com.example.barky.TEST_LISTEN_START"
+Start-Sleep 3
+Svc $A "com.example.barky.TEST_LISTEN_STOP"
+Svc $B "com.example.barky.TEST_LISTEN_STOP"
+$la = Logs $A; $lb = Logs $B
+if ((Has $la "LISTEN_REQ" -or Has $la "MONITOR_AUDIO") -and (Has $lb "LISTEN_REQ" -or Has $lb "MONITOR_AUDIO" -or Has $lb "LISTEN serve")) {
+    Ok "PAIR dual LISTEN both phones"
+} else { Bad "PAIR dual LISTEN" }
+
+Info "Pairs: WAKEUP then HOLD"
+ClearLogs
+Svc $A "com.example.barky.TEST_WAKEUP" @("--ez","quiet","true")
+Start-Sleep 1
+Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec; Svc $A "com.example.barky.TEST_TALK_STOP"
+Start-Sleep 2
+$la = Logs $A
+if ((Has $la "WAKEUP" -or Has $la "TEST_WAKEUP") -and (Has $la "CLIP_TX" -or Has $la "startTalking" -or Has $la "TALK")) {
+    Ok "PAIR WAKEUP then HOLD on A"
+} else { Bad "PAIR WAKEUP then HOLD" }
+
+Info "Pairs: SEE stop then LISTEN still works on B"
+ClearLogs
+Svc $B "com.example.barky.TEST_SEE_START"; Start-Sleep 2
+Svc $B "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
+Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3
+Svc $B "com.example.barky.TEST_LISTEN_STOP"
+$lb = Logs $B
+if ((Has $lb "SEE_STOP" -or Has $lb "SEE") -and (Has $lb "LISTEN_REQ" -or Has $lb "MONITOR_AUDIO_RX")) {
+    Ok "PAIR SEE-stop then LISTEN on B"
+} else { Bad "PAIR SEE-stop then LISTEN on B" }
+
+# Route check: LISTEN should force speaker on both phones
+Info "Route: forceListenVolume SPEAKER logs both ways"
+ClearLogs
+Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3; Svc $A "com.example.barky.TEST_LISTEN_STOP"
+Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3; Svc $B "com.example.barky.TEST_LISTEN_STOP"
+$la = Logs $A; $lb = Logs $B
+$aSp = Has $la "forceListenVolume SPEAKER" -or Has $la "SPEAKER"
+$bSp = Has $lb "forceListenVolume SPEAKER" -or Has $lb "SPEAKER"
+if ($aSp -and $bSp) { Ok "ROUTE LISTEN SPEAKER both phones" }
+elseif ($aSp -or $bSp) { Bad "ROUTE LISTEN SPEAKER only one phone a=$aSp b=$bSp" }
+else { Bad "ROUTE LISTEN SPEAKER log missing" }
+
 # Fatal check
 foreach ($s in $devs) {
     $m = (& $adb -s $s shell getprop ro.product.model).Trim()

@@ -36,6 +36,17 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <!-- Soft rectangular edge blend over self PiP (not rounded corners) -->
+        <View
+            android:id="@+id/walkie_pip_fade"
+            android:layout_width="110dp"
+            android:layout_height="150dp"
+            android:background="@drawable/pip_rect_edge_fade"
+            android:clickable="false"
+            android:elevation="25dp"
+            android:focusable="false"
+            android:visibility="gone" />
+
         <ImageView
             android:id="@+id/walkie_video"
             android:layout_width="match_parent"

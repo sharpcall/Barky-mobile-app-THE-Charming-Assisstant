@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieReplay: MaterialButton
     private lateinit var walkieFlipCamera: ImageButton
     private lateinit var walkiePreview: TextureView
+    private lateinit var walkiePipFade: View
     private lateinit var walkieVideo: ImageView
     private lateinit var walkieVideoHint: TextView
     private lateinit var walkieMap: WebView
@@ -441,6 +442,7 @@ class MainActivity : AppCompatActivity() {
         walkieReplay = findViewById(R.id.walkie_replay)
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
         walkiePreview = findViewById(R.id.walkie_preview)
+        walkiePipFade = findViewById(R.id.walkie_pip_fade)
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
         walkieMap = findViewById(R.id.walkie_map)
@@ -1066,29 +1068,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Rounded soft outline so self-view blends into remote video (no hard rectangle). */
+    /**
+     * Rectangular self-view with soft **full-perimeter** edge fade into remote video
+     * (not rounded corners — gradients on all four sides).
+     */
     private fun applyPipSoftEdges(enabled: Boolean) {
-        if (!::walkiePreview.isInitialized) return
+        if (!::walkiePreview.isInitialized || !::walkiePipFade.isInitialized) return
         if (enabled) {
-            val r = 28f * resources.displayMetrics.density
-            walkiePreview.clipToOutline = true
-            walkiePreview.outlineProvider = object : android.view.ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: android.graphics.Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, r)
-                }
-            }
-            // Soft shadow blend
-            walkiePreview.elevation = 20f
-            if (Build.VERSION.SDK_INT >= 28) {
-                walkiePreview.outlineAmbientShadowColor = 0x66000000.toInt()
-                walkiePreview.outlineSpotShadowColor = 0x88000000.toInt()
-            }
-            walkiePreview.invalidateOutline()
-        } else {
+            // Keep rectangular clip (no rounded corners)
             walkiePreview.clipToOutline = false
             walkiePreview.outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            walkiePreview.elevation = 18f
+            syncPipFadeOverlay()
+            walkiePipFade.visibility = View.VISIBLE
+            walkiePipFade.bringToFront()
+            walkiePreview.bringToFront()
+            walkiePipFade.bringToFront()
+        } else {
+            walkiePipFade.visibility = View.GONE
             walkiePreview.elevation = 0f
         }
+    }
+
+    /** Keep fade overlay same size/position as floating TextureView. */
+    private fun syncPipFadeOverlay() {
+        if (!::walkiePipFade.isInitialized || !::walkiePreview.isInitialized) return
+        val lpPrev = walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams ?: return
+        val lpFade = (walkiePipFade.layoutParams as? android.widget.FrameLayout.LayoutParams)
+            ?: android.widget.FrameLayout.LayoutParams(lpPrev.width, lpPrev.height)
+        lpFade.width = lpPrev.width
+        lpFade.height = lpPrev.height
+        lpFade.gravity = lpPrev.gravity
+        lpFade.setMargins(lpPrev.leftMargin, lpPrev.topMargin, lpPrev.rightMargin, lpPrev.bottomMargin)
+        walkiePipFade.layoutParams = lpFade
+        walkiePipFade.elevation = walkiePreview.elevation + 1f
     }
 
     private fun pipSizeDp(): Pair<Int, Int> {
@@ -1137,6 +1150,7 @@ class MainActivity : AppCompatActivity() {
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         lp.setMargins(left, top, 0, 0)
         walkiePreview.layoutParams = lp
+        syncPipFadeOverlay()
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }
         }
@@ -1184,6 +1198,7 @@ class MainActivity : AppCompatActivity() {
                     pipLastLeft = lp.leftMargin
                     pipLastTop = lp.topMargin
                     v.layoutParams = lp
+                    syncPipFadeOverlay()
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -1194,6 +1209,7 @@ class MainActivity : AppCompatActivity() {
                         pipLastLeft = cur.leftMargin
                         pipLastTop = cur.topMargin
                     }
+                    syncPipFadeOverlay()
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
                         pipEnlarged = !pipEnlarged
                         layoutFloatingPip(preservePosition = true)
@@ -1225,6 +1241,7 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.elevation = 0f
         walkiePreview.translationX = 0f
         walkiePreview.translationY = 0f
+        if (::walkiePipFade.isInitialized) walkiePipFade.visibility = View.GONE
         applyNaturalPreviewTransform()
     }
 

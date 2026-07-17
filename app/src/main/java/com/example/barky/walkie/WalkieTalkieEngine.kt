@@ -2788,16 +2788,38 @@ class WalkieTalkieEngine(
         Log.i(TAG, "LISTEN_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
     }
 
-    /** Raise media volume so LISTEN is actually audible (especially on Pixel). */
+    /**
+     * LISTEN always plays on the **loudspeaker** on every device (Pixel + Samsung).
+     * Clears earpiece / BT-SCO / communication routing left over from Private HOLD.
+     */
     private fun forceListenVolume() {
         try {
+            // Drop any in-call / earpiece path (Pixel often stays on earpiece after Private)
+            try {
+                audioManager.stopBluetoothSco()
+            } catch (_: Exception) {
+            }
+            @Suppress("DEPRECATION")
+            audioManager.isBluetoothScoOn = false
+            audioManager.mode = AudioManager.MODE_NORMAL
             @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = true
-            audioManager.mode = AudioManager.MODE_NORMAL
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val speaker = audioManager.availableCommunicationDevices.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                }
+                if (speaker != null) {
+                    audioManager.setCommunicationDevice(speaker)
+                } else {
+                    audioManager.clearCommunicationDevice()
+                }
+            }
             val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             val target = max(max * 3 / 4, 2)
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
-            Log.i(TAG, "forceListenVolume music=$target/$max")
+            // Rebuild track after route change so Pixel actually uses speaker
+            releaseAudioTrack()
+            Log.i(TAG, "forceListenVolume SPEAKER music=$target/$max")
         } catch (t: Throwable) {
             Log.w(TAG, "forceListenVolume", t)
         }
