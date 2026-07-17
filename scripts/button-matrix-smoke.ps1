@@ -242,9 +242,9 @@ foreach ($s in $devs) {
     $m = (& $adb -s $s shell getprop ro.product.model).Trim()
     $l = Logs $s
     $fatal = $l | Select-String "FATAL EXCEPTION|Fatal signal"
-    $pid = (& $adb -s $s shell pidof $pkg).Trim()
+    $procId = (& $adb -s $s shell pidof $pkg).Trim()
     if ($fatal) { Bad "FATAL on $m" } else { Ok "no FATAL on $m" }
-    if ($pid) { Ok "$m alive" } else { Bad "$m dead" }
+    if ($procId) { Ok "$m alive" } else { Bad "$m dead" }
 }
 
 Write-Output ("========== MATRIX RESULTS pass={0} fail={1} t={2}s ==========" -f $pass, $fail, (T))
