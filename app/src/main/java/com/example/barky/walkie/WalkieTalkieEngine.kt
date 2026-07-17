@@ -1353,21 +1353,24 @@ class WalkieTalkieEngine(
     }
 
     private fun sendHelloTo(peer: WalkiePeer) {
-        try {
-            val buf = ByteArray(3)
-            buf[0] = WalkieProtocol.TYPE_HELLO
-            buf[1] = ((localVideoPort ushr 8) and 0xFF).toByte()
-            buf[2] = (localVideoPort and 0xFF).toByte()
-            sendUdp(
-                DatagramPacket(
-                    buf,
-                    buf.size,
-                    InetAddress.getByName(peer.host),
-                    peer.port
+        // Never on main — Pixel StrictMode throws NetworkOnMainThreadException
+        thread(name = "walkie-hello", isDaemon = true) {
+            try {
+                val buf = ByteArray(3)
+                buf[0] = WalkieProtocol.TYPE_HELLO
+                buf[1] = ((localVideoPort ushr 8) and 0xFF).toByte()
+                buf[2] = (localVideoPort and 0xFF).toByte()
+                sendUdp(
+                    DatagramPacket(
+                        buf,
+                        buf.size,
+                        InetAddress.getByName(peer.host),
+                        peer.port
+                    )
                 )
-            )
-        } catch (t: Throwable) {
-            Log.w(TAG, "sendHello", t)
+            } catch (t: Throwable) {
+                Log.w(TAG, "sendHello", t)
+            }
         }
     }
 
@@ -2721,16 +2724,26 @@ class WalkieTalkieEngine(
         // Loud speaker path for monitor; rebuild AudioTrack cleanly
         releaseAudioTrack()
         preparePlaybackAudio(headset = false)
-        // Wake peer + include our UDP port for reverse stream
-        sendHelloTo(peer)
-        sendControlWithPort(peer, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
-        // Retransmit after HELLO settles (helps Pixel/Samsung NAT-ish Wi‑Fi stacks)
-        mainHandler.postDelayed({
-            if (requestingListen.get()) {
-                val p = currentPeer() ?: peer
-                sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
+        val target = peer
+        val reply = localPort
+        // All network off main thread (Pixel StrictMode)
+        thread(name = "walkie-listen-req", isDaemon = true) {
+            try {
+                sendHelloTo(target)
+                Thread.sleep(80)
+                sendControlWithPort(target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
+                Thread.sleep(200)
+                if (requestingListen.get()) {
+                    sendControlWithPort(currentPeer() ?: target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
+                }
+                Thread.sleep(300)
+                if (requestingListen.get()) {
+                    sendControlWithPort(currentPeer() ?: target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "LISTEN_REQ send path", t)
             }
-        }, 400)
+        }
         mainHandler.post { listener.onListenStateChanged(true, servingListen.get()) }
         postStatus("LISTEN — hearing peer mic…")
         Log.i(TAG, "LISTEN_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
@@ -2765,16 +2778,24 @@ class WalkieTalkieEngine(
         stopLocalPreviewInternal()
         releaseAudioTrack()
         preparePlaybackAudio(headset = false)
-        sendHelloTo(peer)
-        sendControlWithPort(peer, WalkieProtocol.TYPE_SEE_REQ, localPort)
-        sendControlWithPort(peer, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
-        mainHandler.postDelayed({
-            if (requestingSee.get()) {
-                val p = currentPeer() ?: peer
-                sendControlWithPort(p, WalkieProtocol.TYPE_SEE_REQ, localPort)
-                sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
+        val target = peer
+        val reply = localPort
+        thread(name = "walkie-see-req", isDaemon = true) {
+            try {
+                sendHelloTo(target)
+                Thread.sleep(80)
+                sendControlWithPort(target, WalkieProtocol.TYPE_SEE_REQ, reply)
+                sendControlWithPort(target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
+                Thread.sleep(250)
+                if (requestingSee.get()) {
+                    val p = currentPeer() ?: target
+                    sendControlWithPort(p, WalkieProtocol.TYPE_SEE_REQ, reply)
+                    sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, reply)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "SEE_REQ send path", t)
             }
-        }, 400)
+        }
         mainHandler.post {
             listener.onSeeStateChanged(true, servingSee.get())
             listener.onListenStateChanged(true, servingListen.get())
