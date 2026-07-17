@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 26
-        versionName "3.8-best-prefs-flicker"
+        versionCode 27
+        versionName "3.9-textureview-no-flicker"
     }
 
     compileOptions {

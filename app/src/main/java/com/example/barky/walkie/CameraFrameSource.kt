@@ -69,6 +69,11 @@ class CameraFrameSource(
     private val config: CaptureConfig = CaptureConfig.Live,
     /** Preferred lens at start (user can [switchCamera] later). */
     preferFrontCamera: Boolean = true,
+    /**
+     * Optional TextureView surface for **hardware** local preview (no JPEG→ImageView flicker).
+     * When null, a dummy SurfaceTexture is used (encode-only).
+     */
+    private val externalSurfaceTexture: () -> SurfaceTexture? = { null },
     private val onFacingChanged: (front: Boolean) -> Unit = {},
     private val onError: (String) -> Unit = {},
     private val onJpegFrame: (ByteArray) -> Unit
@@ -76,6 +81,8 @@ class CameraFrameSource(
     private val running = AtomicBoolean(false)
     private var camera: Camera? = null
     private var surfaceTexture: SurfaceTexture? = null
+    /** True if we created SurfaceTexture ourselves (must release). */
+    private var ownsSurfaceTexture = false
     private var lastSentAt = 0L
     private var facingFront: Boolean = preferFrontCamera
     private var preferFront: Boolean = preferFrontCamera
@@ -85,6 +92,9 @@ class CameraFrameSource(
     private var frameCount = 0
 
     fun isFrontFacing(): Boolean = facingFront
+
+    /** True when drawing through TextureView — UI should not JPEG-decode for local view. */
+    fun usesHardwarePreview(): Boolean = externalSurfaceTexture() != null
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -190,15 +200,39 @@ class CameraFrameSource(
         } catch (_: Exception) {
         }
 
-        val st = SurfaceTexture(10)
-        st.setOnFrameAvailableListener({
-            try {
-                st.updateTexImage()
-            } catch (_: Exception) {
+        val external = externalSurfaceTexture()
+        val st = if (external != null) {
+            ownsSurfaceTexture = false
+            // TextureView drives updateTexImage; do not attach a second listener that races UI
+            external
+        } else {
+            ownsSurfaceTexture = true
+            SurfaceTexture(10).also { dummy ->
+                dummy.setOnFrameAvailableListener({
+                    try {
+                        dummy.updateTexImage()
+                    } catch (_: Exception) {
+                    }
+                }, worker)
             }
-        }, worker)
+        }
         surfaceTexture = st
-        cam.setPreviewTexture(st)
+        try {
+            // Default buffer size if TextureView already has size
+            if (!ownsSurfaceTexture) {
+                try {
+                    st.setDefaultBufferSize(
+                        size.width.coerceAtLeast(640),
+                        size.height.coerceAtLeast(480)
+                    )
+                } catch (_: Exception) {
+                }
+            }
+            cam.setPreviewTexture(st)
+        } catch (t: Throwable) {
+            onError("setPreviewTexture failed: ${t.message}")
+            throw t
+        }
 
         // Drop backlog: if encoder is busy, skip rather than queue lag
         val encoding = AtomicBoolean(false)
@@ -252,11 +286,14 @@ class CameraFrameSource(
         }
         camera = null
         try {
-            surfaceTexture?.setOnFrameAvailableListener(null)
-            surfaceTexture?.release()
+            if (ownsSurfaceTexture) {
+                surfaceTexture?.setOnFrameAvailableListener(null)
+                surfaceTexture?.release()
+            }
         } catch (_: Exception) {
         }
         surfaceTexture = null
+        ownsSurfaceTexture = false
     }
 
     private fun nv21ToUprightJpeg(nv21: ByteArray, width: Int, height: Int): ByteArray? {

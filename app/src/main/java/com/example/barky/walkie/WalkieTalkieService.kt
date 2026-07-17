@@ -107,6 +107,8 @@ class WalkieTalkieService : Service() {
         ?: com.example.barky.BarkyPrefs.isCameraFront(this)
     fun startLocalPreview() = engine?.startLocalPreview()
     fun stopLocalPreview() = engine?.stopLocalPreview()
+    fun setUiPreviewTexture(texture: android.graphics.SurfaceTexture?) =
+        engine?.setUiPreviewTexture(texture)
 
     override fun onBind(intent: Intent?): IBinder = binder
 

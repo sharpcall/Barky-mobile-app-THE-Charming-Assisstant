@@ -32,13 +32,21 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent">
 
+            <!-- Hardware camera preview (local TX / idle) — no JPEG flicker -->
+            <TextureView
+                android:id="@+id/walkie_preview"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <!-- Remote / replay frames (MJPEG) -->
             <ImageView
                 android:id="@+id/walkie_video"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:contentDescription="@string/walkie_video_desc"
                 android:scaleType="centerCrop"
-                android:src="@color/barky_primary_dark" />
+                android:src="@color/barky_primary_dark"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/walkie_video_hint"

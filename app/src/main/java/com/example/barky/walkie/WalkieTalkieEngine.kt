@@ -3,6 +3,7 @@ package com.example.barky.walkie
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -117,6 +118,8 @@ class WalkieTalkieEngine(
     /** Local idle preview (so flip works before HOLD). */
     private var previewSource: CameraFrameSource? = null
     @Volatile private var localPreviewWanted = false
+    /** TextureView surface from MainActivity — hardware preview, no JPEG flicker. */
+    @Volatile private var uiPreviewTexture: SurfaceTexture? = null
     private val videoFrameId = AtomicInteger(1)
     private val videoAssembly = ConcurrentHashMap<Int, Array<ByteArray?>>()
     private val videoAssemblyTime = ConcurrentHashMap<Int, Long>()
@@ -232,6 +235,17 @@ class WalkieTalkieEngine(
 
     fun isCameraFrontPreferred(): Boolean = BarkyPrefs.isCameraFront(appContext)
 
+    /** Bind TextureView surface for flicker-free local camera display. */
+    fun setUiPreviewTexture(texture: SurfaceTexture?) {
+        uiPreviewTexture = texture
+        Log.i(TAG, "uiPreviewTexture set=${texture != null}")
+        if (texture != null && localPreviewWanted && !talking.get()) {
+            // Restart preview onto the real TextureView
+            stopLocalPreviewInternal()
+            startLocalPreviewInternal()
+        }
+    }
+
     /** Start local viewfinder so flip is instant (before HOLD). */
     fun startLocalPreview() {
         localPreviewWanted = true
@@ -249,11 +263,13 @@ class WalkieTalkieEngine(
         if (!running.get()) return
         try {
             stopLocalPreviewInternal()
+            val hasHw = uiPreviewTexture != null
             val cam = CameraFrameSource(
                 context = appContext,
                 compactForUdp = { false },
                 config = CaptureConfig.Preview,
                 preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
+                externalSurfaceTexture = { uiPreviewTexture },
                 onFacingChanged = { front ->
                     BarkyPrefs.setCameraFront(appContext, front)
                     videoDebug("Preview camera: ${if (front) "front" else "back"}")
@@ -262,12 +278,17 @@ class WalkieTalkieEngine(
                 onError = { msg -> videoDebug("Preview camera: $msg") }
             ) { jpeg ->
                 if (talking.get() || replaying.get() || receiving.get()) return@CameraFrameSource
-                // Preview-only path: slower UI updates, never hides Replay
+                // Hardware TextureView already shows camera — skip JPEG UI (kills flicker)
+                if (uiPreviewTexture != null) return@CameraFrameSource
                 decodeAndEmit(jpeg, live = true, localPreview = true)
             }
             previewSource = cam
             cam.start()
-            videoDebug("Local preview started front=${BarkyPrefs.isCameraFront(appContext)}")
+            videoDebug(
+                "Local preview started front=${BarkyPrefs.isCameraFront(appContext)} " +
+                    "hardwareSurface=$hasHw"
+            )
+            Log.i(TAG, "Local preview hardwareSurface=$hasHw")
         } catch (t: Throwable) {
             Log.w(TAG, "startLocalPreview", t)
         }
@@ -525,6 +546,7 @@ class WalkieTalkieEngine(
                     compactForUdp = { false },
                     config = CaptureConfig.BestRecord,
                     preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
+                    externalSurfaceTexture = { uiPreviewTexture },
                     onFacingChanged = { front ->
                         BarkyPrefs.setCameraFront(appContext, front)
                         videoDebug("Camera facing: ${if (front) "front" else "back"}")
@@ -539,7 +561,10 @@ class WalkieTalkieEngine(
                         }
                         outgoingFrames.add(WalkieVideoFrame(offset, jpeg.copyOf()))
                     }
-                    decodeAndEmit(jpeg, live = true)
+                    // TextureView shows self; only fall back to JPEG UI without surface
+                    if (uiPreviewTexture == null) {
+                        decodeAndEmit(jpeg, live = true)
+                    }
                     val n = synchronized(outgoingFrames) { outgoingFrames.size }
                     if (n == 1 || n % 20 == 0) {
                         videoDebug("BEST recorded frames=$n lastJpeg=${jpeg.size}B")
@@ -576,6 +601,7 @@ class WalkieTalkieEngine(
                 compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
                 config = CaptureConfig.Live,
                 preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
+                externalSurfaceTexture = { uiPreviewTexture },
                 onFacingChanged = { front ->
                     BarkyPrefs.setCameraFront(appContext, front)
                     videoDebug("Camera facing: ${if (front) "front" else "back"}")
@@ -589,6 +615,10 @@ class WalkieTalkieEngine(
                         outgoingFrames.removeAt(0)
                     }
                     outgoingFrames.add(WalkieVideoFrame(offset, jpeg.copyOf()))
+                }
+                // Self-view via TextureView (no JPEG flash); still encode/send jpeg
+                if (uiPreviewTexture == null) {
+                    decodeAndEmit(jpeg, live = true)
                 }
                 val viaTcp = sendVideoFrameTcp(jpeg)
                 if (viaTcp) {

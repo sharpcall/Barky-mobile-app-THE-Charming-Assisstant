@@ -23,6 +23,8 @@ import androidx.core.content.ContextCompat
 import com.example.barky.walkie.WalkiePeer
 import com.example.barky.walkie.WalkieTalkieService
 import com.google.android.material.appbar.MaterialToolbar
+import android.graphics.SurfaceTexture
+import android.view.TextureView
 import android.widget.ImageButton
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -45,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieWakeup: MaterialButton
     private lateinit var walkieReplay: MaterialButton
     private lateinit var walkieFlipCamera: ImageButton
+    private lateinit var walkiePreview: TextureView
     private lateinit var walkieVideo: ImageView
     private lateinit var walkieVideoHint: TextView
 
@@ -104,9 +107,11 @@ class MainActivity : AppCompatActivity() {
                     ContextCompat.getColorStateList(this@MainActivity, R.color.walkie_ptt_active)
                 walkieVideoHint.visibility = View.GONE
                 walkieReplay.visibility = View.GONE
+                showLocalCameraSurface(true)
             } else {
                 updatePttLabel()
                 updateReplayVisibility()
+                if (!isReceiving && !isReplaying) showLocalCameraSurface(true)
             }
             updateControls()
         }
@@ -117,6 +122,7 @@ class MainActivity : AppCompatActivity() {
                 walkieStatus.text = getString(R.string.walkie_receiving)
                 walkieVideoHint.visibility = View.GONE
                 walkieReplay.visibility = View.GONE
+                showLocalCameraSurface(false) // ImageView for remote MJPEG
             } else if (walkieRunning) {
                 walkieStatus.text = if (selectedPeer != null) {
                     getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
@@ -127,6 +133,7 @@ class MainActivity : AppCompatActivity() {
                     walkieVideoHint.visibility = View.GONE
                 }
                 updateReplayVisibility()
+                if (!isTalking && !isReplaying) showLocalCameraSurface(true)
             }
             updateControls()
         }
@@ -142,8 +149,14 @@ class MainActivity : AppCompatActivity() {
         override fun onVideoFrame(bitmap: Bitmap, live: Boolean) {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
-            walkieVideo.setImageBitmap(bitmap)
-            // Local preview is also "live" — must NOT hide Replay permanently
+            // Remote / replay use ImageView; local self-view uses TextureView
+            if (isReceiving || isReplaying || !isTalking) {
+                if (isReceiving || isReplaying) {
+                    showLocalCameraSurface(false)
+                }
+                walkieVideo.setImageBitmap(bitmap)
+                walkieVideo.visibility = View.VISIBLE
+            }
             if ((isTalking || isReceiving) && live && !isReplaying) {
                 walkieReplay.visibility = View.GONE
             } else if (!isTalking && !isReceiving && !isReplaying) {
@@ -183,6 +196,11 @@ class MainActivity : AppCompatActivity() {
         override fun onReplayStateChanged(replaying: Boolean) {
             runOnUiThread {
                 isReplaying = replaying
+                if (replaying) {
+                    showLocalCameraSurface(false)
+                } else if (!isReceiving && !isTalking) {
+                    showLocalCameraSurface(true)
+                }
                 updateReplayButton()
                 updateReplayVisibility()
                 updateControls()
@@ -218,7 +236,11 @@ class MainActivity : AppCompatActivity() {
             updateControls()
             updateReplayButton()
             updateInternetPairUi(walkieService?.getMyInviteCode() ?: walkieService?.internetInviteCode)
+            if (walkiePreview.isAvailable) {
+                walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
+            }
             walkieService?.startLocalPreview()
+            showLocalCameraSurface(!isReceiving && !isReplaying)
             walkieStatus.text = if (selectedPeer != null) {
                 getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
             } else {
@@ -257,10 +279,30 @@ class MainActivity : AppCompatActivity() {
         walkieWakeup = findViewById(R.id.walkie_wakeup)
         walkieReplay = findViewById(R.id.walkie_replay)
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
+        walkiePreview = findViewById(R.id.walkie_preview)
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
-        // Smoother continuous video (less flash when swapping bitmaps)
         walkieVideo.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        walkiePreview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                walkieService?.setUiPreviewTexture(surface)
+                walkieService?.startLocalPreview()
+                showLocalCameraSurface(true)
+            }
+
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                walkieService?.setUiPreviewTexture(null)
+                // Return false so TextureView releases; we clear engine ref first
+                return true
+            }
+
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+        }
+        if (walkiePreview.isAvailable) {
+            walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
+        }
 
         // Don't restore checkbox from activity state — always trust prefs, then write back
         walkieBestQuality.isSaveEnabled = false
@@ -470,6 +512,20 @@ class MainActivity : AppCompatActivity() {
         walkieFlipCamera.contentDescription = getString(
             if (front) R.string.walkie_camera_front else R.string.walkie_camera_back
         )
+    }
+
+    /** true = TextureView local camera; false = ImageView remote/replay */
+    private fun showLocalCameraSurface(local: Boolean) {
+        if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
+        if (local) {
+            walkiePreview.visibility = View.VISIBLE
+            // Keep last remote frame under if any, but hide ImageView while previewing
+            walkieVideo.visibility = View.GONE
+            walkieVideoHint.visibility = View.GONE
+        } else {
+            walkiePreview.visibility = View.GONE
+            walkieVideo.visibility = View.VISIBLE
+        }
     }
 
     private fun reallyStartWalkie() {
