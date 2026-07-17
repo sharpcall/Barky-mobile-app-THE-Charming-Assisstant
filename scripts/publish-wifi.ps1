@@ -32,7 +32,12 @@ $env:Path = "$javaHome\bin;$env:LOCALAPPDATA\Android\Sdk\platform-tools;" + $env
 Write-Output "========== PUBLISH WIFI t=0s =========="
 Write-Output "Keep Wireless debugging ON on phones. Pairing is only needed once."
 
-# Reconnect known wireless endpoints
+# Discover / reconnect wireless endpoints (mdns first — ports change often)
+$discover = Join-Path $PSScriptRoot "discover-wifi-devices.ps1"
+if (Test-Path $discover) {
+    Write-Output "Discovering wireless adb via mdns…"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $discover 2>&1 | ForEach-Object { Write-Output $_ }
+}
 $wifiList = Join-Path $PSScriptRoot "devices-wifi.json"
 if (Test-Path $wifiList) {
     try {
@@ -48,8 +53,7 @@ if (Test-Path $wifiList) {
         Write-Output "WARN: devices-wifi.json parse/connect: $_"
     }
 } else {
-    Write-Output "INFO: no scripts/devices-wifi.json — using currently connected adb devices only"
-    Write-Output "INFO: create it with phone IP:PORT from Wireless debugging screen"
+    Write-Output "INFO: no devices-wifi.json yet — ran mdns discover; or leave Wireless debugging ON"
 }
 
 & $adb devices -l

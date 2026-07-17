@@ -21,6 +21,8 @@ object BarkyPrefs {
     const val KEY_GPS_ENABLED = "walkie_gps_enabled"
     /** Optional PC host/IP for LAN APK updates (scripts/serve-apk.ps1). */
     const val KEY_LAN_UPDATE_HOST = "lan_update_host"
+    /** Soft WAKEUP for automated tests (no loud alarm). */
+    const val KEY_QUIET_TESTS = "quiet_tests"
 
     fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -65,5 +67,12 @@ object BarkyPrefs {
 
     fun setGpsEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_GPS_ENABLED, enabled).apply()
+    }
+
+    fun isQuietTests(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_QUIET_TESTS, true)
+
+    fun setQuietTests(context: Context, quiet: Boolean) {
+        prefs(context).edit().putBoolean(KEY_QUIET_TESTS, quiet).apply()
     }
 }

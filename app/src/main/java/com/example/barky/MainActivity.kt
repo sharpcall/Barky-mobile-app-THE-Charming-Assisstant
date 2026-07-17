@@ -370,9 +370,9 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
-        supportActionBar?.title = getString(R.string.app_name)
-        // Subtitle under Barky: versionName + last install/update time
-        supportActionBar?.subtitle = appVersionSubtitle()
+        // Same line as title: "Barky  5.1-… · 2026-07-17 14:52" (no subtitle)
+        supportActionBar?.subtitle = null
+        supportActionBar?.title = "${getString(R.string.app_name)}  ${appVersionSubtitle()}"
 
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)

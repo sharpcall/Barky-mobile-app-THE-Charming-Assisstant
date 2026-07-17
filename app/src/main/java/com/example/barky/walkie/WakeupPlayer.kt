@@ -30,20 +30,35 @@ class WakeupPlayer(
     var isRinging: Boolean = false
         private set
 
-    fun start() {
+    /**
+     * @param quiet when true (adb smoke / night), do not blast alarm volume — log-only + soft tick.
+     */
+    fun start(quiet: Boolean = false) {
         if (isRinging) return
         isRinging = true
         notifyRinging(true)
         try {
             val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             previousAlarmVolume = am.getStreamVolume(AudioManager.STREAM_ALARM)
-            am.setStreamVolume(
-                AudioManager.STREAM_ALARM,
-                am.getStreamMaxVolume(AudioManager.STREAM_ALARM),
-                0
-            )
+            val maxAlarm = am.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+            val targetVol = if (quiet) {
+                1.coerceAtMost(maxAlarm)
+            } else {
+                maxAlarm
+            }
+            am.setStreamVolume(AudioManager.STREAM_ALARM, targetVol, 0)
 
-            vibrate()
+            if (!quiet) vibrate()
+
+            if (quiet) {
+                // Soft short tone only — environment-friendly automated tests
+                tone = ToneGenerator(AudioManager.STREAM_ALARM, 30).also { tg ->
+                    tg.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                }
+                handler.postDelayed({ stop() }, 1_500L)
+                Log.i(TAG, "Wakeup started quiet=true (smoke-safe)")
+                return
+            }
 
             val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
@@ -72,7 +87,7 @@ class WakeupPlayer(
             }
 
             handler.postDelayed({ stop() }, WAKEUP_MS)
-            Log.i(TAG, "Wakeup started")
+            Log.i(TAG, "Wakeup started quiet=false")
         } catch (t: Throwable) {
             Log.e(TAG, "Wakeup failed", t)
             stop()

@@ -2104,10 +2104,13 @@ class WalkieTalkieEngine(
         mainHandler.postDelayed(r, 400L)
     }
 
+    /** When true, WAKEUP uses soft beep only (adb smoke / quiet house). */
+    @Volatile var quietWakeup: Boolean = false
+
     private fun handleWakeupFrom(from: String) {
         mainHandler.post {
             listener.onWakeupReceived(from)
-            wakeupPlayer.start()
+            wakeupPlayer.start(quiet = quietWakeup || BarkyPrefs.isQuietTests(appContext))
         }
     }
 
@@ -2702,20 +2705,32 @@ class WalkieTalkieEngine(
     @Volatile private var monitorTarget: WalkiePeer? = null
 
     fun startListenRemote() {
-        val peer = currentPeer() ?: getPeers().firstOrNull()
+        var peer = currentPeer() ?: getPeers().firstOrNull()
         if (peer == null) {
             postError("No peer for LISTEN")
             return
         }
+        selectPeer(peer)
+        peer = currentPeer() ?: peer
         if (!requestingListen.compareAndSet(false, true)) {
             stopListenRemote()
             return
         }
         monitorReceiving.set(true)
         monitorAudioRxCount = 0
+        // Loud speaker path for monitor; rebuild AudioTrack cleanly
+        releaseAudioTrack()
         preparePlaybackAudio(headset = false)
-        // Include our UDP port so the peer streams audio back to the right socket
+        // Wake peer + include our UDP port for reverse stream
+        sendHelloTo(peer)
         sendControlWithPort(peer, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
+        // Retransmit after HELLO settles (helps Pixel/Samsung NAT-ish Wi‑Fi stacks)
+        mainHandler.postDelayed({
+            if (requestingListen.get()) {
+                val p = currentPeer() ?: peer
+                sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
+            }
+        }, 400)
         mainHandler.post { listener.onListenStateChanged(true, servingListen.get()) }
         postStatus("LISTEN — hearing peer mic…")
         Log.i(TAG, "LISTEN_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
@@ -2732,46 +2747,96 @@ class WalkieTalkieEngine(
     }
 
     fun startSeeRemote() {
-        val peer = currentPeer() ?: getPeers().firstOrNull()
+        var peer = currentPeer() ?: getPeers().firstOrNull()
         if (peer == null) {
             postError("No peer for SEE")
             return
         }
+        selectPeer(peer)
+        peer = currentPeer() ?: peer
         if (!requestingSee.compareAndSet(false, true)) {
             stopSeeRemote()
             return
         }
+        // SEE always includes listen audio path
+        requestingListen.set(true)
         monitorReceiving.set(true)
+        monitorAudioRxCount = 0
         stopLocalPreviewInternal()
+        releaseAudioTrack()
         preparePlaybackAudio(headset = false)
+        sendHelloTo(peer)
         sendControlWithPort(peer, WalkieProtocol.TYPE_SEE_REQ, localPort)
-        mainHandler.post { listener.onSeeStateChanged(true, servingSee.get()) }
+        sendControlWithPort(peer, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
+        mainHandler.postDelayed({
+            if (requestingSee.get()) {
+                val p = currentPeer() ?: peer
+                sendControlWithPort(p, WalkieProtocol.TYPE_SEE_REQ, localPort)
+                sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, localPort)
+            }
+        }, 400)
+        mainHandler.post {
+            listener.onSeeStateChanged(true, servingSee.get())
+            listener.onListenStateChanged(true, servingListen.get())
+        }
         postStatus("SEE — watching peer…")
-        Log.i(TAG, "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
+        Log.i(TAG, "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort vport=${peer.videoPort}")
     }
 
     fun stopSeeRemote() {
-        if (!requestingSee.getAndSet(false) && !monitorReceiving.get()) return
-        val peer = currentPeer() ?: getPeers().firstOrNull()
-        peer?.let { sendControl(it, WalkieProtocol.TYPE_SEE_STOP) }
+        val wasSee = requestingSee.getAndSet(false)
+        // SEE armed LISTEN as well — stop both unless user still wants LISTEN alone
+        val stillListenOnly = requestingListen.get() && wasSee
+        if (wasSee) {
+            requestingListen.set(false)
+            val peer = currentPeer() ?: getPeers().firstOrNull()
+            peer?.let {
+                sendControl(it, WalkieProtocol.TYPE_SEE_STOP)
+                sendControl(it, WalkieProtocol.TYPE_LISTEN_STOP)
+            }
+        }
         if (!requestingListen.get()) monitorReceiving.set(false)
-        mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
+        mainHandler.post {
+            listener.onSeeStateChanged(false, servingSee.get())
+            if (!stillListenOnly) listener.onListenStateChanged(false, servingListen.get())
+        }
         if (!talking.get() && !replaying.get()) maybeResumeLocalPreview()
         postStatus("SEE stopped")
         Log.i(TAG, "SEE_STOP")
     }
 
     private fun handleListenReq(data: ByteArray, from: String, fromPort: Int) {
-        val replyPort = parseControlPort(data, fromPort)
+        // Prefer UDP source port (real socket); payload as secondary
+        val payloadPort = parseControlPort(data, 0)
+        val replyPort = when {
+            fromPort in 1..65535 -> fromPort
+            payloadPort in 1..65535 -> payloadPort
+            else -> 0
+        }
         val peer = resolvePeerForStream(from, replyPort)
-        Log.i(TAG, "LISTEN_REQ from $from replyPort=$replyPort peerPort=${peer.port}")
+        Log.i(
+            TAG,
+            "LISTEN_REQ from $from fromPort=$fromPort payloadPort=$payloadPort " +
+                "usePort=${peer.port} vport=${peer.videoPort}"
+        )
         startServingListen(peer)
     }
 
     private fun handleSeeReq(data: ByteArray, from: String, fromPort: Int) {
-        val replyPort = parseControlPort(data, fromPort)
+        val payloadPort = parseControlPort(data, 0)
+        val replyPort = when {
+            fromPort in 1..65535 -> fromPort
+            payloadPort in 1..65535 -> payloadPort
+            else -> 0
+        }
         val peer = resolvePeerForStream(from, replyPort)
-        Log.i(TAG, "SEE_REQ from $from replyPort=$replyPort")
+        Log.i(
+            TAG,
+            "SEE_REQ from $from fromPort=$fromPort payloadPort=$payloadPort " +
+                "usePort=${peer.port} vport=${peer.videoPort}"
+        )
+        // SEE always opens cam + mic toward requester
+        startServingListen(peer)
         startServingSee(peer)
     }
 
@@ -2786,6 +2851,9 @@ class WalkieTalkieEngine(
     private fun resolvePeerForStream(fromHost: String, udpPort: Int): WalkiePeer {
         val existing = peers.values.firstOrNull { it.host == fromHost }
         val vport = learnedVideoPorts[fromHost] ?: existing?.videoPort ?: 0
+        // Drop stale host:oldPort keys so monitor audio targets the live socket
+        val stale = peers.keys.filter { it.startsWith("$fromHost:") && udpPort > 0 && !it.endsWith(":$udpPort") }
+        stale.forEach { peers.remove(it) }
         val peer = WalkiePeer(
             serviceName = existing?.serviceName ?: "peer-$fromHost",
             host = fromHost,

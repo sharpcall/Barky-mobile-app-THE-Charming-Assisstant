@@ -91,10 +91,14 @@ $rxM = (& $adb -s $rx shell getprop ro.product.model).Trim()
 Info "TX=$txM  RX=$rxM"
 
 foreach ($s in $devices) {
-    # Quiet + full permission grant so gate opens and GPS/LISTEN work both ways
+    # Quiet everything including ALARM (WAKEUP) — do not blast the room
     foreach ($st in 1,2,3,4,5) {
         & $adb -s $s shell media volume --show --stream $st --set 1 2>$null | Out-Null
     }
+    # STREAM_ALARM often not covered by 1..5 on all OEMs — force via cmd media
+    & $adb -s $s shell cmd media_session volume --stream 4 --set 1 2>$null | Out-Null
+    & $adb -s $s shell settings put system volume_alarm 1 2>$null | Out-Null
+    & $adb -s $s shell settings put system volume_ring 1 2>$null | Out-Null
     foreach ($p in @(
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",

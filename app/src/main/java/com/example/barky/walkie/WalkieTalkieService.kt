@@ -253,7 +253,11 @@ class WalkieTalkieService : Service() {
                 engine?.replayLastMessage()
             }
             ACTION_TEST_WAKEUP -> {
-                Log.i(TAG, "TEST_WAKEUP via adb")
+                // Always quiet for adb smoke — never blast the room
+                val quiet = intent.getBooleanExtra(EXTRA_QUIET, true)
+                BarkyPrefs.setQuietTests(this, quiet)
+                engine?.quietWakeup = quiet
+                Log.i(TAG, "TEST_WAKEUP via adb quiet=$quiet")
                 engine?.sendWakeup()
             }
             ACTION_TEST_LISTEN_START -> {
@@ -439,6 +443,7 @@ class WalkieTalkieService : Service() {
         const val EXTRA_BEST_QUALITY = "best"
         const val EXTRA_INVITE_CODE = "invite_code"
         const val EXTRA_WAKEUP = "extra_wakeup"
+        const val EXTRA_QUIET = "quiet"
 
         fun start(context: Context) {
             val i = Intent(context, WalkieTalkieService::class.java)
