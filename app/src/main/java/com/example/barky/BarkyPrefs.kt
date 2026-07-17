@@ -69,8 +69,9 @@ object BarkyPrefs {
         prefs(context).edit().putBoolean(KEY_GPS_ENABLED, enabled).apply()
     }
 
+    /** Default false — real WAKEUP is loud; smoke sets true only for adb tests. */
     fun isQuietTests(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_QUIET_TESTS, true)
+        prefs(context).getBoolean(KEY_QUIET_TESTS, false)
 
     fun setQuietTests(context: Context, quiet: Boolean) {
         prefs(context).edit().putBoolean(KEY_QUIET_TESTS, quiet).apply()

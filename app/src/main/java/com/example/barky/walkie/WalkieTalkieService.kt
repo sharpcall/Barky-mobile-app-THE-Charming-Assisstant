@@ -270,7 +270,7 @@ class WalkieTalkieService : Service() {
                 engine?.replayLastMessage()
             }
             ACTION_TEST_WAKEUP -> {
-                // Always quiet for adb smoke — never blast the room
+                // Adb smoke defaults quiet=true; real UI uses loud ring
                 val quiet = intent.getBooleanExtra(EXTRA_QUIET, true)
                 BarkyPrefs.setQuietTests(this, quiet)
                 engine?.quietWakeup = quiet

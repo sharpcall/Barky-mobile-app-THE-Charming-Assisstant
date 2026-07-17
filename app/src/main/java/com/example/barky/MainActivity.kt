@@ -95,6 +95,8 @@ class MainActivity : AppCompatActivity() {
     private var mapReady = false
     private var isListening = false
     private var isSeeing = false
+    /** True while peer is watching us (we are serving SEE). */
+    private var isServingSee = false
     private var pttLocked = false
     private var activePttMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER
     private var myTrail: List<LocationTracker.GpsPoint> = emptyList()
@@ -206,8 +208,14 @@ class MainActivity : AppCompatActivity() {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
             showMap = false
-            if (isReceiving || isReplaying || isSeeing || !isTalking) {
-                if (isReceiving || isReplaying || isSeeing) {
+            if (isSeeing && live && !isTalking) {
+                // Big remote + keep small local TextureView
+                applySeeSplitLayout(true)
+                walkieVideo.setImageBitmap(bitmap)
+                walkieVideo.visibility = View.VISIBLE
+                walkieMap.visibility = View.GONE
+            } else if (isReceiving || isReplaying || !isTalking) {
+                if (isReceiving || isReplaying) {
                     showLocalCameraSurface(false)
                 }
                 walkieVideo.setImageBitmap(bitmap)
@@ -216,7 +224,7 @@ class MainActivity : AppCompatActivity() {
             }
             if ((isTalking || isReceiving || isSeeing) && live && !isReplaying) {
                 walkieReplay.visibility = View.GONE
-            } else if (!isTalking && !isReceiving && !isReplaying) {
+            } else if (!isTalking && !isReceiving && !isReplaying && !isSeeing) {
                 updateReplayVisibility()
             }
         }
@@ -306,18 +314,25 @@ class MainActivity : AppCompatActivity() {
         override fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {
             runOnUiThread {
                 isSeeing = seeing
+                isServingSee = serving
                 if (seeing) {
                     showMap = false
-                    showLocalCameraSurface(false)
+                    // WhatsApp-style: big remote + small local self-view
+                    applySeeSplitLayout(true)
+                    walkieService?.startLocalPreview()
                 } else if (!isTalking && !isReceiving && !isReplaying) {
+                    applySeeSplitLayout(false)
                     if (gpsEnabled) {
                         showMap = true
                         applyStageVisibility()
                     } else {
                         showLocalCameraSurface(true)
                     }
+                } else {
+                    applySeeSplitLayout(false)
                 }
                 updateListenSeeButtons()
+                updateControls()
             }
         }
 
@@ -488,7 +503,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         walkieFlipCamera.setOnClickListener {
-            walkieService?.switchCamera()
+            // Works during SEE (local PiP / serve cam) as well as idle / HOLD
+            val ok = walkieService?.switchCamera() == true
+            if (!ok && isSeeing) {
+                walkieService?.startLocalPreview()
+                walkieService?.switchCamera()
+            }
             walkieFlipCamera.animate().rotationBy(180f).setDuration(200).start()
             updateFlipCameraLabel()
         }
@@ -984,6 +1004,12 @@ class MainActivity : AppCompatActivity() {
         if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
         showMap = false
         walkieMap.visibility = View.GONE
+        if (isSeeing) {
+            applySeeSplitLayout(true)
+            return
+        }
+        // Reset any PiP layout params
+        resetPreviewFullBleed()
         if (local) {
             walkiePreview.visibility = View.VISIBLE
             walkieVideo.visibility = View.GONE
@@ -992,9 +1018,60 @@ class MainActivity : AppCompatActivity() {
         } else {
             walkiePreview.visibility = View.GONE
             walkieVideo.visibility = View.VISIBLE
-            // Remote frames: centerCrop ImageView (no stretch)
             walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
         }
+    }
+
+    /**
+     * WhatsApp-style dual SEE: large remote (ImageView) + small local camera (TextureView).
+     */
+    private fun applySeeSplitLayout(enabled: Boolean) {
+        if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
+        val density = resources.displayMetrics.density
+        if (enabled) {
+            showMap = false
+            walkieMap.visibility = View.GONE
+            walkieVideoHint.visibility = View.GONE
+            // Big remote
+            walkieVideo.layoutParams = walkieVideo.layoutParams.apply {
+                width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            }
+            walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
+            walkieVideo.visibility = View.VISIBLE
+            // Small local PiP (bottom-end, above mic strip)
+            val pipW = (110 * density).toInt()
+            val pipH = (150 * density).toInt()
+            val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
+                ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
+            lp.width = pipW
+            lp.height = pipH
+            lp.gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+            lp.setMargins(0, 0, (12 * density).toInt(), (150 * density).toInt())
+            walkiePreview.layoutParams = lp
+            walkiePreview.visibility = View.VISIBLE
+            walkiePreview.elevation = 12f
+            walkiePreview.bringToFront()
+            applyNaturalPreviewTransform()
+        } else {
+            resetPreviewFullBleed()
+        }
+    }
+
+    private fun resetPreviewFullBleed() {
+        if (!::walkiePreview.isInitialized) return
+        val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
+            ?: android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        lp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        lp.gravity = android.view.Gravity.CENTER
+        lp.setMargins(0, 0, 0, 0)
+        walkiePreview.layoutParams = lp
+        walkiePreview.elevation = 0f
+        applyNaturalPreviewTransform()
     }
 
     /**
@@ -1081,6 +1158,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateListenSeeButtons() {
         if (!::walkieListen.isInitialized) return
+        val ready = walkieRunning && selectedPeer != null && hasAllRequiredPermissions()
+        // Independent: either can start/stop regardless of the other
+        walkieListen.isEnabled = ready
+        walkieSee.isEnabled = ready
+        walkieFlipCamera.isEnabled = walkieRunning && hasAllRequiredPermissions()
         if (isListening) {
             walkieListen.text = getString(R.string.walkie_listen_on)
             walkieListen.setBackgroundColor(
@@ -1089,7 +1171,7 @@ class MainActivity : AppCompatActivity() {
             walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
         } else {
             walkieListen.text = getString(R.string.walkie_listen)
-            walkieListen.setBackgroundColor(0)
+            walkieListen.background = null
             walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
         }
         if (isSeeing) {
@@ -1100,7 +1182,7 @@ class MainActivity : AppCompatActivity() {
             walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
         } else {
             walkieSee.text = getString(R.string.walkie_see)
-            walkieSee.setBackgroundColor(0)
+            walkieSee.background = null
             walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
         }
     }

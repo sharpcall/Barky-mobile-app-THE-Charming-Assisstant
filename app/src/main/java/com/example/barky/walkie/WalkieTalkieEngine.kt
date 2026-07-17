@@ -264,22 +264,33 @@ class WalkieTalkieEngine(
     fun getMyInviteCode(): String? = myInviteCode
 
     /**
-     * Switch front/back immediately on live preview or during HOLD.
+     * Switch front/back on HOLD, SEE-serve, SEE-watch PiP, or idle preview.
      */
     fun switchCamera(): Boolean {
         val talkCam = cameraSource
-        if (talkCam != null && talking.get()) {
+        if (talkCam != null) {
             talkCam.switchCamera()
+            Log.i(TAG, "switchCamera via cameraSource talking=${talking.get()} servingSee=${servingSee.get()}")
             return true
         }
         val prev = previewSource
         if (prev != null) {
             prev.switchCamera()
+            Log.i(TAG, "switchCamera via previewSource")
             return true
+        }
+        // SEE watch PiP: ensure local preview then flip
+        if (requestingSee.get()) {
+            localPreviewWanted = true
+            startLocalPreviewInternal()
+            previewSource?.let {
+                it.switchCamera()
+                return true
+            }
         }
         // No camera open yet — flip preference and start preview so user sees it now
         BarkyPrefs.toggleCameraFront(appContext)
-        if (localPreviewWanted && !talking.get() && !receiving.get() && !replaying.get()) {
+        if (localPreviewWanted && !talking.get() && !replaying.get()) {
             startLocalPreviewInternal()
         }
         val front = BarkyPrefs.isCameraFront(appContext)
@@ -303,7 +314,11 @@ class WalkieTalkieEngine(
     /** Start local viewfinder so flip is instant (before HOLD). */
     fun startLocalPreview() {
         localPreviewWanted = true
-        if (talking.get() || receiving.get() || replaying.get()) return
+        // Allow local PiP while SEE (watching peer) — WhatsApp-style dual view
+        if (talking.get() || replaying.get()) return
+        if (receiving.get() && !requestingSee.get()) return
+        // While serving SEE we already own the camera via cameraSource
+        if (servingSee.get() && cameraSource != null) return
         startLocalPreviewInternal()
     }
 
@@ -2131,7 +2146,10 @@ class WalkieTalkieEngine(
     private fun handleWakeupFrom(from: String) {
         mainHandler.post {
             listener.onWakeupReceived(from)
-            wakeupPlayer.start(quiet = quietWakeup || BarkyPrefs.isQuietTests(appContext))
+            // Quiet only for adb smoke (quietWakeup flag). Real UI ring is always loud.
+            val quiet = quietWakeup
+            Log.i(TAG, "WAKEUP RING quiet=$quiet")
+            wakeupPlayer.start(quiet = quiet)
         }
     }
 
@@ -2789,13 +2807,17 @@ class WalkieTalkieEngine(
             stopSeeRemote()
             return
         }
-        // SEE always includes listen audio path
-        requestingListen.set(true)
+        // SEE carries its own A/V (do not force LISTEN button / state — keeps Stop LISTEN independent)
         monitorReceiving.set(true)
         monitorAudioRxCount = 0
-        stopLocalPreviewInternal()
         releaseAudioTrack()
         preparePlaybackAudio(headset = false)
+        // Keep local camera for PiP (WhatsApp-style); only stop if we will serve SEE with same cam
+        if (!servingSee.get()) {
+            // Local preview for small self-view while watching peer
+            localPreviewWanted = true
+            startLocalPreviewInternal()
+        }
         val target = peer
         val reply = localPort
         thread(name = "walkie-see-req", isDaemon = true) {
@@ -2803,12 +2825,10 @@ class WalkieTalkieEngine(
                 sendHelloTo(target)
                 Thread.sleep(80)
                 sendControlWithPort(target, WalkieProtocol.TYPE_SEE_REQ, reply)
-                sendControlWithPort(target, WalkieProtocol.TYPE_LISTEN_REQ, reply)
                 Thread.sleep(250)
                 if (requestingSee.get()) {
                     val p = currentPeer() ?: target
                     sendControlWithPort(p, WalkieProtocol.TYPE_SEE_REQ, reply)
-                    sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, reply)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
@@ -2816,32 +2836,28 @@ class WalkieTalkieEngine(
         }
         mainHandler.post {
             listener.onSeeStateChanged(true, servingSee.get())
-            listener.onListenStateChanged(true, servingListen.get())
         }
         postStatus("SEE — watching peer…")
         Log.i(TAG, "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort vport=${peer.videoPort}")
     }
 
     fun stopSeeRemote() {
-        val wasSee = requestingSee.getAndSet(false)
-        // SEE armed LISTEN as well — stop both unless user still wants LISTEN alone
-        val stillListenOnly = requestingListen.get() && wasSee
-        if (wasSee) {
-            requestingListen.set(false)
-            val peer = currentPeer() ?: getPeers().firstOrNull()
-            peer?.let {
-                sendControl(it, WalkieProtocol.TYPE_SEE_STOP)
-                sendControl(it, WalkieProtocol.TYPE_LISTEN_STOP)
-            }
+        if (!requestingSee.getAndSet(false)) {
+            // Still notify UI in case of desync
+            mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
+            return
         }
+        val peer = currentPeer() ?: getPeers().firstOrNull()
+        peer?.let { sendControl(it, WalkieProtocol.TYPE_SEE_STOP) }
+        // LISTEN is independent — leave requestingListen alone
         if (!requestingListen.get()) monitorReceiving.set(false)
-        mainHandler.post {
-            listener.onSeeStateChanged(false, servingSee.get())
-            if (!stillListenOnly) listener.onListenStateChanged(false, servingListen.get())
+        mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
+        if (!talking.get() && !replaying.get()) {
+            localPreviewWanted = true
+            maybeResumeLocalPreview()
         }
-        if (!talking.get() && !replaying.get()) maybeResumeLocalPreview()
         postStatus("SEE stopped")
-        Log.i(TAG, "SEE_STOP")
+        Log.i(TAG, "SEE_STOP (LISTEN independent requestingListen=${requestingListen.get()})")
     }
 
     private fun handleListenReq(data: ByteArray, from: String, fromPort: Int) {
