@@ -108,6 +108,10 @@ class MainActivity : AppCompatActivity() {
     /** SEE PiP: enlarged when user taps the floating self-view. */
     private var pipEnlarged = false
     private var pipDragBound = false
+    /** True once PiP has been placed; later frames must not reset position. */
+    private var pipLayoutActive = false
+    private var pipLastLeft = -1
+    private var pipLastTop = -1
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -212,11 +216,12 @@ class MainActivity : AppCompatActivity() {
             walkieVideoHint.visibility = View.GONE
             showMap = false
             if (isSeeing && live && !isTalking) {
-                // Big remote + keep small local TextureView
-                applySeeSplitLayout(true)
+                // Do NOT re-layout PiP every frame (that snapped it back home)
+                if (!pipLayoutActive) applySeeSplitLayout(true)
                 walkieVideo.setImageBitmap(bitmap)
                 walkieVideo.visibility = View.VISIBLE
                 walkieMap.visibility = View.GONE
+                walkiePreview.visibility = View.VISIBLE
             } else if (isReceiving || isReplaying || !isTalking) {
                 if (isReceiving || isReplaying) {
                     showLocalCameraSurface(false)
@@ -1028,7 +1033,7 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * WhatsApp-style dual SEE: large remote + floating local PiP
-     * (draggable; tap to grow / shrink).
+     * (draggable; tap to grow / shrink). Position is sticky until SEE ends.
      */
     private fun applySeeSplitLayout(enabled: Boolean) {
         if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
@@ -1042,15 +1047,19 @@ class MainActivity : AppCompatActivity() {
             }
             walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
             walkieVideo.visibility = View.VISIBLE
-            layoutFloatingPip(preservePosition = false)
+            // Only place once (or after explicit resize) — never every frame
+            layoutFloatingPip(preservePosition = pipLayoutActive)
+            pipLayoutActive = true
             walkiePreview.visibility = View.VISIBLE
-            walkiePreview.elevation = 16f
+            walkiePreview.elevation = 24f
             walkiePreview.bringToFront()
-            // Keep above mic stage for drag
             walkieMicStage.elevation = 8f
-            applyNaturalPreviewTransform()
+            walkiePreview.post { applyNaturalPreviewTransform() }
         } else {
             pipEnlarged = false
+            pipLayoutActive = false
+            pipLastLeft = -1
+            pipLastTop = -1
             resetPreviewFullBleed()
         }
     }
@@ -1065,25 +1074,37 @@ class MainActivity : AppCompatActivity() {
         val pipW = (wDp * density).toInt()
         val pipH = (hDp * density).toInt()
         val parent = walkiePreview.parent as? android.view.ViewGroup
-        val parentW = parent?.width ?: resources.displayMetrics.widthPixels
-        val parentH = parent?.height ?: resources.displayMetrics.heightPixels
+        val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
+        val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
         val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
             ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
         val oldW = lp.width
         val oldH = lp.height
-        var left = if (preservePosition && lp.gravity == android.view.Gravity.TOP or android.view.Gravity.START) {
+        val useSaved = preservePosition && pipLastLeft >= 0 && pipLastTop >= 0
+        var left = if (useSaved) {
+            pipLastLeft
+        } else if (preservePosition &&
+            lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START) &&
+            (lp.width in 1..parentW)
+        ) {
             lp.leftMargin
         } else {
             parentW - pipW - (12 * density).toInt()
         }
-        var top = if (preservePosition && lp.gravity == android.view.Gravity.TOP or android.view.Gravity.START) {
+        var top = if (useSaved) {
+            pipLastTop
+        } else if (preservePosition &&
+            lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START) &&
+            (lp.height in 1..parentH)
+        ) {
             lp.topMargin
         } else {
             parentH - pipH - (150 * density).toInt()
         }
-        // Keep fully on-screen when resizing
         left = left.coerceIn(0, (parentW - pipW).coerceAtLeast(0))
         top = top.coerceIn(0, (parentH - pipH).coerceAtLeast(0))
+        pipLastLeft = left
+        pipLastTop = top
         lp.width = pipW
         lp.height = pipH
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
@@ -1094,7 +1115,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Drag PiP around; short tap toggles enlarged size. */
+    /** Drag PiP around; short tap toggles enlarged size. Position is remembered. */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindFloatingPip() {
         if (pipDragBound || !::walkiePreview.isInitialized) return
@@ -1115,13 +1136,11 @@ class MainActivity : AppCompatActivity() {
                     v.parent?.requestDisallowInterceptTouchEvent(true)
                     downX = event.rawX
                     downY = event.rawY
-                    startLeft = lp.leftMargin
-                    startTop = lp.topMargin
+                    // Prefer saved sticky position
+                    startLeft = if (pipLastLeft >= 0) pipLastLeft else lp.leftMargin
+                    startTop = if (pipLastTop >= 0) pipLastTop else lp.topMargin
                     moved = false
-                    // Ensure TOP|START margins mode for free float
-                    if (lp.gravity != (android.view.Gravity.TOP or android.view.Gravity.START)) {
-                        layoutFloatingPip(preservePosition = false)
-                    }
+                    lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -1135,11 +1154,19 @@ class MainActivity : AppCompatActivity() {
                     lp.topMargin = (startTop + dy).coerceIn(0, maxT)
                     lp.rightMargin = 0
                     lp.bottomMargin = 0
+                    pipLastLeft = lp.leftMargin
+                    pipLastTop = lp.topMargin
                     v.layoutParams = lp
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     v.parent?.requestDisallowInterceptTouchEvent(false)
+                    // Persist final position
+                    val cur = v.layoutParams as? android.widget.FrameLayout.LayoutParams
+                    if (cur != null) {
+                        pipLastLeft = cur.leftMargin
+                        pipLastTop = cur.topMargin
+                    }
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
                         pipEnlarged = !pipEnlarged
                         layoutFloatingPip(preservePosition = true)
@@ -1265,26 +1292,24 @@ class MainActivity : AppCompatActivity() {
         walkieFlipCamera.isEnabled = walkieRunning && hasAllRequiredPermissions()
         if (isListening) {
             walkieListen.text = getString(R.string.walkie_listen_on)
-            walkieListen.setBackgroundColor(
-                ContextCompat.getColor(this, R.color.walkie_listen_active)
-            )
-            walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
+            walkieListen.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.walkie_listen_active)
         } else {
             walkieListen.text = getString(R.string.walkie_listen)
-            walkieListen.background = null
-            walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
+            walkieListen.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.barky_secondary)
         }
+        walkieListen.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
         if (isSeeing) {
             walkieSee.text = getString(R.string.walkie_see_on)
-            walkieSee.setBackgroundColor(
-                ContextCompat.getColor(this, R.color.walkie_see_active)
-            )
-            walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
+            walkieSee.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.walkie_see_active)
         } else {
             walkieSee.text = getString(R.string.walkie_see)
-            walkieSee.background = null
-            walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
+            walkieSee.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.barky_accent)
         }
+        walkieSee.setTextColor(ContextCompat.getColor(this, R.color.barky_on_primary))
     }
 
     private fun updateWakeupButton() {
