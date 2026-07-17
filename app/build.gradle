@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 24
-        versionName "3.6-fullscreen-smooth-video"
+        versionCode 25
+        versionName "3.7-no-flicker-replay-fix"
     }
 
     compileOptions {

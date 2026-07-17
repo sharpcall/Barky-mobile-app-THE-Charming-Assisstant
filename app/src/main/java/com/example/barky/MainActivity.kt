@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private var remoteWakeupActive = false
     private var isReplaying = false
     private var isTalking = false
+    private var isReceiving = false
     private var channelBusy = false
     private var hasLastMessage = false
     private var hasStickyFrame = false
@@ -111,6 +112,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onReceivingChanged(receiving: Boolean) {
+            isReceiving = receiving
             if (receiving) {
                 walkieStatus.text = getString(R.string.walkie_receiving)
                 walkieVideoHint.visibility = View.GONE
@@ -121,7 +123,6 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     getString(R.string.walkie_status_waiting)
                 }
-                // Keep last frame sticky — do not restore orange placeholder
                 if (hasStickyFrame) {
                     walkieVideoHint.visibility = View.GONE
                 }
@@ -134,15 +135,19 @@ class MainActivity : AppCompatActivity() {
             channelBusy = busy
             updatePttLabel()
             updateControls()
+            // Do not hide Replay solely for channelBusy — only when actively talking/receiving
+            if (!busy) updateReplayVisibility()
         }
 
         override fun onVideoFrame(bitmap: Bitmap, live: Boolean) {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
-            // Keep previous frame until new one is set (reduces black flash)
             walkieVideo.setImageBitmap(bitmap)
-            if (live && !isReplaying) {
+            // Local preview is also "live" — must NOT hide Replay permanently
+            if ((isTalking || isReceiving) && live && !isReplaying) {
                 walkieReplay.visibility = View.GONE
+            } else if (!isTalking && !isReceiving && !isReplaying) {
+                updateReplayVisibility()
             }
         }
 
@@ -555,10 +560,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateReplayVisibility() {
         if (!::walkieReplay.isInitialized) return
-        val show = hasLastMessage && !isTalking && !channelBusy
+        // Show whenever we have a stored clip and are not mid TX/RX/replay UI lock
+        val show = hasLastMessage && !isTalking && !isReceiving
         walkieReplay.visibility = if (show || isReplaying) View.VISIBLE else View.GONE
+        walkieReplay.isEnabled = (show || isReplaying) && walkieRunning
         if (show || isReplaying) {
             walkieVideoHint.visibility = View.GONE
+            walkieReplay.bringToFront()
         }
     }
 

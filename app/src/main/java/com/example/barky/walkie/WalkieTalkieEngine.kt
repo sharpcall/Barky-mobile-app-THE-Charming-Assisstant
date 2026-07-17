@@ -261,8 +261,9 @@ class WalkieTalkieEngine(
                 },
                 onError = { msg -> videoDebug("Preview camera: $msg") }
             ) { jpeg ->
-                if (talking.get() || replaying.get()) return@CameraFrameSource
-                decodeAndEmit(jpeg, live = true)
+                if (talking.get() || replaying.get() || receiving.get()) return@CameraFrameSource
+                // Preview-only path: slower UI updates, never hides Replay
+                decodeAndEmit(jpeg, live = true, localPreview = true)
             }
             previewSource = cam
             cam.start()
@@ -2126,23 +2127,27 @@ class WalkieTalkieEngine(
     private val uiEmitBusy = AtomicBoolean(false)
     @Volatile private var lastUiEmitAt = 0L
 
-    private fun decodeAndEmit(jpeg: ByteArray, live: Boolean) {
+    private fun decodeAndEmit(jpeg: ByteArray, live: Boolean, localPreview: Boolean = false) {
         try {
             if (live) {
                 val now = android.os.SystemClock.elapsedRealtime()
-                // Cap display ~18 fps; encode/network can be faster without flooding ImageView
-                if (now - lastUiEmitAt < 55L) return
+                // Preview: ~10 fps is enough for flip UI; live TX/RX: ~15–20 fps
+                val minGap = if (localPreview) 100L else 50L
+                if (now - lastUiEmitAt < minGap) return
                 if (!uiEmitBusy.compareAndSet(false, true)) return
                 lastUiEmitAt = now
             }
             val opts = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.ARGB_8888
+                // RGB_565 is faster / less GC pressure for continuous stream
+                inPreferredConfig =
+                    if (localPreview) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
             }
             val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
             if (bmp == null) {
                 if (live) uiEmitBusy.set(false)
                 return
             }
+            // Never recycle bitmaps still held by ImageView — that causes black flash
             mainHandler.post {
                 try {
                     listener.onVideoFrame(bmp, live)

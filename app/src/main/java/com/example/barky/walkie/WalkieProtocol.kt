@@ -36,7 +36,8 @@ object WalkieProtocol {
      * Target ~20–25 fps when encode keeps up.
      * LAN TCP MJPEG: sharp stills via platform JPEG (no 3rd-party codec).
      */
-    const val VIDEO_MIN_INTERVAL_MS = 45L
+    /** Slightly steadier pace for live encode→display (less flash than over-encoding). */
+    const val VIDEO_MIN_INTERVAL_MS = 50L
     const val VIDEO_WIDTH = 1280
     const val VIDEO_HEIGHT = 720
     /** Longer edge of upright frame sent over TCP (clear on phone screens). */
