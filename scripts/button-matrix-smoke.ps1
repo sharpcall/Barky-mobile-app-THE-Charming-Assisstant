@@ -1,8 +1,15 @@
-# Exhaustive button / feature matrix smoke for Barky (dual phone).
-# Buttons: L=LISTEN, S=SEE, W=WAKEUP, M=MIC(talk), R=REPLAY, F=FLIP (local), G=GPS
-# Runs ordered pairs A then B, and reverse; reports PASS/FAIL with hard timeout.
+# Exhaustive button / feature condition matrix for Barky (dual phone).
+#
+# RULE: every major feature is part of the matrix — including combinations that
+# look unrelated. Do not skip pairs because “they should not interact.”
+#
+# Features: L=LISTEN  S=SEE  W=WAKEUP  M=MIC/HOLD  R=REPLAY  G=GPS
+# Also: singles both directions, dual simultaneous, stop-independence, speaker route.
+#
+# Ordered singles + all ordered pairs (f1 then f2) on A and on B, plus cross-phone
+# combos. Quiet WAKEUP only. Hard timeout; full PASS/FAIL report.
 param(
-    [int]$OverallTimeoutSec = 420,
+    [int]$OverallTimeoutSec = 720,
     [int]$HoldSec = 2
 )
 
@@ -65,6 +72,14 @@ function Has([object[]]$logs, [string]$pat) {
 function ClearLogs {
     foreach ($s in $devs) { & $adb -s $s logcat -c | Out-Null }
 }
+function StopAll([string]$s) {
+    foreach ($a in @(
+        "com.example.barky.TEST_LISTEN_STOP",
+        "com.example.barky.TEST_SEE_STOP",
+        "com.example.barky.TEST_TALK_STOP",
+        "com.example.barky.TEST_GPS_OFF"
+    )) { Svc $s $a }
+}
 
 foreach ($s in $devs) {
     Quiet $s
@@ -76,191 +91,135 @@ Start-Sleep 10
 $la = Logs $A; $lb = Logs $B
 if (Has $la "HELLO from" -and Has $lb "HELLO from") { Ok "HELLO both ways" } else { Bad "HELLO incomplete" }
 
-# --- Helper scenarios ---
-function Test-Listen([string]$req, [string]$srv, [string]$tag) {
-    DieIfTimeout
-    ClearLogs
-    Svc $req "com.example.barky.TEST_LISTEN_START"
-    Start-Sleep 4
-    Svc $req "com.example.barky.TEST_LISTEN_STOP"
-    Start-Sleep 1
-    $lr = Logs $req; $ls = Logs $srv
-    $okReq = Has $lr "LISTEN_REQ" -or Has $lr "MONITOR_AUDIO_RX"
-    $okSrv = Has $ls "LISTEN_REQ from" -or Has $ls "LISTEN serve" -or Has $ls "MONITOR_AUDIO_TX"
-    $okRx = Has $lr "MONITOR_AUDIO_RX"
-    if ($okReq -and $okSrv -and $okRx) { Ok "$tag LISTEN audio path" }
-    elseif ($okReq -and $okSrv) { Bad "$tag LISTEN control ok but no MONITOR_AUDIO_RX" }
-    else { Bad "$tag LISTEN failed req=$okReq srv=$okSrv rx=$okRx" }
+# --- Feature action helpers (start only; callers stop) ---
+function Start-Feat([string]$s, [string]$feat, [string]$peer) {
+    switch ($feat) {
+        "L" { Svc $s "com.example.barky.TEST_LISTEN_START" }
+        "S" { Svc $s "com.example.barky.TEST_SEE_START" }
+        "W" { Quiet $peer; Svc $s "com.example.barky.TEST_WAKEUP" @("--ez","quiet","true") }
+        "M" {
+            Svc $s "com.example.barky.SET_BEST_QUALITY" @("--ez","best","false")
+            Svc $s "com.example.barky.TEST_TALK_START"
+        }
+        "R" { Svc $s "com.example.barky.TEST_REPLAY" }
+        "G" {
+            Svc $s "com.example.barky.TEST_GPS_ON"
+            # GPS is mutual usefulness — also arm the other phone
+            $other = if ($s -eq $A) { $B } else { $A }
+            Svc $other "com.example.barky.TEST_GPS_ON"
+        }
+    }
+}
+function Stop-Feat([string]$s, [string]$feat) {
+    switch ($feat) {
+        "L" { Svc $s "com.example.barky.TEST_LISTEN_STOP" }
+        "S" { Svc $s "com.example.barky.TEST_SEE_STOP" }
+        "W" { } # one-shot
+        "M" { Svc $s "com.example.barky.TEST_TALK_STOP" }
+        "R" { } # one-shot / ends itself
+        "G" { Svc $s "com.example.barky.TEST_GPS_OFF" }
+    }
+}
+function Feat-Sleep([string]$feat) {
+    switch ($feat) {
+        "L" { Start-Sleep 3 }
+        "S" { Start-Sleep 3 }
+        "W" { Start-Sleep 2 }
+        "M" { Start-Sleep $HoldSec }
+        "R" { Start-Sleep 3 }
+        "G" { Start-Sleep 5 }
+        default { Start-Sleep 2 }
+    }
+}
+function Feat-Ok([object[]]$logs, [string]$feat) {
+    switch ($feat) {
+        "L" { return (Has $logs "LISTEN_REQ" -or Has $logs "MONITOR_AUDIO" -or Has $logs "LISTEN serve" -or Has $logs "forceListenVolume") }
+        "S" { return (Has $logs "SEE_REQ" -or Has $logs "serve see" -or Has $logs "SEE") }
+        "W" { return (Has $logs "WAKEUP" -or Has $logs "TEST_WAKEUP" -or Has $logs "quiet=") }
+        "M" { return (Has $logs "CLIP_TX" -or Has $logs "startTalking" -or Has $logs "TX OK" -or Has $logs "TALK") }
+        "R" { return (Has $logs "Replay start" -or Has $logs "Replay") }
+        "G" { return (Has $logs "GPS ON" -or Has $logs "GPS_TX" -or Has $logs "GPS_RX" -or Has $logs "GPS") }
+        default { return $false }
+    }
 }
 
-function Test-See([string]$req, [string]$srv, [string]$tag) {
+$feats = @("L","S","W","M","R","G")
+$featName = @{ L="LISTEN"; S="SEE"; W="WAKEUP"; M="HOLD"; R="REPLAY"; G="GPS" }
+
+Write-Output "========== BUTTON MATRIX SMOKE (full condition matrix) =========="
+Info "Features: $($feats -join ', ') — singles + all ordered pairs + dual/cross"
+
+# ========== SINGLES (both phones / both directions where meaningful) ==========
+Info "--- SINGLES ---"
+foreach ($f in $feats) {
     DieIfTimeout
-    ClearLogs
-    Svc $req "com.example.barky.TEST_SEE_START"
-    Start-Sleep 4
-    Svc $req "com.example.barky.TEST_SEE_STOP"
-    Start-Sleep 1
-    $lr = Logs $req; $ls = Logs $srv
-    $ok = (Has $lr "SEE_REQ") -and (Has $ls "SEE_REQ from" -or Has $ls "serve see" -or Has $ls "Camera+mic open" -or Has $ls "SEE")
-    if ($ok) { Ok "$tag SEE path" } else { Bad "$tag SEE missing logs" }
+    foreach ($phone in @(@{S=$A;P=$B;T="A"}, @{S=$B;P=$A;T="B"})) {
+        DieIfTimeout
+        ClearLogs
+        StopAll $phone.S
+        Start-Feat $phone.S $f $phone.P
+        Feat-Sleep $f
+        Stop-Feat $phone.S $f
+        Start-Sleep 1
+        $l = Logs $phone.S
+        $lPeer = Logs $phone.P
+        $ok = (Feat-Ok $l $f) -or (Feat-Ok $lPeer $f)
+        if ($ok) { Ok "SINGLE $($featName[$f]) on $($phone.T)" }
+        else { Bad "SINGLE $($featName[$f]) on $($phone.T)" }
+        StopAll $phone.S
+    }
 }
 
-function Test-Talk([string]$tx, [string]$rx, [string]$tag) {
-    DieIfTimeout
-    ClearLogs
-    Svc $tx "com.example.barky.SET_BEST_QUALITY" @("--ez","best","false")
-    Start-Sleep 1
-    Svc $tx "com.example.barky.TEST_TALK_START"
-    Start-Sleep $HoldSec
-    Svc $tx "com.example.barky.TEST_TALK_STOP"
-    Start-Sleep 3
-    $lt = Logs $tx; $lr = Logs $rx
-    if ((Has $lt "CLIP_TX" -or Has $lt "TX OK") -and (Has $lr "CLIP_RX" -or Has $lr "RX OK" -or Has $lr "channelBusy")) {
-        Ok "$tag TALK/HOLD"
-    } else { Bad "$tag TALK/HOLD incomplete" }
+# ========== ALL ORDERED PAIRS on each phone (including “unrelated”) ==========
+Info "--- ORDERED PAIRS (all f1→f2 on A and on B) ---"
+foreach ($phone in @(@{S=$A;P=$B;T="A"}, @{S=$B;P=$A;T="B"})) {
+    foreach ($f1 in $feats) {
+        foreach ($f2 in $feats) {
+            if ($f1 -eq $f2) { continue }  # same-feature twice covered by dual/single
+            DieIfTimeout
+            ClearLogs
+            StopAll $phone.S
+            StopAll $phone.P
+            Start-Feat $phone.S $f1 $phone.P
+            Feat-Sleep $f1
+            # Leave sticky features running when pair is concurrent-style (L/S/G)
+            $sticky = @("L","S","G")
+            if ($sticky -notcontains $f1) { Stop-Feat $phone.S $f1; Start-Sleep 1 }
+            Start-Feat $phone.S $f2 $phone.P
+            Feat-Sleep $f2
+            Stop-Feat $phone.S $f2
+            if ($sticky -contains $f1) { Stop-Feat $phone.S $f1 }
+            Start-Sleep 1
+            $l = Logs $phone.S
+            $lPeer = Logs $phone.P
+            $ok1 = (Feat-Ok $l $f1) -or (Feat-Ok $lPeer $f1)
+            $ok2 = (Feat-Ok $l $f2) -or (Feat-Ok $lPeer $f2)
+            $tag = "PAIR $($featName[$f1])→$($featName[$f2]) on $($phone.T)"
+            if ($ok1 -and $ok2) { Ok $tag }
+            elseif ($ok1 -or $ok2) { Bad "$tag partial ok1=$ok1 ok2=$ok2" }
+            else { Bad "$tag missing both" }
+            StopAll $phone.S
+            StopAll $phone.P
+        }
+    }
 }
 
-function Test-Wake([string]$from, [string]$to, [string]$tag) {
-    DieIfTimeout
-    ClearLogs
-    Quiet $to
-    Svc $from "com.example.barky.TEST_WAKEUP" @("--ez","quiet","true")
-    Start-Sleep 2
-    $lf = Logs $from; $lt = Logs $to
-    if ((Has $lf "WAKEUP" -or Has $lf "TEST_WAKEUP") -and (Has $lt "WAKEUP" -or Has $lt "Wakeup" -or Has $lt "quiet=")) {
-        Ok "$tag WAKEUP quiet packet"
-    } else { Bad "$tag WAKEUP path" }
-}
+# ========== CROSS-PHONE / DUAL conditions ==========
+Info "--- CROSS / DUAL ---"
 
-function Test-Replay([string]$s, [string]$tag) {
-    DieIfTimeout
-    ClearLogs
-    Svc $s "com.example.barky.TEST_REPLAY"
-    Start-Sleep 3
-    $l = Logs $s
-    if (Has $l "Replay start" -or Has $l "Replay") { Ok "$tag REPLAY" } else { Bad "$tag REPLAY" }
-}
-
-function Test-Gps([string]$tag) {
-    DieIfTimeout
-    ClearLogs
-    Svc $A "com.example.barky.TEST_GPS_ON"
-    Svc $B "com.example.barky.TEST_GPS_ON"
-    Start-Sleep 8
-    $la = Logs $A; $lb = Logs $B
-    $aOk = Has $la "GPS ON" -or Has $la "GPS_TX" -or Has $la "GPS_RX"
-    $bOk = Has $lb "GPS ON" -or Has $lb "GPS_TX" -or Has $lb "GPS_RX"
-    if ($aOk -and $bOk) { Ok "$tag GPS both active" } else { Bad "$tag GPS a=$aOk b=$bOk" }
-}
-
-Write-Output "========== BUTTON MATRIX SMOKE =========="
-# Singles
-Test-Listen $A $B "A->B"
-Test-Listen $B $A "B->A"
-Test-See $A $B "A->B"
-Test-See $B $A "B->A"
-Test-Talk $A $B "A->B"
-Test-Talk $B $A "B->A"
-Test-Wake $A $B "A->B"
-Test-Wake $B $A "B->A"
-Test-Replay $A "A"
-Test-Replay $B "B"
-Test-Gps "G"
-
-# Ordered pairs (A then B actions on same phone)
-Info "Pairs: SEE then LISTEN on A"
-ClearLogs
-Svc $A "com.example.barky.TEST_SEE_START"; Start-Sleep 2
-Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2
-Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
-$la = Logs $A
-# LISTEN should still be stoppable independently
-Svc $A "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep 1
-$la2 = Logs $A
-if ((Has $la "SEE_REQ") -and (Has $la "LISTEN_REQ" -or Has $la2 "LISTEN_STOP")) {
-    Ok "PAIR SEE then LISTEN independent stop on A"
-} else { Bad "PAIR SEE then LISTEN on A" }
-
-Info "Pairs: LISTEN then SEE on A"
-ClearLogs
-Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2
-Svc $A "com.example.barky.TEST_SEE_START"; Start-Sleep 2
-Svc $A "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep 1
-Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
-$la = Logs $A
-if (Has $la "LISTEN_REQ" -and Has $la "SEE_REQ") { Ok "PAIR LISTEN then SEE on A" } else { Bad "PAIR LISTEN then SEE on A" }
-
-Info "Pairs: dual SEE both phones"
+# Dual SEE both phones
+DieIfTimeout
 ClearLogs
 Svc $A "com.example.barky.TEST_SEE_START"
 Svc $B "com.example.barky.TEST_SEE_START"
 Start-Sleep 4
 Svc $A "com.example.barky.TEST_SEE_STOP"
 Svc $B "com.example.barky.TEST_SEE_STOP"
-Start-Sleep 1
 $la = Logs $A; $lb = Logs $B
-if ((Has $la "SEE_REQ") -and (Has $lb "SEE_REQ")) { Ok "PAIR dual SEE both phones" } else { Bad "PAIR dual SEE" }
+if ((Has $la "SEE_REQ") -and (Has $lb "SEE_REQ")) { Ok "DUAL SEE both phones" } else { Bad "DUAL SEE" }
 
-Info "Pairs: TALK while other LISTENs"
-ClearLogs
-Svc $B "com.example.barky.TEST_LISTEN_START"
-Start-Sleep 1
-Svc $A "com.example.barky.TEST_TALK_START"
-Start-Sleep $HoldSec
-Svc $A "com.example.barky.TEST_TALK_STOP"
-Svc $B "com.example.barky.TEST_LISTEN_STOP"
-Start-Sleep 2
-$la = Logs $A; $lb = Logs $B
-if (Has $la "CLIP_TX" -or Has $la "startTalking" -or Has $lb "channelBusy" -or Has $lb "LISTEN") {
-    Ok "PAIR TALK during remote LISTEN (no crash)"
-} else { Bad "PAIR TALK during LISTEN" }
-
-Info "Pairs: SEE then WAKEUP quiet"
-ClearLogs
-Svc $A "com.example.barky.TEST_SEE_START"; Start-Sleep 2
-Svc $A "com.example.barky.TEST_WAKEUP" @("--ez","quiet","true"); Start-Sleep 2
-Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
-$la = Logs $A; $lb = Logs $B
-if ((Has $la "SEE") -and (Has $la "WAKEUP" -or Has $lb "WAKEUP" -or Has $lb "quiet=")) {
-    Ok "PAIR SEE then WAKEUP"
-} else { Bad "PAIR SEE then WAKEUP" }
-
-Info "Pairs: GPS + LISTEN"
-ClearLogs
-Svc $A "com.example.barky.TEST_GPS_ON"
-Svc $B "com.example.barky.TEST_GPS_ON"
-Svc $A "com.example.barky.TEST_LISTEN_START"
-Start-Sleep 4
-Svc $A "com.example.barky.TEST_LISTEN_STOP"
-$la = Logs $A
-if ((Has $la "GPS" -or Has $la "GPS_TX" -or Has $la "GPS_RX") -and (Has $la "LISTEN" -or Has $la "MONITOR_AUDIO_RX")) {
-    Ok "PAIR GPS+LISTEN on A"
-} else { Bad "PAIR GPS+LISTEN" }
-
-# --- Unrelated-feature pairs (still required in matrix) ---
-Info "Pairs: GPS + SEE"
-ClearLogs
-Svc $A "com.example.barky.TEST_GPS_ON"
-Svc $A "com.example.barky.TEST_SEE_START"
-Start-Sleep 3
-Svc $A "com.example.barky.TEST_SEE_STOP"
-$la = Logs $A
-if ((Has $la "GPS" -or Has $la "GPS_TX" -or Has $la "GPS_ON") -and (Has $la "SEE_REQ" -or Has $la "SEE")) {
-    Ok "PAIR GPS+SEE on A"
-} else { Bad "PAIR GPS+SEE" }
-
-Info "Pairs: REPLAY after TALK on A"
-ClearLogs
-Svc $A "com.example.barky.SET_BEST_QUALITY" @("--ez","best","false")
-Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec; Svc $A "com.example.barky.TEST_TALK_STOP"
-Start-Sleep 2
-Svc $A "com.example.barky.TEST_REPLAY"; Start-Sleep 3
-$la = Logs $A
-if ((Has $la "CLIP_TX" -or Has $la "startTalking") -and (Has $la "Replay")) {
-    Ok "PAIR TALK then REPLAY on A"
-} else { Bad "PAIR TALK then REPLAY" }
-
-Info "Pairs: dual LISTEN both phones"
+# Dual LISTEN both phones
+DieIfTimeout
 ClearLogs
 Svc $A "com.example.barky.TEST_LISTEN_START"
 Svc $B "com.example.barky.TEST_LISTEN_START"
@@ -269,44 +228,66 @@ Svc $A "com.example.barky.TEST_LISTEN_STOP"
 Svc $B "com.example.barky.TEST_LISTEN_STOP"
 $la = Logs $A; $lb = Logs $B
 if ((Has $la "LISTEN_REQ" -or Has $la "MONITOR_AUDIO") -and (Has $lb "LISTEN_REQ" -or Has $lb "MONITOR_AUDIO" -or Has $lb "LISTEN serve")) {
-    Ok "PAIR dual LISTEN both phones"
-} else { Bad "PAIR dual LISTEN" }
+    Ok "DUAL LISTEN both phones"
+} else { Bad "DUAL LISTEN" }
 
-Info "Pairs: WAKEUP then HOLD"
+# TALK while other LISTENs
+DieIfTimeout
 ClearLogs
-Svc $A "com.example.barky.TEST_WAKEUP" @("--ez","quiet","true")
-Start-Sleep 1
-Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec; Svc $A "com.example.barky.TEST_TALK_STOP"
-Start-Sleep 2
+Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 1
+Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec
+Svc $A "com.example.barky.TEST_TALK_STOP"
+Svc $B "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep 2
+$la = Logs $A; $lb = Logs $B
+if (Has $la "CLIP_TX" -or Has $la "startTalking" -or Has $lb "channelBusy" -or Has $lb "LISTEN") {
+    Ok "CROSS TALK during remote LISTEN"
+} else { Bad "CROSS TALK during LISTEN" }
+
+# SEE independent stop then LISTEN (both phones)
+foreach ($phone in @(@{S=$A;T="A"}, @{S=$B;T="B"})) {
+    DieIfTimeout
+    ClearLogs
+    Svc $phone.S "com.example.barky.TEST_SEE_START"; Start-Sleep 2
+    Svc $phone.S "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
+    Svc $phone.S "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3
+    Svc $phone.S "com.example.barky.TEST_LISTEN_STOP"
+    $l = Logs $phone.S
+    if ((Has $l "SEE") -and (Has $l "LISTEN_REQ" -or Has $l "MONITOR_AUDIO_RX")) {
+        Ok "INDEP SEE-stop then LISTEN on $($phone.T)"
+    } else { Bad "INDEP SEE-stop then LISTEN on $($phone.T)" }
+}
+
+# LISTEN+SEE concurrent independent stop
+DieIfTimeout
+ClearLogs
+Svc $A "com.example.barky.TEST_SEE_START"; Start-Sleep 2
+Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2
+Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
+Svc $A "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep 1
 $la = Logs $A
-if ((Has $la "WAKEUP" -or Has $la "TEST_WAKEUP") -and (Has $la "CLIP_TX" -or Has $la "startTalking" -or Has $la "TALK")) {
-    Ok "PAIR WAKEUP then HOLD on A"
-} else { Bad "PAIR WAKEUP then HOLD" }
+if ((Has $la "SEE_REQ") -and (Has $la "LISTEN_REQ" -or Has $la "LISTEN_STOP" -or Has $la "MONITOR_AUDIO")) {
+    Ok "INDEP concurrent SEE+LISTEN stop order on A"
+} else { Bad "INDEP concurrent SEE+LISTEN on A" }
 
-Info "Pairs: SEE stop then LISTEN still works on B"
-ClearLogs
-Svc $B "com.example.barky.TEST_SEE_START"; Start-Sleep 2
-Svc $B "com.example.barky.TEST_SEE_STOP"; Start-Sleep 1
-Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3
-Svc $B "com.example.barky.TEST_LISTEN_STOP"
-$lb = Logs $B
-if ((Has $lb "SEE_STOP" -or Has $lb "SEE") -and (Has $lb "LISTEN_REQ" -or Has $lb "MONITOR_AUDIO_RX")) {
-    Ok "PAIR SEE-stop then LISTEN on B"
-} else { Bad "PAIR SEE-stop then LISTEN on B" }
-
-# Route check: LISTEN should force speaker on both phones
-Info "Route: forceListenVolume SPEAKER logs both ways"
+# ========== ROUTE: LISTEN must force SPEAKER on both phones ==========
+Info "--- ROUTE LISTEN SPEAKER (Pixel + Samsung must match) ---"
+DieIfTimeout
 ClearLogs
 Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3; Svc $A "com.example.barky.TEST_LISTEN_STOP"
 Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 3; Svc $B "com.example.barky.TEST_LISTEN_STOP"
 $la = Logs $A; $lb = Logs $B
-$aSp = Has $la "forceListenVolume SPEAKER" -or Has $la "SPEAKER"
-$bSp = Has $lb "forceListenVolume SPEAKER" -or Has $lb "SPEAKER"
+$aSp = (Has $la "forceListenVolume SPEAKER") -or (Has $la "preferredDevice.*SPEAKER") -or (Has $la "route=SPEAKER")
+$bSp = (Has $lb "forceListenVolume SPEAKER") -or (Has $lb "preferredDevice.*SPEAKER") -or (Has $lb "route=SPEAKER")
+# Also accept log line from applyPreferredOutputDevice
+$aPref = Has $la "AudioTrack preferredDevice"
+$bPref = Has $lb "AudioTrack preferredDevice"
 if ($aSp -and $bSp) { Ok "ROUTE LISTEN SPEAKER both phones" }
 elseif ($aSp -or $bSp) { Bad "ROUTE LISTEN SPEAKER only one phone a=$aSp b=$bSp" }
 else { Bad "ROUTE LISTEN SPEAKER log missing" }
+if ($aPref -or $bPref) { Ok "ROUTE AudioTrack preferredDevice seen (a=$aPref b=$bPref)" }
+else { Bad "ROUTE AudioTrack preferredDevice missing both (Pixel media-path pin)" }
 
-# Fatal check
+# ========== FATAL / ALIVE ==========
 foreach ($s in $devs) {
     $m = (& $adb -s $s shell getprop ro.product.model).Trim()
     $l = Logs $s

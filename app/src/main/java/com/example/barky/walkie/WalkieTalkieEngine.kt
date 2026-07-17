@@ -113,6 +113,12 @@ class WalkieTalkieEngine(
     /** How the *receiver* should play the next clip (speaker vs earpiece/headset). */
     @Volatile private var pendingTxPlaybackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER
     @Volatile private var rxPlaybackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER
+    /**
+     * Preferred local playback route for the next AudioTrack rebuild.
+     * Pixel (USAGE_MEDIA) ignores [AudioManager.setCommunicationDevice]; the track
+     * must call [AudioTrack.setPreferredDevice] or LISTEN can stay on earpiece.
+     */
+    @Volatile private var preferHeadsetPlayback: Boolean = false
     /** We requested peer mic (LISTEN). */
     private val requestingListen = AtomicBoolean(false)
     /** Peer requested our mic. */
@@ -2498,6 +2504,7 @@ class WalkieTalkieEngine(
                     } catch (_: Exception) {
                     }
                 }
+                // Preferred device is set once at build time (not every PCM write)
                 return it
             }
             releaseAudioTrackLocked()
@@ -2542,6 +2549,7 @@ class WalkieTalkieEngine(
             track.release()
             throw IllegalStateException("AudioTrack not initialized")
         }
+        applyPreferredOutputDevice(track)
         track.setVolume(1.0f)
         track.play()
         audioTrack = track
@@ -2549,10 +2557,51 @@ class WalkieTalkieEngine(
     }
 
     /**
+     * Pin [AudioTrack] to loudspeaker or earpiece. Required on Pixel 8+:
+     * [AudioManager.setCommunicationDevice] only affects communication usages;
+     * our tracks use [AudioAttributes.USAGE_MEDIA], so without
+     * [AudioTrack.setPreferredDevice] LISTEN can stay on the earpiece while
+     * Samsung still follows speakerphone flags.
+     */
+    private fun applyPreferredOutputDevice(track: AudioTrack) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        try {
+            val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val device = if (preferHeadsetPlayback) {
+                outs.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET
+                } ?: outs.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                }
+            } else {
+                outs.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                }
+            }
+            if (device != null) {
+                val ok = track.setPreferredDevice(device)
+                Log.i(
+                    TAG,
+                    "AudioTrack preferredDevice type=${device.type} ok=$ok " +
+                        "route=${if (preferHeadsetPlayback) "headset/earpiece" else "SPEAKER"}"
+                )
+            } else {
+                Log.w(TAG, "No preferred output device (headset=$preferHeadsetPlayback)")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "applyPreferredOutputDevice", t)
+        }
+    }
+
+    /**
      * @param headset true = earpiece/headset route (private); false = loudspeaker.
      */
     private fun preparePlaybackAudio(headset: Boolean = false) {
         try {
+            preferHeadsetPlayback = headset
             if (headset) {
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 @Suppress("DEPRECATION")
@@ -2569,14 +2618,26 @@ class WalkieTalkieEngine(
                     else audioManager.clearCommunicationDevice()
                 }
             } else {
+                // LISTEN / speaker HOLD: media path + speakerphone (OEM-agnostic)
+                try {
+                    audioManager.stopBluetoothSco()
+                } catch (_: Exception) {
+                }
+                @Suppress("DEPRECATION")
+                audioManager.isBluetoothScoOn = false
                 audioManager.mode = AudioManager.MODE_NORMAL
                 @Suppress("DEPRECATION")
                 audioManager.isSpeakerphoneOn = true
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // Prefer clearing comm device so USAGE_MEDIA is free to use preferred speaker
                     val speaker = audioManager.availableCommunicationDevices.firstOrNull {
                         it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
                     }
-                    if (speaker != null) audioManager.setCommunicationDevice(speaker)
+                    if (speaker != null) {
+                        audioManager.setCommunicationDevice(speaker)
+                    } else {
+                        audioManager.clearCommunicationDevice()
+                    }
                 }
             }
             if (savedMusicVolume < 0) {
@@ -2591,6 +2652,8 @@ class WalkieTalkieEngine(
             if (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) < target || headset) {
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
             }
+            // Force track rebuild so setPreferredDevice applies on next write
+            releaseAudioTrack()
             Log.i(TAG, "preparePlaybackAudio headset=$headset")
         } catch (t: Throwable) {
             Log.w(TAG, "preparePlaybackAudio", t)
@@ -2599,6 +2662,7 @@ class WalkieTalkieEngine(
 
     private fun restorePlaybackAudio() {
         try {
+            preferHeadsetPlayback = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 audioManager.clearCommunicationDevice()
             }
@@ -2791,9 +2855,12 @@ class WalkieTalkieEngine(
     /**
      * LISTEN always plays on the **loudspeaker** on every device (Pixel + Samsung).
      * Clears earpiece / BT-SCO / communication routing left over from Private HOLD.
+     * Also pins [preferHeadsetPlayback]=false so [applyPreferredOutputDevice] chooses
+     * [TYPE_BUILTIN_SPEAKER] on the next AudioTrack (Pixel media-path fix).
      */
     private fun forceListenVolume() {
         try {
+            preferHeadsetPlayback = false
             // Drop any in-call / earpiece path (Pixel often stays on earpiece after Private)
             try {
                 audioManager.stopBluetoothSco()

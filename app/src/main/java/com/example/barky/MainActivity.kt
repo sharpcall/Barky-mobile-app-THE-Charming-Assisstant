@@ -67,8 +67,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieSee: MaterialButton
     private lateinit var walkieReplay: MaterialButton
     private lateinit var walkieFlipCamera: ImageButton
+    private lateinit var walkiePipBox: android.widget.FrameLayout
     private lateinit var walkiePreview: TextureView
-    private lateinit var walkiePipFade: View
+    private lateinit var walkiePipFade: SoftRectEdgeFadeView
     private lateinit var walkieVideo: ImageView
     private lateinit var walkieVideoHint: TextView
     private lateinit var walkieMap: WebView
@@ -441,6 +442,7 @@ class MainActivity : AppCompatActivity() {
         walkieSee = findViewById(R.id.walkie_see)
         walkieReplay = findViewById(R.id.walkie_replay)
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
+        walkiePipBox = findViewById(R.id.walkie_pip_box)
         walkiePreview = findViewById(R.id.walkie_preview)
         walkiePipFade = findViewById(R.id.walkie_pip_fade)
         walkieVideo = findViewById(R.id.walkie_video)
@@ -1038,7 +1040,7 @@ class MainActivity : AppCompatActivity() {
      * (draggable; tap to grow / shrink). Position is sticky until SEE ends.
      */
     private fun applySeeSplitLayout(enabled: Boolean) {
-        if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
+        if (!::walkiePipBox.isInitialized || !::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
         if (enabled) {
             showMap = false
             walkieMap.visibility = View.GONE
@@ -1052,9 +1054,9 @@ class MainActivity : AppCompatActivity() {
             // Only place once (or after explicit resize) — never every frame
             layoutFloatingPip(preservePosition = pipLayoutActive)
             pipLayoutActive = true
+            walkiePipBox.visibility = View.VISIBLE
             walkiePreview.visibility = View.VISIBLE
-            walkiePreview.elevation = 24f
-            walkiePreview.bringToFront()
+            walkiePipBox.bringToFront()
             walkieMicStage.elevation = 8f
             applyPipSoftEdges(true)
             walkiePreview.post { applyNaturalPreviewTransform() }
@@ -1069,39 +1071,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Rectangular self-view with soft **full-perimeter** edge fade into remote video
-     * (not rounded corners — gradients on all four sides).
+     * Soft **full rectangular perimeter** fade of the self-view into remote video.
+     * Not rounded corners — alpha eases out along all four straight edges via
+     * [SoftRectEdgeFadeView] DST_OUT on a hardware-layered [walkiePipBox].
      */
     private fun applyPipSoftEdges(enabled: Boolean) {
-        if (!::walkiePreview.isInitialized || !::walkiePipFade.isInitialized) return
+        if (!::walkiePipBox.isInitialized || !::walkiePipFade.isInitialized) return
         if (enabled) {
-            // Keep rectangular clip (no rounded corners)
+            walkiePipBox.clipToOutline = false
             walkiePreview.clipToOutline = false
-            walkiePreview.outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
-            walkiePreview.elevation = 18f
-            syncPipFadeOverlay()
+            walkiePipBox.setLayerType(View.LAYER_TYPE_HARDWARE, null)
             walkiePipFade.visibility = View.VISIBLE
             walkiePipFade.bringToFront()
-            walkiePreview.bringToFront()
-            walkiePipFade.bringToFront()
+            walkiePipFade.invalidate()
         } else {
             walkiePipFade.visibility = View.GONE
-            walkiePreview.elevation = 0f
+            walkiePipBox.setLayerType(View.LAYER_TYPE_NONE, null)
         }
-    }
-
-    /** Keep fade overlay same size/position as floating TextureView. */
-    private fun syncPipFadeOverlay() {
-        if (!::walkiePipFade.isInitialized || !::walkiePreview.isInitialized) return
-        val lpPrev = walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams ?: return
-        val lpFade = (walkiePipFade.layoutParams as? android.widget.FrameLayout.LayoutParams)
-            ?: android.widget.FrameLayout.LayoutParams(lpPrev.width, lpPrev.height)
-        lpFade.width = lpPrev.width
-        lpFade.height = lpPrev.height
-        lpFade.gravity = lpPrev.gravity
-        lpFade.setMargins(lpPrev.leftMargin, lpPrev.topMargin, lpPrev.rightMargin, lpPrev.bottomMargin)
-        walkiePipFade.layoutParams = lpFade
-        walkiePipFade.elevation = walkiePreview.elevation + 1f
     }
 
     private fun pipSizeDp(): Pair<Int, Int> {
@@ -1109,14 +1095,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun layoutFloatingPip(preservePosition: Boolean) {
+        if (!::walkiePipBox.isInitialized) return
         val density = resources.displayMetrics.density
         val (wDp, hDp) = pipSizeDp()
         val pipW = (wDp * density).toInt()
         val pipH = (hDp * density).toInt()
-        val parent = walkiePreview.parent as? android.view.ViewGroup
+        val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
+        val lp = (walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams)
             ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
         val oldW = lp.width
         val oldH = lp.height
@@ -1149,17 +1136,20 @@ class MainActivity : AppCompatActivity() {
         lp.height = pipH
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         lp.setMargins(left, top, 0, 0)
-        walkiePreview.layoutParams = lp
-        syncPipFadeOverlay()
+        walkiePipBox.layoutParams = lp
+        walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        )
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }
         }
     }
 
-    /** Drag PiP around; short tap toggles enlarged size. Position is remembered. */
+    /** Drag PiP box around; short tap toggles enlarged size. Position is remembered. */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindFloatingPip() {
-        if (pipDragBound || !::walkiePreview.isInitialized) return
+        if (pipDragBound || !::walkiePipBox.isInitialized) return
         pipDragBound = true
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
         var downX = 0f
@@ -1167,7 +1157,7 @@ class MainActivity : AppCompatActivity() {
         var startLeft = 0
         var startTop = 0
         var moved = false
-        walkiePreview.setOnTouchListener { v, event ->
+        walkiePipBox.setOnTouchListener { v, event ->
             if (!isSeeing) return@setOnTouchListener false
             val lp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
                 ?: return@setOnTouchListener false
@@ -1177,7 +1167,6 @@ class MainActivity : AppCompatActivity() {
                     v.parent?.requestDisallowInterceptTouchEvent(true)
                     downX = event.rawX
                     downY = event.rawY
-                    // Prefer saved sticky position
                     startLeft = if (pipLastLeft >= 0) pipLastLeft else lp.leftMargin
                     startTop = if (pipLastTop >= 0) pipLastTop else lp.topMargin
                     moved = false
@@ -1198,18 +1187,15 @@ class MainActivity : AppCompatActivity() {
                     pipLastLeft = lp.leftMargin
                     pipLastTop = lp.topMargin
                     v.layoutParams = lp
-                    syncPipFadeOverlay()
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     v.parent?.requestDisallowInterceptTouchEvent(false)
-                    // Persist final position
                     val cur = v.layoutParams as? android.widget.FrameLayout.LayoutParams
                     if (cur != null) {
                         pipLastLeft = cur.leftMargin
                         pipLastTop = cur.topMargin
                     }
-                    syncPipFadeOverlay()
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
                         pipEnlarged = !pipEnlarged
                         layoutFloatingPip(preservePosition = true)
@@ -1227,8 +1213,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetPreviewFullBleed() {
-        if (!::walkiePreview.isInitialized) return
-        val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
+        if (!::walkiePipBox.isInitialized || !::walkiePreview.isInitialized) return
+        val lp = (walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams)
             ?: android.widget.FrameLayout.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -1237,11 +1223,17 @@ class MainActivity : AppCompatActivity() {
         lp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
         lp.gravity = android.view.Gravity.CENTER
         lp.setMargins(0, 0, 0, 0)
-        walkiePreview.layoutParams = lp
+        walkiePipBox.layoutParams = lp
+        walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        walkiePipBox.elevation = 0f
         walkiePreview.elevation = 0f
         walkiePreview.translationX = 0f
         walkiePreview.translationY = 0f
         if (::walkiePipFade.isInitialized) walkiePipFade.visibility = View.GONE
+        walkiePipBox.setLayerType(View.LAYER_TYPE_NONE, null)
         applyNaturalPreviewTransform()
     }
 
