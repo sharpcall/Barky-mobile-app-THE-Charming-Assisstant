@@ -79,6 +79,8 @@
     <string name="walkie_listen_on">Stop LISTEN</string>
     <string name="walkie_see">SEE</string>
     <string name="walkie_see_on">Stop SEE</string>
+    <string name="pip_enlarged">Self-view larger — drag to move</string>
+    <string name="pip_normal">Self-view smaller — drag to move</string>
     <string name="walkie_gps">GPS map</string>
     <string name="walkie_gps_need_perm">Location permission is required for GPS tracking</string>
     <string name="walkie_wakeup">WAKEUP RING</string>

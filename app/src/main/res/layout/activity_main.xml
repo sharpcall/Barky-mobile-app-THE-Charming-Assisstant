@@ -320,43 +320,55 @@
                 android:textSize="11sp" />
         </LinearLayout>
 
-        <!-- LISTEN + SEE -->
-        <LinearLayout
+        <!-- LISTEN + SEE in framed card (like before) -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/listen_see_frame"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:gravity="center"
-            android:orientation="horizontal">
+            android:layout_marginTop="4dp"
+            app:cardBackgroundColor="@color/barky_surface_elevated"
+            app:cardCornerRadius="14dp"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/barky_card_stroke"
+            app:strokeWidth="1dp">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/walkie_listen"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="44dp"
-                android:layout_marginEnd="6dp"
-                android:layout_weight="1"
-                android:enabled="false"
-                android:text="@string/walkie_listen"
-                android:textAllCaps="false"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="12sp"
-                app:cornerRadius="22dp"
-                app:strokeColor="@color/barky_secondary" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:orientation="horizontal"
+                android:padding="8dp">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/walkie_see"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="44dp"
-                android:layout_weight="1"
-                android:enabled="false"
-                android:text="@string/walkie_see"
-                android:textAllCaps="false"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="12sp"
-                app:cornerRadius="22dp"
-                app:strokeColor="@color/barky_accent" />
-        </LinearLayout>
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/walkie_listen"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:text="@string/walkie_listen"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_surface"
+                    android:textSize="12sp"
+                    app:cornerRadius="22dp"
+                    app:strokeColor="@color/barky_secondary" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/walkie_see"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:text="@string/walkie_see"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_surface"
+                    android:textSize="12sp"
+                    app:cornerRadius="22dp"
+                    app:strokeColor="@color/barky_accent" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
         <!-- Compact row: LISTEN | SEE | WAKEUP (mic floats over camera) -->
         <LinearLayout

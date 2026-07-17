@@ -105,6 +105,9 @@ class MainActivity : AppCompatActivity() {
     private var previewBufW = 0
     private var previewBufH = 0
     private var previewDisplayOrient = 90
+    /** SEE PiP: enlarged when user taps the floating self-view. */
+    private var pipEnlarged = false
+    private var pipDragBound = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -562,6 +565,7 @@ class MainActivity : AppCompatActivity() {
 
         updateControls()
         updateMicChrome()
+        bindFloatingPip()
 
         // Hard gate: do not open walkie until every required permission is granted
         if (!hasAllRequiredPermissions()) {
@@ -1023,38 +1027,132 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * WhatsApp-style dual SEE: large remote (ImageView) + small local camera (TextureView).
+     * WhatsApp-style dual SEE: large remote + floating local PiP
+     * (draggable; tap to grow / shrink).
      */
     private fun applySeeSplitLayout(enabled: Boolean) {
         if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
-        val density = resources.displayMetrics.density
         if (enabled) {
             showMap = false
             walkieMap.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
-            // Big remote
             walkieVideo.layoutParams = walkieVideo.layoutParams.apply {
                 width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
                 height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
             }
             walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
             walkieVideo.visibility = View.VISIBLE
-            // Small local PiP (bottom-end, above mic strip)
-            val pipW = (110 * density).toInt()
-            val pipH = (150 * density).toInt()
-            val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
-                ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
-            lp.width = pipW
-            lp.height = pipH
-            lp.gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
-            lp.setMargins(0, 0, (12 * density).toInt(), (150 * density).toInt())
-            walkiePreview.layoutParams = lp
+            layoutFloatingPip(preservePosition = false)
             walkiePreview.visibility = View.VISIBLE
-            walkiePreview.elevation = 12f
+            walkiePreview.elevation = 16f
             walkiePreview.bringToFront()
+            // Keep above mic stage for drag
+            walkieMicStage.elevation = 8f
             applyNaturalPreviewTransform()
         } else {
+            pipEnlarged = false
             resetPreviewFullBleed()
+        }
+    }
+
+    private fun pipSizeDp(): Pair<Int, Int> {
+        return if (pipEnlarged) 168 to 224 else 110 to 150
+    }
+
+    private fun layoutFloatingPip(preservePosition: Boolean) {
+        val density = resources.displayMetrics.density
+        val (wDp, hDp) = pipSizeDp()
+        val pipW = (wDp * density).toInt()
+        val pipH = (hDp * density).toInt()
+        val parent = walkiePreview.parent as? android.view.ViewGroup
+        val parentW = parent?.width ?: resources.displayMetrics.widthPixels
+        val parentH = parent?.height ?: resources.displayMetrics.heightPixels
+        val lp = (walkiePreview.layoutParams as? android.widget.FrameLayout.LayoutParams)
+            ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
+        val oldW = lp.width
+        val oldH = lp.height
+        var left = if (preservePosition && lp.gravity == android.view.Gravity.TOP or android.view.Gravity.START) {
+            lp.leftMargin
+        } else {
+            parentW - pipW - (12 * density).toInt()
+        }
+        var top = if (preservePosition && lp.gravity == android.view.Gravity.TOP or android.view.Gravity.START) {
+            lp.topMargin
+        } else {
+            parentH - pipH - (150 * density).toInt()
+        }
+        // Keep fully on-screen when resizing
+        left = left.coerceIn(0, (parentW - pipW).coerceAtLeast(0))
+        top = top.coerceIn(0, (parentH - pipH).coerceAtLeast(0))
+        lp.width = pipW
+        lp.height = pipH
+        lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+        lp.setMargins(left, top, 0, 0)
+        walkiePreview.layoutParams = lp
+        if (oldW != pipW || oldH != pipH) {
+            walkiePreview.post { applyNaturalPreviewTransform() }
+        }
+    }
+
+    /** Drag PiP around; short tap toggles enlarged size. */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun bindFloatingPip() {
+        if (pipDragBound || !::walkiePreview.isInitialized) return
+        pipDragBound = true
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var startLeft = 0
+        var startTop = 0
+        var moved = false
+        walkiePreview.setOnTouchListener { v, event ->
+            if (!isSeeing) return@setOnTouchListener false
+            val lp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
+                ?: return@setOnTouchListener false
+            val parent = v.parent as? android.view.ViewGroup ?: return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    downX = event.rawX
+                    downY = event.rawY
+                    startLeft = lp.leftMargin
+                    startTop = lp.topMargin
+                    moved = false
+                    // Ensure TOP|START margins mode for free float
+                    if (lp.gravity != (android.view.Gravity.TOP or android.view.Gravity.START)) {
+                        layoutFloatingPip(preservePosition = false)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - downX).toInt()
+                    val dy = (event.rawY - downY).toInt()
+                    if (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop) moved = true
+                    val maxL = (parent.width - v.width).coerceAtLeast(0)
+                    val maxT = (parent.height - v.height).coerceAtLeast(0)
+                    lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                    lp.leftMargin = (startLeft + dx).coerceIn(0, maxL)
+                    lp.topMargin = (startTop + dy).coerceIn(0, maxT)
+                    lp.rightMargin = 0
+                    lp.bottomMargin = 0
+                    v.layoutParams = lp
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
+                        pipEnlarged = !pipEnlarged
+                        layoutFloatingPip(preservePosition = true)
+                        Toast.makeText(
+                            this,
+                            if (pipEnlarged) R.string.pip_enlarged else R.string.pip_normal,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    true
+                }
+                else -> false
+            }
         }
     }
 
@@ -1071,6 +1169,8 @@ class MainActivity : AppCompatActivity() {
         lp.setMargins(0, 0, 0, 0)
         walkiePreview.layoutParams = lp
         walkiePreview.elevation = 0f
+        walkiePreview.translationX = 0f
+        walkiePreview.translationY = 0f
         applyNaturalPreviewTransform()
     }
 

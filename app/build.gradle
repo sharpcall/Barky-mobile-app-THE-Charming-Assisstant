@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 39
-        versionName "5.3-wakeup-split-see"
+        versionCode 40
+        versionName "5.3-float-pip"
     }
 
     compileOptions {
