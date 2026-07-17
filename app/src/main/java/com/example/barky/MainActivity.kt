@@ -224,12 +224,17 @@ class MainActivity : AppCompatActivity() {
             walkieVideoHint.visibility = View.GONE
             showMap = false
             if (isSeeing && live && !isTalking) {
-                // Do NOT re-layout PiP every frame (that snapped it back home)
+                // Remote video fills stage; PiP self-view stays a small natural rectangle on top
                 if (!pipLayoutActive) applySeeSplitLayout(true)
+                walkieVideo.elevation = 0f
                 walkieVideo.setImageBitmap(bitmap)
                 walkieVideo.visibility = View.VISIBLE
                 walkieMap.visibility = View.GONE
-                walkiePreview.visibility = View.VISIBLE
+                // Keep self-view box above remote, but never full-bleed
+                if (::walkiePipBox.isInitialized) {
+                    walkiePipBox.visibility = View.VISIBLE
+                    walkiePipBox.bringToFront()
+                }
             } else if (isReceiving || isReplaying || !isTalking) {
                 if (isReceiving || isReplaying) {
                     showLocalCameraSurface(false)
@@ -362,6 +367,10 @@ class MainActivity : AppCompatActivity() {
                 previewBufW = previewW
                 previewBufH = previewH
                 previewDisplayOrient = displayOrientation
+                // Re-size floating PiP to camera aspect when geometry arrives
+                if (isSeeing && pipLayoutActive) {
+                    layoutFloatingPip(preservePosition = true)
+                }
                 applyNaturalPreviewTransform()
             }
         }
@@ -1052,21 +1061,28 @@ class MainActivity : AppCompatActivity() {
             showMap = false
             walkieMap.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
+            // Remote peer fills stage (under self PiP)
             walkieVideo.layoutParams = walkieVideo.layoutParams.apply {
                 width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
                 height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
             }
             walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
+            walkieVideo.elevation = 0f
             walkieVideo.visibility = View.VISIBLE
-            // Only place once (or after explicit resize) — never every frame
+            // Self PiP: natural camera aspect, small corner — never full-screen cover
             layoutFloatingPip(preservePosition = pipLayoutActive)
             pipLayoutActive = true
             walkiePipBox.visibility = View.VISIBLE
             walkiePreview.visibility = View.VISIBLE
+            walkiePipBox.elevation = 24f
             walkiePipBox.bringToFront()
             walkieMicStage.elevation = 8f
             applyPipSoftEdges(true)
-            walkiePreview.post { applyNaturalPreviewTransform() }
+            // Second layout pass after measure so Pixel/Samsung both get non-zero parent size
+            walkiePipBox.post {
+                layoutFloatingPip(preservePosition = true)
+                applyNaturalPreviewTransform()
+            }
         } else {
             pipEnlarged = false
             pipLayoutActive = false
@@ -1142,21 +1158,44 @@ class MainActivity : AppCompatActivity() {
         if (prev != null && !prev.isRecycled) prev.recycle()
     }
 
-    private fun pipSizeDp(): Pair<Int, Int> {
-        return if (pipEnlarged) 168 to 224 else 110 to 150
+    /**
+     * Natural PiP size from camera buffer aspect (no stretch).
+     * Sensor is landscape (e.g. 1280x720); upright on phone is portrait (720x1280).
+     */
+    private fun pipSizePx(): Pair<Int, Int> {
+        val density = resources.displayMetrics.density
+        val baseW = ((if (pipEnlarged) 132f else 96f) * density).toInt()
+        // Upright height/width after typical 90° display orientation
+        val uprightAspect = if (previewBufW > 0 && previewBufH > 0) {
+            // buffer landscape W x H → upright aspect = W/H (taller than wide)
+            previewBufW.toFloat() / previewBufH.toFloat()
+        } else {
+            4f / 3f
+        }
+        val pipH = (baseW * uprightAspect).toInt().coerceIn(baseW, (baseW * 2.2f).toInt())
+        // Never larger than ~35% of stage — prevents covering remote video
+        val parent = walkiePipBox.parent as? android.view.ViewGroup
+        val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
+        val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
+        val maxW = (parentW * 0.35f).toInt().coerceAtLeast(baseW)
+        val maxH = (parentH * 0.40f).toInt().coerceAtLeast(baseW)
+        val w = baseW.coerceAtMost(maxW)
+        val h = pipH.coerceAtMost(maxH)
+        return w to h
     }
 
     private fun layoutFloatingPip(preservePosition: Boolean) {
         if (!::walkiePipBox.isInitialized) return
         val density = resources.displayMetrics.density
-        val (wDp, hDp) = pipSizeDp()
-        val pipW = (wDp * density).toInt()
-        val pipH = (hDp * density).toInt()
+        val (pipW, pipH) = pipSizePx()
+        // Hard guard: never leave PiP full-screen (that hid remote SEE video on some layouts)
+        if (pipW <= 0 || pipH <= 0) return
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
         val lp = (walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams)
             ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
+        // If we previously had match_parent, force down to PiP size
         val oldW = lp.width
         val oldH = lp.height
         val useSaved = preservePosition && pipLastLeft >= 0 && pipLastTop >= 0
@@ -1164,7 +1203,7 @@ class MainActivity : AppCompatActivity() {
             pipLastLeft
         } else if (preservePosition &&
             lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START) &&
-            (lp.width in 1..parentW)
+            lp.width in 1 until parentW
         ) {
             lp.leftMargin
         } else {
@@ -1174,7 +1213,7 @@ class MainActivity : AppCompatActivity() {
             pipLastTop
         } else if (preservePosition &&
             lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START) &&
-            (lp.height in 1..parentH)
+            lp.height in 1 until parentH
         ) {
             lp.topMargin
         } else {
@@ -1193,6 +1232,13 @@ class MainActivity : AppCompatActivity() {
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
         )
+        if (::walkiePipSoft.isInitialized) {
+            walkiePipSoft.layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            walkiePipSoft.scaleType = ImageView.ScaleType.CENTER_CROP
+        }
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }
         }

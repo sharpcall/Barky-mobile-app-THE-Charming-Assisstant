@@ -45,7 +45,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
 
-            <!-- Soft-edge display (true alpha perimeter); covers TextureView in PiP -->
+            <!-- Soft-edge display (true alpha perimeter); covers TextureView in PiP.
+                 CENTER_CROP keeps natural proportions (never stretch with fitXY). -->
             <ImageView
                 android:id="@+id/walkie_pip_soft"
                 android:layout_width="match_parent"
@@ -53,7 +54,7 @@
                 android:clickable="false"
                 android:contentDescription="@null"
                 android:focusable="false"
-                android:scaleType="fitXY"
+                android:scaleType="centerCrop"
                 android:visibility="gone" />
         </FrameLayout>
 

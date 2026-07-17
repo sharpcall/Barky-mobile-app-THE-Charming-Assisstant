@@ -1607,6 +1607,10 @@ class WalkieTalkieEngine(
                 ) {
                     frames++
                     videoRxOk++
+                    monitorVideoRxCount++
+                    if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
+                        Log.i(TAG, "SEE_VIDEO_TCP_RX n=$monitorVideoRxCount bytes=${jpeg.size} from=$from")
+                    }
                     if (!replaying.get()) decodeAndEmit(jpeg, live = true)
                     continue
                 }
@@ -2940,16 +2944,17 @@ class WalkieTalkieEngine(
             stopSeeRemote()
             return
         }
-        // SEE carries its own A/V (do not force LISTEN button / state — keeps Stop LISTEN independent)
-        monitorReceiving.set(true)
-        monitorAudioRxCount = 0
-        releaseAudioTrack()
-        preparePlaybackAudio(headset = false)
-        // Keep local camera for PiP (WhatsApp-style); only stop if we will serve SEE with same cam
+        // SEE = video only. Audio is independent (LISTEN button). Same code path on every phone.
+        monitorVideoRxCount = 0
+        // Keep local camera for PiP (WhatsApp-style)
         if (!servingSee.get()) {
-            // Local preview for small self-view while watching peer
             localPreviewWanted = true
             startLocalPreviewInternal()
+        }
+        // If LISTEN is also on, audio path is already prepared; do not force audio for SEE alone
+        if (requestingListen.get()) {
+            monitorReceiving.set(true)
+            preparePlaybackAudio(headset = false)
         }
         val target = peer
         val reply = localPort
@@ -2957,12 +2962,7 @@ class WalkieTalkieEngine(
             try {
                 sendHelloTo(target)
                 Thread.sleep(80)
-                sendControlWithPort(target, WalkieProtocol.TYPE_SEE_REQ, reply)
-                Thread.sleep(250)
-                if (requestingSee.get()) {
-                    val p = currentPeer() ?: target
-                    sendControlWithPort(p, WalkieProtocol.TYPE_SEE_REQ, reply)
-                }
+                sendSeeReqBurst(target, reply)
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
             }
@@ -2970,8 +2970,32 @@ class WalkieTalkieEngine(
         mainHandler.post {
             listener.onSeeStateChanged(true, servingSee.get())
         }
-        postStatus("SEE — watching peer…")
-        Log.i(TAG, "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort vport=${peer.videoPort}")
+        postStatus(
+            if (requestingListen.get()) "SEE+LISTEN — watching + hearing peer…"
+            else "SEE — watching peer (video only)…"
+        )
+        Log.i(
+            TAG,
+            "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort vport=${peer.videoPort} " +
+                "withAudio=${requestingListen.get()}"
+        )
+    }
+
+    /** Burst SEE_REQ like LISTEN (stale UDP port was a common one-phone-only miss). */
+    private fun sendSeeReqBurst(peer: WalkiePeer, replyPort: Int) {
+        val ports = linkedSetOf(peer.port)
+        peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
+        getPeers().forEach { p -> if (p.host == peer.host) ports.add(p.port) }
+        for (port in ports.filter { it > 0 }) {
+            sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_SEE_REQ, replyPort)
+            Thread.sleep(40)
+        }
+        Thread.sleep(200)
+        if (requestingSee.get()) {
+            for (port in ports.filter { it > 0 }) {
+                sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_SEE_REQ, replyPort)
+            }
+        }
     }
 
     fun stopSeeRemote() {
@@ -2982,7 +3006,7 @@ class WalkieTalkieEngine(
         }
         val peer = currentPeer() ?: getPeers().firstOrNull()
         peer?.let { sendControl(it, WalkieProtocol.TYPE_SEE_STOP) }
-        // LISTEN is independent — leave requestingListen alone
+        // LISTEN is independent — leave requestingListen / audio alone
         if (!requestingListen.get()) monitorReceiving.set(false)
         mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
         if (!talking.get() && !replaying.get()) {
@@ -3021,10 +3045,9 @@ class WalkieTalkieEngine(
         Log.i(
             TAG,
             "SEE_REQ from $from fromPort=$fromPort payloadPort=$payloadPort " +
-                "usePort=${peer.port} vport=${peer.videoPort}"
+                "usePort=${peer.port} vport=${peer.videoPort} (video-only serve)"
         )
-        // SEE always opens cam + mic toward requester
-        startServingListen(peer)
+        // SEE = camera/video only. Mic streams only if peer also sent LISTEN_REQ.
         startServingSee(peer)
     }
 
@@ -3093,12 +3116,21 @@ class WalkieTalkieEngine(
     }
 
     private fun startServingSee(target: WalkiePeer? = null) {
-        if (servingSee.getAndSet(true)) return
-        if (talking.get()) {
-            // Prefer active PTT over SEE serve
+        // Restart if flag stuck true but video thread already died (same on all OEMs)
+        if (servingSee.get()) {
+            if (monitorVideoThread?.isAlive == true) {
+                target?.let { monitorTarget = it }
+                Log.i(TAG, "SEE serve already active → ${monitorTarget?.host}:${monitorTarget?.port}")
+                return
+            }
+            Log.w(TAG, "SEE serve flag stuck without thread — restarting")
             servingSee.set(false)
+        }
+        if (talking.get()) {
+            Log.w(TAG, "SEE serve skipped: PTT active")
             return
         }
+        if (!servingSee.compareAndSet(false, true)) return
         val peer = target ?: currentPeer() ?: getPeers().firstOrNull() ?: run {
             servingSee.set(false)
             return
@@ -3106,19 +3138,12 @@ class WalkieTalkieEngine(
         monitorTarget = peer
         mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), true) }
         stopLocalPreviewInternal()
-        // Stream mic for SEE (loop watches servingSee — do not steal LISTEN flag)
-        if (monitorAudioThread?.isAlive != true) {
-            monitorAudioThread = thread(name = "walkie-serve-see-audio", isDaemon = true) {
-                try {
-                    recordMonitorAudio(peer)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "see audio", t)
-                }
-            }
-        }
+        // Video only — mic is owned by LISTEN serve (if any)
         monitorVideoThread = thread(name = "walkie-serve-see-video", isDaemon = true) {
+            var frames = 0
             try {
-                openVideoOut(peer)
+                val tcpOk = openVideoOut(peer)
+                Log.i(TAG, "SEE serve video start → ${peer.host}:${peer.port} tcp=$tcpOk vport=${peer.videoPort}")
                 val cam = CameraFrameSource(
                     context = appContext,
                     compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
@@ -3132,8 +3157,13 @@ class WalkieTalkieEngine(
                     onError = { msg -> videoDebug("SEE cam: $msg") }
                 ) { jpeg ->
                     if (!servingSee.get()) return@CameraFrameSource
-                    if (!sendVideoFrameTcp(jpeg)) {
-                        sendMonitorVideoUdp(jpeg, peer)
+                    val viaTcp = sendVideoFrameTcp(jpeg)
+                    val ok = if (viaTcp) true else sendMonitorVideoUdp(jpeg, peer)
+                    if (ok) {
+                        frames++
+                        if (frames == 1 || frames % 30 == 0) {
+                            Log.i(TAG, "SEE VIDEO_TX n=$frames via=${if (viaTcp) "tcp" else "udp"} bytes=${jpeg.size}")
+                        }
                     }
                 }
                 cameraSource = cam
@@ -3150,15 +3180,15 @@ class WalkieTalkieEngine(
                 servingSee.set(false)
                 mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), false) }
                 if (!talking.get()) maybeResumeLocalPreview()
+                Log.i(TAG, "SEE serve video end frames=$frames")
             }
         }
-        postStatus("Camera+mic open for peer (SEE)")
+        postStatus("Camera open for peer (SEE video)")
+        Log.i(TAG, "SEE serve START → ${peer.host}:${peer.port} vport=${peer.videoPort}")
     }
 
     private fun stopServingSee() {
         if (!servingSee.getAndSet(false)) return
-        // If SEE started listen serve for us, stop it when not also LISTEN-req
-        // (servingListen may be shared)
         mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), false) }
         Log.i(TAG, "stopServingSee")
     }
@@ -3207,7 +3237,8 @@ class WalkieTalkieEngine(
             val packetBuf = ByteArray(1 + WalkieProtocol.BYTES_PER_FRAME)
             packetBuf[0] = WalkieProtocol.TYPE_MONITOR_AUDIO
             var sent = 0
-            while (running.get() && (servingListen.get() || servingSee.get())) {
+            // Mic stream is LISTEN-only (SEE is video-only)
+            while (running.get() && servingListen.get()) {
                 val dest = monitorTarget ?: peer
                 if (dest.port <= 0) {
                     Thread.sleep(50)
@@ -3244,23 +3275,23 @@ class WalkieTalkieEngine(
     }
 
     @Volatile private var monitorAudioRxCount = 0
+    @Volatile private var monitorVideoRxCount = 0
 
     private fun handleMonitorAudio(data: ByteArray) {
         if (data.size < 3) return
-        // Accept monitor audio if we requested LISTEN/SEE
-        if (!requestingListen.get() && !requestingSee.get()) {
+        // Audio only when LISTEN is on (SEE is video-only unless LISTEN also pressed)
+        if (!requestingListen.get()) {
             return
         }
         monitorReceiving.set(true)
         val pcm = data.copyOfRange(1, data.size)
         if (!replaying.get()) {
-            // Soft sources often very quiet on Pixel — gain before play
+            // Soft mic sources often quiet — same gain path on every device
             playPcm(amplifyPcm16(pcm, MONITOR_GAIN))
             monitorAudioRxCount++
             if (monitorAudioRxCount == 1) {
                 forceListenVolume()
             }
-            // Always log first packets so dual-device smoke cannot miss RX proof
             if (monitorAudioRxCount <= 5 || monitorAudioRxCount % 25 == 0) {
                 Log.i(
                     TAG,
@@ -3289,8 +3320,6 @@ class WalkieTalkieEngine(
     private fun handleMonitorVideo(data: ByteArray, from: String) {
         if (!requestingSee.get()) return
         if (data.size < WalkieProtocol.VIDEO_HEADER) return
-        // Same layout as TYPE_VIDEO — reassemble via handleVideoBytes path but live-only
-        // Simpler: treat as single-part if we use UDP compact, or reuse assembly
         handleVideoBytesAsMonitor(data)
     }
 
@@ -3323,7 +3352,13 @@ class WalkieTalkieEngine(
             } else null
         }
         if (jpeg != null && jpeg.size >= 2 && jpeg[0] == 0xFF.toByte() && jpeg[1] == 0xD8.toByte()) {
-            if (!replaying.get()) decodeAndEmit(jpeg, live = true)
+            if (!replaying.get()) {
+                monitorVideoRxCount++
+                if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
+                    Log.i(TAG, "MONITOR_VIDEO_RX n=$monitorVideoRxCount bytes=${jpeg.size}")
+                }
+                decodeAndEmit(jpeg, live = true)
+            }
         }
     }
 
