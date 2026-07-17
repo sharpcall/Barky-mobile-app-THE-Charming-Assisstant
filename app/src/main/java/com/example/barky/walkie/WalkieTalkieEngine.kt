@@ -324,11 +324,16 @@ class WalkieTalkieEngine(
         }
         thread(name = "walkie-cam-flip-req", isDaemon = true) {
             try {
-                // One-shot: multi-burst would toggle front/back many times and look like no-op
-                sendControlOnce(peer, WalkieProtocol.TYPE_CAMERA_FLIP)
-                // Extra ports (stale peer map) — still once each, peer debounces
-                peers.values.filter { it.host == peer.host && it.port > 0 && it.port != peer.port }
-                    .forEach { sendControlOnce(it, WalkieProtocol.TYPE_CAMERA_FLIP) }
+                // Small reliable burst; peer debounces so it still toggles only once
+                val ports = linkedSetOf(peer.port)
+                peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
+                for (port in ports.filter { it > 0 }) {
+                    val p = peer.copy(port = port)
+                    repeat(3) {
+                        sendControlOnce(p, WalkieProtocol.TYPE_CAMERA_FLIP)
+                        Thread.sleep(30)
+                    }
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "requestPeerCameraFlip", t)
             }
