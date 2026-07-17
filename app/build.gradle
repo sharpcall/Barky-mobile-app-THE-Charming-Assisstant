@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 49
-        versionName "5.9-flip-target"
+        versionCode 50
+        versionName "5.10-oneway-see-pip"
     }
 
     compileOptions {

@@ -1109,12 +1109,12 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Natural PiP size from camera buffer + display orientation (no stretch).
-     * Large enough for a clear self-view + flip button; not full-screen.
+     * Large self-view; flip is a small overlay *inside* this box (not beside it).
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        // Comfortable self-view (was ~100dp — too small); enlarge mode ~half stage width
-        val baseW = ((if (pipEnlarged) 200f else 148f) * density).toInt()
+        // Room for face + small on-picture flip badge
+        val baseW = ((if (pipEnlarged) 220f else 176f) * density).toInt()
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1135,8 +1135,8 @@ class MainActivity : AppCompatActivity() {
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val maxW = (parentW * (if (pipEnlarged) 0.48f else 0.40f)).toInt().coerceAtLeast(baseW)
-        val maxH = (parentH * (if (pipEnlarged) 0.55f else 0.42f)).toInt().coerceAtLeast(baseW)
+        val maxW = (parentW * (if (pipEnlarged) 0.52f else 0.46f)).toInt().coerceAtLeast(baseW)
+        val maxH = (parentH * (if (pipEnlarged) 0.58f else 0.48f)).toInt().coerceAtLeast(baseW)
         if (pipW > maxW) {
             val s = maxW.toFloat() / pipW
             pipW = maxW
@@ -1194,12 +1194,20 @@ class MainActivity : AppCompatActivity() {
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         lp.setMargins(left, top, 0, 0)
         walkiePipBox.layoutParams = lp
+        // Preview fills the box; flip is laid out as overlay (top|end) inside same box
         walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
         )
         walkiePreview.alpha = 1f
         if (::walkiePipFlip.isInitialized && isSeeing) {
+            val dens = resources.displayMetrics.density
+            val badge = (28 * dens).toInt()
+            val m = (4 * dens).toInt()
+            walkiePipFlip.layoutParams = android.widget.FrameLayout.LayoutParams(badge, badge).apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                setMargins(m, m, m, m)
+            }
             walkiePipFlip.visibility = View.VISIBLE
             walkiePipFlip.bringToFront()
         }

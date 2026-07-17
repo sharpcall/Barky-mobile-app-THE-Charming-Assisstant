@@ -31,11 +31,14 @@
         android:layout_weight="1"
         android:background="#0B141A">
 
-        <!-- Self-view: full-bleed idle cam, or floating PiP during SEE (natural aspect). -->
+        <!-- Self-view: full-bleed idle cam, or floating PiP during SEE.
+             Flip icon is a small overlay ON the picture (top-end), not beside it. -->
         <FrameLayout
             android:id="@+id/walkie_pip_box"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
+            android:clipChildren="true"
+            android:clipToPadding="true"
             android:elevation="18dp">
 
             <TextureView
@@ -43,19 +46,19 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
 
-            <!-- Local flip on self-picture (top-right). Clickable above TextureView drag. -->
+            <!-- Compact flip badge overlaid on the self-picture corner -->
             <ImageButton
                 android:id="@+id/walkie_pip_flip"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
                 android:layout_gravity="top|end"
-                android:layout_margin="8dp"
+                android:layout_margin="4dp"
                 android:background="@drawable/bg_flip_camera_circle"
                 android:clickable="true"
                 android:contentDescription="@string/walkie_flip_self_camera"
-                android:elevation="12dp"
+                android:elevation="16dp"
                 android:focusable="true"
-                android:padding="8dp"
+                android:padding="5dp"
                 android:scaleType="centerInside"
                 android:src="@drawable/ic_flip_camera"
                 android:visibility="gone" />

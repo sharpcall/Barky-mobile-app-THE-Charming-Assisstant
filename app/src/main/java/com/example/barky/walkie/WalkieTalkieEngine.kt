@@ -1545,8 +1545,9 @@ class WalkieTalkieEngine(
         seeWatchPeer?.host?.let { keepHosts.add(it) }
         monitorTarget?.host?.let { keepHosts.add(it) }
         selectedPeerKey?.let { peers[it]?.host?.let { h -> keepHosts.add(h) } }
+        // Longer TTL so brief Wi‑Fi blips don't drop the only live peer mid one-way SEE
         val staleHosts = peerLastHelloMs.entries
-            .filter { (host, t) -> now - t > 12_000L && host !in keepHosts }
+            .filter { (host, t) -> now - t > 20_000L && host !in keepHosts }
             .map { it.key }
             .toSet()
         if (staleHosts.isEmpty()) return
@@ -1565,17 +1566,26 @@ class WalkieTalkieEngine(
     }
 
     /** Prefer peer with newest HELLO (live device over ghost IP). */
-    private fun bestLivePeer(): WalkiePeer? {
+    private fun bestLivePeer(): WalkiePeer? = allLivePeers().maxByOrNull { peerLastHelloMs[it.host] ?: 0L }
+        ?: currentPeer()
+        ?: getPeers().firstOrNull()
+
+    /** One representative peer per host that HELLO'd recently. */
+    private fun allLivePeers(): List<WalkiePeer> {
         pruneStalePeers()
+        val now = System.currentTimeMillis()
         val live = peers.values.filter { p ->
             val t = peerLastHelloMs[p.host] ?: 0L
-            System.currentTimeMillis() - t < 12_000L
+            now - t < 15_000L && p.port > 0
         }
-        if (live.isEmpty()) return currentPeer() ?: getPeers().firstOrNull()
-        // One entry per host — newest HELLO, highest port as tie-break
+        if (live.isEmpty()) return getPeers().filter { it.port > 0 }
         return live.groupBy { it.host }.values.mapNotNull { group ->
-            group.maxWithOrNull(compareBy<WalkiePeer> { peerLastHelloMs[it.host] ?: 0L }.thenBy { it.port })
-        }.maxByOrNull { peerLastHelloMs[it.host] ?: 0L }
+            group.maxWithOrNull(
+                compareBy<WalkiePeer> { peerLastHelloMs[it.host] ?: 0L }
+                    .thenBy { it.videoPort }
+                    .thenBy { it.port }
+            )
+        }
     }
 
     private fun closeVideoOut() {
@@ -3071,7 +3081,8 @@ class WalkieTalkieEngine(
     }
 
     fun startSeeRemote() {
-        var peer = bestLivePeer() ?: currentPeer() ?: getPeers().firstOrNull()
+        val live = allLivePeers()
+        var peer = bestLivePeer() ?: live.firstOrNull() ?: currentPeer() ?: getPeers().firstOrNull()
         if (peer == null) {
             postError("No peer for SEE")
             return
@@ -3085,23 +3096,34 @@ class WalkieTalkieEngine(
         seeWatchPeer = peer
         // SEE = video only. Audio is independent (LISTEN button). Same code path on every phone.
         monitorVideoRxCount = 0
-        // Keep local camera for PiP (WhatsApp-style)
+        // Keep local camera for PiP (WhatsApp-style) unless we already serve camera
         if (!servingSee.get()) {
             localPreviewWanted = true
             startLocalPreviewInternal()
         }
-        // If LISTEN is also on, audio path is already prepared; do not force audio for SEE alone
         if (requestingListen.get()) {
             monitorReceiving.set(true)
             preparePlaybackAudio(headset = false)
         }
-        val target = peer
         val reply = localPort
+        // Fan-out to ALL live hosts — one-way SEE must not depend on picking the "right" ghost
+        val targets = if (live.isNotEmpty()) live else listOf(peer)
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
-                sendHelloTo(target)
+                for (t in targets) {
+                    sendHelloTo(t)
+                }
                 Thread.sleep(80)
-                sendSeeReqBurst(target, reply)
+                for (t in targets) {
+                    sendSeeReqBurst(t, reply)
+                }
+                // Retry after short settle (UDP / stale port)
+                Thread.sleep(350)
+                if (requestingSee.get()) {
+                    for (t in targets) {
+                        sendSeeReqBurst(t, reply)
+                    }
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
             }
@@ -3115,25 +3137,19 @@ class WalkieTalkieEngine(
         )
         Log.i(
             TAG,
-            "SEE_REQ → ${peer.host}:${peer.port} replyPort=$localPort vport=${peer.videoPort} " +
-                "withAudio=${requestingListen.get()}"
+            "SEE_REQ primary → ${peer.host}:${peer.port} also=${targets.map { it.host }} " +
+                "replyPort=$localPort withAudio=${requestingListen.get()}"
         )
     }
 
-    /** Burst SEE_REQ like LISTEN (stale UDP port was a common one-phone-only miss). */
+    /** Burst SEE_REQ to all known UDP ports for this host. */
     private fun sendSeeReqBurst(peer: WalkiePeer, replyPort: Int) {
         val ports = linkedSetOf(peer.port)
         peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
         getPeers().forEach { p -> if (p.host == peer.host) ports.add(p.port) }
         for (port in ports.filter { it > 0 }) {
             sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_SEE_REQ, replyPort)
-            Thread.sleep(40)
-        }
-        Thread.sleep(200)
-        if (requestingSee.get()) {
-            for (port in ports.filter { it > 0 }) {
-                sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_SEE_REQ, replyPort)
-            }
+            Thread.sleep(35)
         }
     }
 
