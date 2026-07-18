@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
-    android:color="#40FFFFFF">
+    android:color="#66FFFFFF">
     <item>
         <shape android:shape="oval">
-            <solid android:color="@color/walkie_ptt" />
-            <size android:width="72dp" android:height="72dp" />
+            <gradient
+                android:angle="135"
+                android:endColor="@color/walkie_ptt_end"
+                android:startColor="@color/walkie_ptt"
+                android:type="linear" />
+            <size
+                android:width="72dp"
+                android:height="72dp" />
+            <stroke
+                android:width="2dp"
+                android:color="#66F0ABFC" />
         </shape>
     </item>
 </ripple>

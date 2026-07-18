@@ -5,8 +5,8 @@
     android:layout_height="wrap_content"
     android:layout_margin="6dp"
     app:cardBackgroundColor="@color/barky_surface"
-    app:cardCornerRadius="14dp"
-    app:cardElevation="2dp"
+    app:cardCornerRadius="22dp"
+    app:cardElevation="4dp"
     app:strokeColor="@color/barky_card_stroke"
     app:strokeWidth="1dp">
 

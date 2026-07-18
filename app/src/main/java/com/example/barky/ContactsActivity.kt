@@ -75,7 +75,7 @@ class ContactsActivity : AppCompatActivity() {
         setSupportActionBar(toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         toolbar.setNavigationOnClickListener { finish() }
-        toolbar.setNavigationIconTint(getColor(R.color.barky_on_primary))
+        toolbar.setNavigationIconTint(getColor(R.color.barky_on_surface))
 
         status = findViewById(R.id.contacts_status)
         list = findViewById(R.id.contacts_list)

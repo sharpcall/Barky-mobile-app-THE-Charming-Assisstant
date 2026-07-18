@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/barky_background"
+    android:background="@drawable/bg_violet_pulse_window"
     android:fitsSystemWindows="true"
     android:orientation="vertical">
 
@@ -11,11 +11,12 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="@color/barky_primary"
-        android:elevation="4dp"
+        android:background="@android:color/transparent"
+        android:elevation="0dp"
         app:navigationIcon="?attr/homeAsUpIndicator"
+        app:navigationIconTint="@color/barky_on_surface"
         app:title="@string/contacts_title"
-        app:titleTextColor="@color/barky_on_primary" />
+        app:titleTextColor="@color/barky_on_surface" />
 
     <TextView
         android:id="@+id/contacts_status"

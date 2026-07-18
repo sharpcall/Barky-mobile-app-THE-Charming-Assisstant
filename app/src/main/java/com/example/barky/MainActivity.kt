@@ -37,9 +37,7 @@ import java.util.Date
 import java.util.Locale
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.card.MaterialCardView
 import com.google.android.material.checkbox.MaterialCheckBox
-import com.google.android.material.textfield.TextInputEditText
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -50,12 +48,9 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
     private lateinit var walkieStatus: TextView
     private lateinit var walkiePeers: TextView
-    private lateinit var internetPairCard: MaterialCardView
-    private lateinit var myInviteCode: TextView
-    private lateinit var peerInviteEdit: TextInputEditText
-    private lateinit var connectInvite: MaterialButton
     private lateinit var walkieBestQuality: MaterialCheckBox
     private lateinit var walkieGps: MaterialCheckBox
+    private lateinit var walkieScrn: MaterialCheckBox
     private lateinit var walkieMic: ImageButton
     private lateinit var walkieMicStage: android.widget.FrameLayout
     private lateinit var walkieMicMode: TextView
@@ -218,14 +213,16 @@ class MainActivity : AppCompatActivity() {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
             showMap = false
-            if (isSeeing && live && !isTalking) {
+            val watching = isSeeing || (walkieService?.isRequestingScreen() == true)
+            if (watching && live && !isTalking) {
                 // Remote video fills stage; PiP self-view stays a small natural rectangle on top
                 if (!pipLayoutActive) applySeeSplitLayout(true)
                 walkieVideo.elevation = 0f
-                walkieVideo.setImageBitmap(bitmap)
+                // Pixel: replace drawable carefully — recycling the previous bitmap while
+                // ImageView still holds it caused black flashes / flicker.
+                setRemoteVideoBitmap(bitmap)
                 walkieVideo.visibility = View.VISIBLE
                 walkieMap.visibility = View.GONE
-                // Keep self-view box above remote, but never full-bleed
                 if (::walkiePipBox.isInitialized) {
                     walkiePipBox.visibility = View.VISIBLE
                     walkiePipBox.bringToFront()
@@ -234,13 +231,16 @@ class MainActivity : AppCompatActivity() {
                 if (isReceiving || isReplaying) {
                     showLocalCameraSurface(false)
                 }
-                walkieVideo.setImageBitmap(bitmap)
+                setRemoteVideoBitmap(bitmap)
                 walkieVideo.visibility = View.VISIBLE
                 walkieMap.visibility = View.GONE
+            } else {
+                // Not displayed — recycle to free RAM
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
-            if ((isTalking || isReceiving || isSeeing) && live && !isReplaying) {
+            if ((isTalking || isReceiving || isSeeing || watching) && live && !isReplaying) {
                 walkieReplay.visibility = View.GONE
-            } else if (!isTalking && !isReceiving && !isReplaying && !isSeeing) {
+            } else if (!isTalking && !isReceiving && !isReplaying && !isSeeing && !watching) {
                 updateReplayVisibility()
             }
         }
@@ -300,7 +300,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onInternetInviteChanged(inviteCode: String?) {
-            runOnUiThread { updateInternetPairUi(inviteCode) }
+            // Pair-code UI removed — Firebase Contacts is the directory
         }
 
         override fun onGpsUpdated(
@@ -396,7 +396,6 @@ class MainActivity : AppCompatActivity() {
             updateControls()
             updateReplayButton()
             updateListenSeeButtons()
-            updateInternetPairUi(walkieService?.getMyInviteCode() ?: walkieService?.internetInviteCode)
             if (walkiePreview.isAvailable) {
                 walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
             }
@@ -439,12 +438,9 @@ class MainActivity : AppCompatActivity() {
 
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
-        internetPairCard = findViewById(R.id.internet_pair_card)
-        myInviteCode = findViewById(R.id.my_invite_code)
-        peerInviteEdit = findViewById(R.id.peer_invite_edit)
-        connectInvite = findViewById(R.id.connect_invite)
         walkieBestQuality = findViewById(R.id.walkie_best_quality)
         walkieGps = findViewById(R.id.walkie_gps)
+        walkieScrn = findViewById(R.id.walkie_scrn)
         walkieMic = findViewById(R.id.walkie_mic)
         walkieMicStage = findViewById(R.id.walkie_mic_stage)
         walkieMicMode = findViewById(R.id.walkie_mic_mode)
@@ -466,13 +462,14 @@ class MainActivity : AppCompatActivity() {
         permissionGate = findViewById(R.id.permission_gate)
         permissionGateList = findViewById(R.id.permission_gate_list)
         permissionGateBtn = findViewById(R.id.permission_gate_btn)
-        walkieVideo.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        // SOFTWARE layer avoids ImageView hardware-composite flicker on Pixel and some Samsungs
+        walkieVideo.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
 
         permissionGateBtn.setOnClickListener { requestAllRequiredPermissions() }
 
         walkieMap.settings.javaScriptEnabled = true
         walkieMap.settings.domStorageEnabled = true
-        walkieMap.setBackgroundColor(0xFF0B141A.toInt())
+        walkieMap.setBackgroundColor(0xFF0F0A1A.toInt())
         walkieMap.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 mapReady = true
@@ -528,6 +525,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // SCRN = view **contact’s** screen (not our own). Peer gets MediaProjection consent.
+        walkieScrn.isChecked = walkieService?.isRequestingScreen() == true
+        walkieScrn.setOnCheckedChangeListener { _, checked ->
+            if (checked) {
+                if (selectedPeer == null && peers.isEmpty()) {
+                    walkieScrn.isChecked = false
+                    Toast.makeText(this, R.string.walkie_scrn_need_contact, Toast.LENGTH_LONG).show()
+                    return@setOnCheckedChangeListener
+                }
+                walkieService?.startScreenRemote()
+                Toast.makeText(this, R.string.walkie_scrn_requesting, Toast.LENGTH_SHORT).show()
+            } else {
+                walkieService?.stopScreenRemote()
+            }
+        }
+
         // Stage flip: while SEE → flip *peer* camera; idle/HOLD → flip own camera
         walkieFlipCamera.setOnClickListener {
             if (isSeeing) {
@@ -551,17 +564,6 @@ class MainActivity : AppCompatActivity() {
             updateFlipCameraLabel()
         }
         updateFlipCameraLabel()
-
-        connectInvite.setOnClickListener {
-            val code = peerInviteEdit.text?.toString().orEmpty()
-            val ok = walkieService?.connectViaInvite(code) == true
-            Toast.makeText(
-                this,
-                if (ok) R.string.walkie_connect_ok else R.string.walkie_connect_bad,
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-        updateInternetPairUi(null)
 
         walkieReplay.setOnClickListener {
             if (isReplaying) walkieService?.stopReplay()
@@ -871,7 +873,8 @@ class MainActivity : AppCompatActivity() {
                 true
             }
             R.id.action_lan_update -> {
-                LanApkUpdater(this).checkAndInstallFromLan()
+                // LAN + Firebase peers + optional public apkUrl (works without Wi‑Fi if reachable)
+                LanApkUpdater(this).checkAndInstall(preferLanScan = true)
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -907,7 +910,6 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         ensureWalkieRunning()
-        updateInternetPairUi(walkieService?.getMyInviteCode() ?: walkieService?.internetInviteCode)
         if (!BarkyPrefs.isWifiOnly(this)) {
             walkieService?.applyNetworkMode()
         }
@@ -923,17 +925,8 @@ class MainActivity : AppCompatActivity() {
             if (::permissionGate.isInitialized) permissionGate.visibility = View.GONE
             if (!showMap) walkieService?.startLocalPreview()
         }
-    }
-
-    private fun updateInternetPairUi(inviteCode: String?) {
-        if (!::internetPairCard.isInitialized) return
-        val wifiOnly = BarkyPrefs.isWifiOnly(this)
-        internetPairCard.visibility = if (wifiOnly) View.GONE else View.VISIBLE
-        if (wifiOnly) return
-        myInviteCode.text = if (inviteCode.isNullOrBlank()) {
-            getString(R.string.walkie_my_code_waiting)
-        } else {
-            getString(R.string.walkie_my_code, inviteCode)
+        if (::walkieScrn.isInitialized) {
+            walkieScrn.isChecked = walkieService?.isRequestingScreen() == true
         }
     }
 
@@ -1048,6 +1041,27 @@ class MainActivity : AppCompatActivity() {
         walkieFlipCamera.contentDescription = getString(
             if (front) R.string.walkie_camera_front else R.string.walkie_camera_back
         )
+    }
+
+    /** Swap remote frame without recycling the bitmap ImageView still displays (Pixel flash). */
+    private var lastRemoteBitmap: Bitmap? = null
+    private fun setRemoteVideoBitmap(bitmap: Bitmap) {
+        if (!::walkieVideo.isInitialized) {
+            if (!bitmap.isRecycled) bitmap.recycle()
+            return
+        }
+        val prev = lastRemoteBitmap
+        walkieVideo.setImageBitmap(bitmap)
+        lastRemoteBitmap = bitmap
+        // Recycle previous only after ImageView has taken the new one
+        if (prev != null && prev !== bitmap && !prev.isRecycled) {
+            walkieVideo.post {
+                try {
+                    if (lastRemoteBitmap !== prev && !prev.isRecycled) prev.recycle()
+                } catch (_: Throwable) {
+                }
+            }
+        }
     }
 
     private fun showLocalCameraSurface(local: Boolean) {
@@ -1386,13 +1400,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun autoSelectPeer() {
+        // Prefer engine selection (Contacts adopt) — match by host only so Firebase
+        // vs HELLO port differences do not drop the chosen phone (S20/S918 swap bug).
+        val engineSel = walkieService?.currentSelectedPeer()
+        if (engineSel != null) {
+            selectedPeer = peers.find { it.host == engineSel.host }
+                ?: engineSel
+            // Keep engine selection; do not overwrite with peers.first()
+            return
+        }
         if (peers.isEmpty()) {
             selectedPeer = null
             walkieService?.selectPeer(null)
             return
         }
         val keep = selectedPeer?.let { cur ->
-            peers.find { it.host == cur.host && it.port == cur.port }
+            peers.find { it.host == cur.host }
         }
         selectedPeer = keep ?: peers.first()
         walkieService?.selectPeer(selectedPeer)

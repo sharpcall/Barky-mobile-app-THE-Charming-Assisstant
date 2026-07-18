@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/barky_background"
+    android:background="@drawable/bg_violet_pulse_window"
     android:fitsSystemWindows="true"
     android:orientation="vertical">
 
@@ -11,11 +11,12 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="@color/barky_primary"
-        android:elevation="4dp"
+        android:background="@android:color/transparent"
+        android:elevation="0dp"
         app:navigationIcon="?attr/homeAsUpIndicator"
+        app:navigationIconTint="@color/barky_on_surface"
         app:title="@string/settings"
-        app:titleTextColor="@color/barky_on_primary" />
+        app:titleTextColor="@color/barky_on_surface" />
 
     <ScrollView
         android:layout_width="match_parent"
@@ -43,7 +44,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="20dp"
                 app:cardBackgroundColor="@color/barky_surface"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="22dp"
                 app:cardElevation="2dp"
                 app:strokeColor="@color/barky_card_stroke"
                 app:strokeWidth="1dp">
@@ -101,7 +102,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="20dp"
                 app:cardBackgroundColor="@color/barky_surface"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="22dp"
                 app:cardElevation="2dp"
                 app:strokeColor="@color/barky_card_stroke"
                 app:strokeWidth="1dp">
@@ -162,7 +163,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="20dp"
                 app:cardBackgroundColor="@color/barky_surface"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="22dp"
                 app:cardElevation="2dp"
                 app:strokeColor="@color/barky_card_stroke"
                 app:strokeWidth="1dp">
@@ -203,8 +204,9 @@
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginBottom="20dp"
                 app:cardBackgroundColor="@color/barky_surface"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="22dp"
                 app:cardElevation="2dp"
                 app:strokeColor="@color/barky_card_stroke"
                 app:strokeWidth="1dp">
@@ -252,6 +254,166 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/settings_save_delay" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="@string/settings_superadmin_title"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="20dp"
+                app:cardBackgroundColor="@color/barky_surface"
+                app:cardCornerRadius="22dp"
+                app:cardElevation="2dp"
+                app:strokeColor="@color/barky_card_stroke"
+                app:strokeWidth="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:text="@string/settings_superadmin_help"
+                        android:textColor="@color/barky_on_surface_muted"
+                        android:textSize="13sp" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/superadmin_password_layout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="10dp"
+                        android:hint="@string/settings_superadmin_password_hint"
+                        app:boxBackgroundMode="outline"
+                        app:boxCornerRadiusBottomEnd="12dp"
+                        app:boxCornerRadiusBottomStart="12dp"
+                        app:boxCornerRadiusTopEnd="12dp"
+                        app:boxCornerRadiusTopStart="12dp"
+                        app:boxStrokeColor="@color/barky_primary"
+                        app:endIconMode="password_toggle"
+                        app:hintTextColor="@color/barky_hint">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/superadmin_password"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textPassword"
+                            android:maxLines="1"
+                            android:textColor="@color/barky_on_surface" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/superadmin_unlock"
+                        style="@style/Widget.Barky.Button"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:text="@string/settings_superadmin_unlock" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/superadmin_lock"
+                        style="@style/Widget.Barky.Button.Secondary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:text="@string/settings_superadmin_lock"
+                        android:visibility="gone" />
+
+                    <LinearLayout
+                        android:id="@+id/superadmin_panel"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/superadmin_status"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginBottom="8dp"
+                            android:text="@string/settings_superadmin_active"
+                            android:textColor="@color/barky_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <com.google.android.material.checkbox.MaterialCheckBox
+                            android:id="@+id/superadmin_screen_capture"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/settings_screen_capture"
+                            android:textColor="@color/barky_on_surface"
+                            android:textSize="15sp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:layout_marginBottom="10dp"
+                            android:text="@string/settings_screen_capture_help"
+                            android:textColor="@color/barky_on_surface_muted"
+                            android:textSize="13sp" />
+
+                        <com.google.android.material.checkbox.MaterialCheckBox
+                            android:id="@+id/serve_apk_updates"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/settings_serve_apk"
+                            android:textColor="@color/barky_on_surface"
+                            android:textSize="15sp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/settings_serve_apk_help"
+                            android:textColor="@color/barky_on_surface_muted"
+                            android:textSize="13sp" />
+
+                        <com.google.android.material.checkbox.MaterialCheckBox
+                            android:id="@+id/auto_screen_share"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:text="@string/settings_auto_screen_share"
+                            android:textColor="@color/barky_on_surface"
+                            android:textSize="15sp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/settings_auto_screen_share_help"
+                            android:textColor="@color/barky_on_surface_muted"
+                            android:textSize="13sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/prepare_screen_share"
+                            style="@style/Widget.Barky.Button.Secondary"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:text="@string/settings_prepare_screen_share" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/check_update_internet"
+                            style="@style/Widget.Barky.Button.Secondary"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:text="@string/settings_check_update" />
+                    </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>

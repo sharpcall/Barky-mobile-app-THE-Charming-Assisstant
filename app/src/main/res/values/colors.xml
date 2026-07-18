@@ -1,29 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- WhatsApp-inspired dark chat palette -->
-    <color name="barky_primary">#075E54</color>
-    <color name="barky_primary_dark">#064C44</color>
-    <color name="barky_primary_light">#128C7E</color>
-    <color name="barky_secondary">#25D366</color>
-    <color name="barky_accent">#34B7F1</color>
+    <!-- Violet Pulse — deep violet void, magenta/purple accents, cyan spark -->
+    <color name="barky_primary">#7C3AED</color>
+    <color name="barky_primary_dark">#2E1065</color>
+    <color name="barky_primary_light">#A855F7</color>
+    <color name="barky_secondary">#EC4899</color>
+    <color name="barky_accent">#67E8F9</color>
 
-    <color name="barky_background">#0B141A</color>
-    <color name="barky_surface">#1F2C34</color>
-    <color name="barky_surface_elevated">#2A3942</color>
-    <color name="barky_card_stroke">#2A3942</color>
+    <color name="barky_background">#0F0A1A</color>
+    <color name="barky_surface">#1A1030</color>
+    <color name="barky_surface_elevated">#2E1065</color>
+    <color name="barky_card_stroke">#4C1D95</color>
+    <color name="barky_glass">#33FFFFFF</color>
+    <color name="barky_glass_strong">#28F0ABFC</color>
 
     <color name="barky_on_primary">#FFFFFF</color>
-    <color name="barky_on_surface">#E9EDEF</color>
-    <color name="barky_on_surface_muted">#8696A0</color>
-    <color name="barky_hint">#667781</color>
+    <color name="barky_on_surface">#F5F3FF</color>
+    <color name="barky_on_surface_muted">#C4B5FD</color>
+    <color name="barky_hint">#A78BFA</color>
 
-    <color name="walkie_ptt">#25D366</color>
-    <color name="walkie_ptt_active">#F15C6D</color>
-    <color name="walkie_headset">#128C7E</color>
-    <color name="walkie_wakeup">#53BDEB</color>
-    <color name="walkie_rx">#53BDEB</color>
-    <color name="walkie_listen_active">#F15C6D</color>
-    <color name="walkie_see_active">#F15C6D</color>
+    <color name="walkie_ptt">#C026D3</color>
+    <color name="walkie_ptt_end">#2563EB</color>
+    <color name="walkie_ptt_active">#F472B6</color>
+    <color name="walkie_headset">#A855F7</color>
+    <color name="walkie_wakeup">#DB2777</color>
+    <color name="walkie_rx">#67E8F9</color>
+    <color name="walkie_listen_active">#F472B6</color>
+    <color name="walkie_see_active">#22D3EE</color>
 
-    <color name="ic_launcher_background">#075E54</color>
+    <color name="barky_stage_scrim">#1E1035</color>
+    <color name="barky_footer_scrim">#E60F0A1A</color>
+    <color name="barky_perm_gate">#F20F0A1A</color>
+
+    <color name="ic_launcher_background">#2E1065</color>
 </resources>

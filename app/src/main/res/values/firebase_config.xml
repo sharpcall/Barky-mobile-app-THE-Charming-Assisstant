@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      Paste values from Firebase Console / google-services.json:
-      project_info.project_id  -> firebase_project_id
-      client[].api_key[].current_key -> firebase_api_key
-      Leave YOUR_* placeholders to keep Firebase registration disabled (app still builds).
+      Project id, Firestore database id, and Android API key.
+      App uses Firestore REST phone book only (no media).
+      Service-account private keys stay in secrets/ on the PC; never in the APK.
       See docs/FIREBASE_SETUP.md
     -->
-    <string name="firebase_project_id" translatable="false">YOUR_FIREBASE_PROJECT_ID</string>
-    <string name="firebase_api_key" translatable="false">YOUR_ANDROID_API_KEY_FROM_FIREBASE_CONSOLE</string>
+    <string name="firebase_project_id" translatable="false">barky-mobile-app---assisstan</string>
+    <!-- Named DB from Console (not the reserved name default) -->
+    <string name="firebase_database_id" translatable="false">barkydefault</string>
+    <string name="firebase_api_key" translatable="false">AIzaSyAIiOipucaH02JyB7d4XWjkaQEw8yILjMU</string>
 </resources>
