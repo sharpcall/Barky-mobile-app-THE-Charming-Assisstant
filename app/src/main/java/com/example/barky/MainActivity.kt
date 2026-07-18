@@ -866,6 +866,10 @@ class MainActivity : AppCompatActivity() {
                 openSettings()
                 true
             }
+            R.id.action_contacts -> {
+                startActivity(Intent(this, ContactsActivity::class.java))
+                true
+            }
             R.id.action_lan_update -> {
                 LanApkUpdater(this).checkAndInstallFromLan()
                 true

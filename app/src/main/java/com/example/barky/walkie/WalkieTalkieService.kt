@@ -109,6 +109,14 @@ class WalkieTalkieService : Service() {
     }
 
     fun selectPeer(peer: WalkiePeer?) = engine?.selectPeer(peer)
+    fun adoptDirectoryPeer(
+        displayName: String,
+        host: String,
+        udpPort: Int,
+        videoPort: Int
+    ): Boolean = engine?.adoptDirectoryPeer(displayName, host, udpPort, videoPort) == true
+    fun localUdpPort(): Int = engine?.localUdpPort() ?: 0
+    fun localVideoTcpPort(): Int = engine?.localVideoTcpPort() ?: 0
     fun startTalking(playbackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER) =
         engine?.startTalking(playbackMode)
     fun stopTalking() = engine?.stopTalking()

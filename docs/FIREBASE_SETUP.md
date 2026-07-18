@@ -84,7 +84,35 @@ If JSON is **missing**, the app still builds; Firebase registration is a **no-op
 
 ## Verify
 
-1. Install app with `google-services.json` present.  
-2. Settings → enable **Internet pairing** (Wi‑Fi only OFF) if you want remote path.  
-3. Logcat: `FirebasePeerDirectory` / `DeviceIdentity` should show `registered deviceId=…`.  
-4. In Firebase Console → Firestore → `devices` → your document updates.
+1. Install app with config filled in `firebase_config.xml`.  
+2. Settings → enable **Register this phone on Firebase**.  
+3. Logcat: `FirebasePeerDirectory` should show `registered deviceId=…`.  
+4. In Firebase Console → Firestore → `devices` → your document updates.  
+5. Main screen menu → **Contacts** lists LAN peers + Firebase phones (3+ phones OK).
+
+## Automated setup (you run locally — do not paste tokens into chat)
+
+```powershell
+# After: npm i -g firebase-tools   OR   install gcloud
+$env:FIREBASE_PROJECT = "your-project-id"
+# Optional CI token from: firebase login:ci
+# $env:FIREBASE_TOKEN = "...."
+cd barky
+.\scripts\setup-firebase.ps1
+# or
+.\scripts\setup-firebase.ps1 -UseGcloud
+```
+
+Creating the **first** Firestore database often still needs a one-time Console click (region + mode).  
+After that, the app’s first heartbeat **creates documents** under `devices` automatically.
+
+## Firebase vs STUN (important)
+
+| Role | Who |
+|------|-----|
+| Learn “what is my public IP:port?” | **STUN** (already in Barky) |
+| Store & share “my IP:port + friend’s IP:port” | **Firebase Firestore** |
+| Carry audio/video packets | **Phones peer-to-peer** (not Firebase) |
+
+So Firebase is a **phone book that always has the latest IPs**, not a STUN server.  
+Phones still STUN → write results to Firebase → friends read Firebase → call those addresses (LAN preferred when private IPs match).

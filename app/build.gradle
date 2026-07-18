@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 54
-        versionName "5.14-firebase-prep"
+        versionCode 55
+        versionName "5.15-contacts"
     }
 
     compileOptions {

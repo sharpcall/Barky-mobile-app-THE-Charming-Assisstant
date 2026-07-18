@@ -28,6 +28,25 @@
     <string name="settings_firebase_on">Firebase registry ON (heartbeat every ~45s)</string>
     <string name="settings_firebase_off">Firebase registry OFF</string>
     <string name="settings_firebase_not_configured">Firebase not configured yet (YOUR_* placeholders in firebase_config.xml)</string>
+    <string name="contacts_title">Contacts</string>
+    <string name="contacts_loading">Loading Barky phones…</string>
+    <string name="contacts_refresh">Refresh</string>
+    <string name="contacts_action_listen">Listen</string>
+    <string name="contacts_action_see">See</string>
+    <string name="contacts_action_call">Select</string>
+    <string name="contacts_service_wait">Walkie service starting…</string>
+    <string name="contacts_select_fail">Could not select contact</string>
+    <string name="contacts_started_listen">LISTEN → %1$s</string>
+    <string name="contacts_started_see">SEE → %1$s</string>
+    <string name="contacts_selected_call">Selected %1$s — hold mic on main screen to talk</string>
+    <string name="contacts_firebase_off">Firebase not configured — only LAN peers shown. See docs/FIREBASE_SETUP.md</string>
+    <string name="contacts_registry_disabled">Firebase registry OFF in Settings — only LAN peers shown</string>
+    <string name="contacts_row_lan">LAN %1$s · UDP %2$d · video %3$d</string>
+    <string name="contacts_row_remote">%1$s %2$s · UDP %3$d · %4$s · %5$s</string>
+    <string name="contacts_online">online</string>
+    <string name="contacts_stale">last seen %1$d min ago</string>
+    <string name="contacts_also_registered">in Firebase</string>
+    <string name="contacts_status_fmt">%1$d contact(s) · my LAN %2$s · public %3$s</string>
 
     <string name="walkie_internet_title">Internet pair (no central Barky server)</string>
     <string name="walkie_my_code_waiting">Your pair code: discovering…</string>

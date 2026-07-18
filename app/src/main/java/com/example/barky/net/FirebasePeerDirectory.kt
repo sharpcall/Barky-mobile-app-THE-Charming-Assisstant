@@ -100,6 +100,65 @@ object FirebasePeerDirectory {
         }
     }
 
+    /** List registered Barky phones (for Contacts page). Excludes self when [selfDeviceId] set. */
+    fun listAllAsync(context: Context, selfDeviceId: String?, cb: (List<PeerEndpoint>) -> Unit) {
+        if (!isConfigured(context)) {
+            cb(emptyList())
+            return
+        }
+        io.execute {
+            try {
+                val all = listAll(context)
+                val filtered = if (selfDeviceId.isNullOrBlank()) all
+                else all.filter { it.deviceId != selfDeviceId }
+                // Fresh first
+                cb(filtered.sortedByDescending { it.updatedAtMs })
+            } catch (t: Throwable) {
+                Log.w(TAG, "listAll", t)
+                cb(emptyList())
+            }
+        }
+    }
+
+    private fun listAll(context: Context): List<PeerEndpoint> {
+        val cfg = config(context) ?: return emptyList()
+        // Page through collection (pageSize max 300 on REST)
+        val out = ArrayList<PeerEndpoint>()
+        var pageToken: String? = null
+        do {
+            val base =
+                "https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/" +
+                    "$COLLECTION?pageSize=100&key=${cfg.apiKey}"
+            val url = if (pageToken.isNullOrBlank()) base
+            else base + "&pageToken=" + java.net.URLEncoder.encode(pageToken, "UTF-8")
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 15_000
+                readTimeout = 15_000
+            }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.use { BufferedReader(InputStreamReader(it)).readText() }
+                .orEmpty()
+            conn.disconnect()
+            if (code !in 200..299) {
+                Log.w(TAG, "listAll HTTP $code $text")
+                break
+            }
+            val root = JSONObject(text)
+            val docs = root.optJSONArray("documents")
+            if (docs != null) {
+                for (i in 0 until docs.length()) {
+                    val doc = docs.optJSONObject(i) ?: continue
+                    parseDocument(doc)?.let { out.add(it) }
+                }
+            }
+            pageToken = root.optString("nextPageToken").takeIf { it.isNotBlank() }
+        } while (!pageToken.isNullOrBlank())
+        Log.i(TAG, "listAll count=${out.size}")
+        return out
+    }
+
     private fun config(context: Context): Config? {
         return try {
             val res = context.resources

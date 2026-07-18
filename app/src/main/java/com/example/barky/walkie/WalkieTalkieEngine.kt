@@ -227,6 +227,40 @@ class WalkieTalkieEngine(
     fun localUdpPort(): Int = localPort
     fun localVideoTcpPort(): Int = localVideoPort
 
+    /**
+     * Adopt a Firebase/LAN directory entry as the active peer (for Contacts).
+     * Prefers LAN host when both private; else public STUN mapping.
+     */
+    fun adoptDirectoryPeer(
+        displayName: String,
+        host: String,
+        udpPort: Int,
+        videoPort: Int
+    ): Boolean {
+        if (host.isBlank() || udpPort <= 0) {
+            postError("Invalid contact address")
+            return false
+        }
+        val peer = WalkiePeer(
+            serviceName = "Barky-$displayName",
+            host = host,
+            port = udpPort,
+            videoPort = if (videoPort > 0) videoPort else udpPort
+        )
+        peers[key(peer)] = peer
+        selectedPeerKey = key(peer)
+        postPeers()
+        thread(name = "walkie-adopt-hello", isDaemon = true) {
+            try {
+                sendHelloTo(peer)
+            } catch (_: Throwable) {
+            }
+        }
+        postStatus("Selected $displayName @ $host:$udpPort")
+        Log.i(TAG, "adoptDirectoryPeer $displayName → $host udp=$udpPort video=$videoPort")
+        return true
+    }
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
         thread(name = "walkie-start", isDaemon = true) {
