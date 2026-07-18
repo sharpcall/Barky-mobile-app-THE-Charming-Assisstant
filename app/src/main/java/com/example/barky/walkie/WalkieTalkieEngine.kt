@@ -3295,23 +3295,38 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), true) }
         // Release idle preview so Camera1 is free (critical for dual SEE — one camera only)
         stopLocalPreviewInternal()
+        // Ensure FGS still claims camera while we stream from background (YouTube / home)
+        try {
+            listener.onStatus("Sharing camera (SEE)…")
+        } catch (_: Throwable) {
+        }
         // Video only — mic is owned by LISTEN serve (if any)
         monitorVideoThread = thread(name = "walkie-serve-see-video", isDaemon = true) {
             var frames = 0
             try {
                 val tcpOk = openVideoOut(peer)
-                Log.i(TAG, "SEE serve video start → ${peer.host}:${peer.port} tcp=$tcpOk vport=${peer.videoPort}")
+                // IMPORTANT: never attach Camera1 to the Activity TextureView for SEE serve.
+                // When Barky is backgrounded (YouTube, etc.) the TextureView surface is destroyed
+                // and kills the stream. Use a dedicated dummy SurfaceTexture (works under camera FGS).
+                Log.i(
+                    TAG,
+                    "SEE serve video start → ${peer.host}:${peer.port} tcp=$tcpOk " +
+                        "vport=${peer.videoPort} bgSafeSurface=true uiTex=${uiPreviewTexture != null}"
+                )
                 val cam = CameraFrameSource(
                     context = appContext,
                     compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
                     config = CaptureConfig.Live,
                     preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
-                    externalSurfaceTexture = { uiPreviewTexture },
+                    externalSurfaceTexture = { null },
                     onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
                     onPreviewReady = { w, h, orient, front ->
                         mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
                     },
-                    onError = { msg -> videoDebug("SEE cam: $msg") }
+                    onError = { msg ->
+                        videoDebug("SEE cam: $msg")
+                        Log.w(TAG, "SEE cam error: $msg")
+                    }
                 ) { jpeg ->
                     if (!servingSee.get()) return@CameraFrameSource
                     val viaTcp = sendVideoFrameTcp(jpeg)

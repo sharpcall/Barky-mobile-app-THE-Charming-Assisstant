@@ -228,6 +228,14 @@ class WalkieTalkieService : Service() {
             }
 
             override fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {
+                // Keep camera FGS type active while we serve SEE from background
+                if (serving) {
+                    try {
+                        startAsForeground("Sharing camera (SEE)…")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "reassert FGS for SEE serve", t)
+                    }
+                }
                 uiListeners.forEach { it.onSeeStateChanged(seeing, serving) }
             }
 

@@ -934,7 +934,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
-        walkieService?.stopLocalPreview()
+        // Drop UI surface so background SEE/HOLD never holds a destroyed TextureView
+        // (that killed one-way camera when YouTube/home took focus).
+        walkieService?.setUiPreviewTexture(null)
+        // Keep local idle preview off in background, but do NOT stop SEE serve —
+        // WalkieTalkieService (camera FGS) owns that stream.
+        if (!isServingSee) {
+            walkieService?.stopLocalPreview()
+        }
         if (walkieBound) {
             walkieService?.removeListener(walkieUiListener)
             try {

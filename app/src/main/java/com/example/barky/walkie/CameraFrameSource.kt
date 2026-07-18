@@ -209,14 +209,9 @@ class CameraFrameSource(
             90
         }
 
-        val external = externalSurfaceTexture()
-        val st = if (external != null) {
-            ownsSurfaceTexture = false
-            // TextureView drives updateTexImage; do not attach a second listener that races UI
-            external
-        } else {
+        fun makeDummy(): SurfaceTexture {
             ownsSurfaceTexture = true
-            SurfaceTexture(10).also { dummy ->
+            return SurfaceTexture(10).also { dummy ->
                 dummy.setOnFrameAvailableListener({
                     try {
                         dummy.updateTexImage()
@@ -225,20 +220,35 @@ class CameraFrameSource(
                 }, worker)
             }
         }
-        surfaceTexture = st
-        try {
-            // Buffer matches sensor preview; TextureView matrix handles letter/center crop
-            if (!ownsSurfaceTexture) {
-                try {
-                    st.setDefaultBufferSize(size.width, size.height)
-                } catch (_: Exception) {
-                }
-            }
-            cam.setPreviewTexture(st)
-        } catch (t: Throwable) {
-            onError("setPreviewTexture failed: ${t.message}")
-            throw t
+        // Prefer UI TextureView only when still valid; otherwise dummy (background SEE / destroyed UI)
+        val external = try {
+            externalSurfaceTexture()
+        } catch (_: Throwable) {
+            null
         }
+        var st: SurfaceTexture
+        if (external != null) {
+            ownsSurfaceTexture = false
+            st = external
+            try {
+                st.setDefaultBufferSize(size.width, size.height)
+                cam.setPreviewTexture(st)
+            } catch (t: Throwable) {
+                // Released TextureView after backgrounding — fall back to dummy for FGS stream
+                Log.w(TAG, "UI SurfaceTexture unusable, dummy surface for encode", t)
+                st = makeDummy()
+                cam.setPreviewTexture(st)
+            }
+        } else {
+            st = makeDummy()
+            try {
+                cam.setPreviewTexture(st)
+            } catch (t: Throwable) {
+                onError("setPreviewTexture failed: ${t.message}")
+                throw t
+            }
+        }
+        surfaceTexture = st
         try {
             onPreviewReady(size.width, size.height, displayOrientation, facingFront)
         } catch (_: Exception) {
