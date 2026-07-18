@@ -3340,8 +3340,17 @@ class WalkieTalkieEngine(
                 }
                 cameraSource = cam
                 if (servingSee.get()) cam.start() else cam.stop()
+                // If camera is busy (other app holds it), open fails with 0 frames —
+                // do not spin forever as "already active" (blocks retry when camera free).
+                var waited = 0
                 while (servingSee.get() && running.get()) {
+                    if (frames == 0 && waited >= 2500) {
+                        Log.w(TAG, "SEE serve abort: no frames (camera busy or open failed)")
+                        postError("Camera busy — close Camera/YouTube video and try SEE again")
+                        break
+                    }
                     Thread.sleep(200)
+                    waited += 200
                 }
                 cam.stop()
                 if (cameraSource === cam) cameraSource = null
