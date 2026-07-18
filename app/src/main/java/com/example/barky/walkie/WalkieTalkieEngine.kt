@@ -434,7 +434,11 @@ class WalkieTalkieEngine(
                 },
                 onError = { msg -> videoDebug("Preview camera: $msg") }
             ) { jpeg ->
-                if (talking.get() || replaying.get() || receiving.get()) return@CameraFrameSource
+                // Never paint local JPEGs into the remote video surface during SEE
+                // (Pixel often has uiPreviewTexture null briefly → local frames filled walkie_video).
+                if (talking.get() || replaying.get() || receiving.get() || requestingSee.get()) {
+                    return@CameraFrameSource
+                }
                 // Hardware TextureView already shows camera — skip JPEG UI (kills flicker)
                 if (uiPreviewTexture != null) return@CameraFrameSource
                 decodeAndEmit(jpeg, live = true, localPreview = true)
@@ -2580,6 +2584,8 @@ class WalkieTalkieEngine(
 
     private fun decodeAndEmit(jpeg: ByteArray, live: Boolean, localPreview: Boolean = false) {
         try {
+            // Local idle preview must never feed the full-screen remote ImageView while SEE is on
+            if (localPreview && requestingSee.get()) return
             // Never interrupt Replay UI with live/remote frames (crash + flicker source)
             if (live && replaying.get()) return
             if (live) {

@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 52
-        versionName "5.12-camera-busy"
+        versionCode 53
+        versionName "5.13-see-not-self"
     }
 
     compileOptions {
