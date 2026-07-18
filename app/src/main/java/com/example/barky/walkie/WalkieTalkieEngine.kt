@@ -17,6 +17,11 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.example.barky.BarkyPrefs
+import com.example.barky.net.DeviceIdentity
+import com.example.barky.net.NetworkEndpoints
+import com.example.barky.walkie.codec.AvcVideoDecoder
+import com.example.barky.walkie.codec.AvcVideoEncoder
+import com.example.barky.walkie.codec.OpusAudioCodec
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -74,6 +79,13 @@ class WalkieTalkieEngine(
         ) {}
         fun onListenStateChanged(listening: Boolean, serving: Boolean) {}
         fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {}
+        /** SCRN: viewing contact screen / serving our screen. */
+        fun onScreenStateChanged(requesting: Boolean, serving: Boolean) {}
+        /**
+         * Contact asked us to share **our** screen. UI must run MediaProjection consent
+         * then call [startServingScreen].
+         */
+        fun onScreenShareRequest(peerHost: String, peerUdp: Int, peerVideo: Int) {}
         /** Camera preview buffer size for natural TextureView center-crop. */
         fun onLocalPreviewGeometry(
             previewW: Int,
@@ -205,6 +217,25 @@ class WalkieTalkieEngine(
     /** host -> learned video TCP port from UDP HELLO (most reliable) */
     private val learnedVideoPorts = ConcurrentHashMap<String, Int>()
     private var helloThread: Thread? = null
+    /** deviceId → current preferred host (for Firebase path refresh / PATH_UPDATE). */
+    private val peerHostByDeviceId = ConcurrentHashMap<String, String>()
+    /** host → deviceId when known. */
+    private val hostToDeviceId = ConcurrentHashMap<String, String>()
+    /** host → HELLO capability flags (CAP_OPUS | CAP_AVC). */
+    private val peerCaps = ConcurrentHashMap<String, Int>()
+    private val localCaps: Int by lazy {
+        var c = 0
+        if (OpusAudioCodec.isAvailable()) c = c or WalkieProtocol.CAP_OPUS
+        if (AvcVideoEncoder.isAvailable() && AvcVideoDecoder.isAvailable()) {
+            c = c or WalkieProtocol.CAP_AVC
+        }
+        Log.i(TAG, "local codec caps=0x${c.toString(16)} opus=${c and WalkieProtocol.CAP_OPUS != 0} avc=${c and WalkieProtocol.CAP_AVC != 0}")
+        c
+    }
+    private val opusTx = OpusAudioCodec()
+    private val opusRx = OpusAudioCodec()
+    private var avcEncoder: AvcVideoEncoder? = null
+    private val avcDecoder = AvcVideoDecoder()
 
     @Volatile private var videoTxOk = 0
     @Volatile private var videoTxFail = 0
@@ -230,35 +261,176 @@ class WalkieTalkieEngine(
     /**
      * Adopt a Firebase/LAN directory entry as the active peer (for Contacts).
      * Prefers LAN host when both private; else public STUN mapping.
+     * [deviceId] (optional) enables mid-call Firebase path refresh for that contact.
      */
     fun adoptDirectoryPeer(
         displayName: String,
         host: String,
         udpPort: Int,
-        videoPort: Int
+        videoPort: Int,
+        deviceId: String? = null
     ): Boolean {
         if (host.isBlank() || udpPort <= 0) {
             postError("Invalid contact address")
             return false
         }
+        val cleanName = friendlyDisplayName(displayName, host)
         val peer = WalkiePeer(
-            serviceName = "Barky-$displayName",
+            serviceName = "Barky-$cleanName",
             host = host,
             port = udpPort,
             videoPort = if (videoPort > 0) videoPort else udpPort
         )
-        peers[key(peer)] = peer
-        selectedPeerKey = key(peer)
-        postPeers()
-        thread(name = "walkie-adopt-hello", isDaemon = true) {
-            try {
-                sendHelloTo(peer)
-            } catch (_: Throwable) {
+        val vport = if (videoPort > 0) videoPort else udpPort
+        // If we already track this deviceId, remap when host/ports change (Firebase poll / Contacts).
+        val existingHost = deviceId?.takeIf { it.isNotBlank() }?.let { peerHostByDeviceId[it] }
+        val existing = existingHost?.let { h -> peers.values.find { it.host == h } }
+            ?: peers.values.find { it.host == host }
+        if (existing != null &&
+            existing.host == host &&
+            existing.port == udpPort &&
+            existing.videoPort == vport
+        ) {
+            // Unchanged path — still select + upgrade ugly NSD names to Contacts title
+            peerLastHelloMs[host] = System.currentTimeMillis()
+            val renamed = existing.copy(serviceName = "Barky-$cleanName")
+            // Drop other host:port keys so selection is unique
+            peers.entries.removeIf { it.value.host == host && it.key != key(renamed) }
+            selectedPeerKey = key(renamed)
+            peers[key(renamed)] = renamed
+            if (!deviceId.isNullOrBlank()) {
+                peerHostByDeviceId[deviceId] = host
+                hostToDeviceId[host] = deviceId
+            }
+            postPeers()
+            postStatus("Selected $cleanName @ $host:$udpPort")
+            Log.i(TAG, "adoptDirectoryPeer re-select $cleanName → $host (unchanged path, name fixed)")
+            return true
+        }
+        if (existingHost != null && existingHost != host) {
+            remapPeerHost(
+                oldHost = existingHost,
+                newHost = host,
+                udpPort = udpPort,
+                videoPort = vport,
+                deviceId = deviceId,
+                displayName = cleanName
+            )
+        } else {
+            peers[key(peer)] = peer
+            selectedPeerKey = key(peer)
+            if (!deviceId.isNullOrBlank()) {
+                peerHostByDeviceId[deviceId] = host
+                hostToDeviceId[host] = deviceId
+            }
+            postPeers()
+            thread(name = "walkie-adopt-hello", isDaemon = true) {
+                try {
+                    sendHelloTo(peer)
+                    sendPathUpdateTo(peer)
+                } catch (_: Throwable) {
+                }
             }
         }
-        postStatus("Selected $displayName @ $host:$udpPort")
-        Log.i(TAG, "adoptDirectoryPeer $displayName → $host udp=$udpPort video=$videoPort")
+        postStatus("Selected $cleanName @ $host:$udpPort")
+        Log.i(
+            TAG,
+            "adoptDirectoryPeer $cleanName → $host udp=$udpPort video=$videoPort deviceId=$deviceId"
+        )
         return true
+    }
+
+    /** Strip NSD junk (Barky-Pixel8-2050-v45851 → Pixel 8 style label). */
+    private fun friendlyDisplayName(raw: String, host: String): String {
+        var s = raw.trim()
+            .removePrefix(WalkieProtocol.SERVICE_NAME_PREFIX)
+            .removePrefix("Barky-")
+        s = s.replace(Regex("-v\\d{2,5}$"), "")
+        s = s.replace(Regex("-\\d{4}$"), "")
+        if (s.startsWith("udp-") || s.startsWith("path-") || s.startsWith("inet-") ||
+            s.isBlank() || s == host || s.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))
+        ) {
+            return host
+        }
+        return s
+    }
+
+    private fun isUglyPeerName(serviceName: String): Boolean {
+        val d = serviceName.removePrefix(WalkieProtocol.SERVICE_NAME_PREFIX)
+        return d.startsWith("udp-") || d.startsWith("path-") || d.startsWith("inet-") ||
+            d.contains(Regex("-v\\d{2,5}$")) || d.matches(Regex("^[A-Za-z0-9]+-\\d{4}$"))
+    }
+
+    /** Device ids of peers we care about for Firebase path poll during a live session. */
+    fun trackedPeerDeviceIds(): List<String> = peerHostByDeviceId.keys.toList()
+
+    fun hasActiveMediaSession(): Boolean =
+        talking.get() || receiving.get() || requestingListen.get() || servingListen.get() ||
+            requestingSee.get() || servingSee.get() || channelBusy.get()
+
+    /**
+     * Called when NIC / Wi‑Fi / cell / local IP changes.
+     * Refresh STUN public mapping, announce PATH_UPDATE + HELLO to peers, reconnect video TCP.
+     */
+    fun onLocalPathChanged(reason: String = "nic") {
+        if (!running.get()) return
+        thread(name = "walkie-path-change", isDaemon = true) {
+            try {
+                Log.i(TAG, "onLocalPathChanged reason=$reason")
+                // Wi‑Fi→cell: wait for default network to validate before STUN
+                try {
+                    Thread.sleep(1_200)
+                } catch (_: InterruptedException) {
+                    return@thread
+                }
+                if (!BarkyPrefs.isWifiOnly(appContext)) {
+                    try {
+                        refreshInternetInvite()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "STUN after path change", t)
+                    }
+                }
+                val known = peers.values.toList()
+                // Burst HELLO + PATH_UPDATE so the other side remaps immediately
+                repeat(8) {
+                    if (!running.get()) return@thread
+                    for (p in known) {
+                        try {
+                            sendHelloTo(p)
+                            sendPathUpdateTo(p)
+                            val poke = byteArrayOf(WalkieProtocol.TYPE_PING)
+                            sendUdp(
+                                DatagramPacket(
+                                    poke,
+                                    poke.size,
+                                    InetAddress.getByName(p.host),
+                                    p.port
+                                )
+                            )
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    try {
+                        Thread.sleep(60)
+                    } catch (_: InterruptedException) {
+                        return@thread
+                    }
+                }
+                // If we were pushing video (SEE serve / HOLD), re-open TCP to peer
+                if (servingSee.get() || talking.get()) {
+                    val dest = monitorTarget ?: bestLivePeer()
+                    if (dest != null) {
+                        closeVideoOut()
+                        openVideoOut(dest)
+                        Log.i(TAG, "video TCP reconnected after path change → ${dest.host}")
+                    }
+                }
+                postStatus("Network path updated — re-announced to peers")
+                videoDebug("Path change ($reason): re-HELLO + PATH_UPDATE to ${known.size} peers")
+            } catch (t: Throwable) {
+                Log.w(TAG, "onLocalPathChanged", t)
+            }
+        }
     }
 
     fun start() {
@@ -607,10 +779,26 @@ class WalkieTalkieEngine(
             stunExclusive = false
         }
         if (mapped == null) {
-            myInviteCode = null
-            mainHandler.post { listener.onInternetInviteChanged(null) }
-            postError("Internet mode: could not learn public address (STUN failed)")
-            Log.w(TAG, "STUN failed — internet pairing unavailable")
+            // Keep last known public mapping if any (better than blank on brief cellular blip)
+            Log.w(TAG, "STUN failed — keep last public=$publicHost:$publicUdpPort")
+            postStatus(
+                if (!publicHost.isNullOrBlank()) {
+                    "Cellular STUN busy — using last public IP $publicHost (retrying…)"
+                } else {
+                    "STUN not ready on this network yet — retrying; Wi‑Fi works best for video"
+                }
+            )
+            // Schedule one delayed retry (cellular brings up late)
+            mainHandler.postDelayed({
+                if (running.get() && !BarkyPrefs.isWifiOnly(appContext)) {
+                    thread(name = "walkie-stun-retry", isDaemon = true) {
+                        try {
+                            refreshInternetInvite()
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
+            }, 4_000L)
             return
         }
         publicHost = mapped.host
@@ -623,7 +811,7 @@ class WalkieTalkieEngine(
             "Internet invite ready public=${mapped.host}:${mapped.port} " +
                 "localUdp=$localPort localVideoTcp=$localVideoPort code=$code"
         )
-        postStatus("Internet mode ready — share your pair code")
+        postStatus("Public path ready ${mapped.host}:${mapped.port} (STUN)")
         mainHandler.post { listener.onInternetInviteChanged(code) }
     }
 
@@ -684,6 +872,9 @@ class WalkieTalkieEngine(
             else "Selected ${peer.displayName} (${peer.host})"
         )
     }
+
+    /** UI-facing selection (Contacts / SCRN / SEE). */
+    fun currentSelectedPeer(): WalkiePeer? = currentPeer()
 
     fun getPeers(): List<WalkiePeer> = peers.values.sortedBy { it.displayName }
 
@@ -1521,10 +1712,12 @@ class WalkieTalkieEngine(
         // Never on main — Pixel StrictMode throws NetworkOnMainThreadException
         thread(name = "walkie-hello", isDaemon = true) {
             try {
-                val buf = ByteArray(3)
+                // [HELLO][vport:u16][caps:u8] — older peers ignore trailing caps
+                val buf = ByteArray(4)
                 buf[0] = WalkieProtocol.TYPE_HELLO
                 buf[1] = ((localVideoPort ushr 8) and 0xFF).toByte()
                 buf[2] = (localVideoPort and 0xFF).toByte()
+                buf[3] = (localCaps and 0xFF).toByte()
                 sendUdp(
                     DatagramPacket(
                         buf,
@@ -1539,20 +1732,262 @@ class WalkieTalkieEngine(
         }
     }
 
+    private fun peerWantsOpus(host: String): Boolean {
+        val caps = peerCaps[host] ?: 0
+        return (localCaps and WalkieProtocol.CAP_OPUS) != 0 &&
+            (caps and WalkieProtocol.CAP_OPUS) != 0
+    }
+
+    private fun peerWantsAvc(host: String): Boolean {
+        val caps = peerCaps[host] ?: 0
+        return (localCaps and WalkieProtocol.CAP_AVC) != 0 &&
+            (caps and WalkieProtocol.CAP_AVC) != 0
+    }
+
+    /** Build PATH_UPDATE payload with current local/public endpoints. */
+    private fun buildPathUpdatePayload(): ByteArray {
+        val localIp = NetworkEndpoints.findLocalIpv4() ?: ""
+        val pubIp = publicHost ?: ""
+        val pubPort = publicUdpPort
+        val onWifi = NetworkEndpoints.isWifi(appContext)
+        val deviceId = try {
+            DeviceIdentity.deviceId(appContext)
+        } catch (_: Throwable) {
+            ""
+        }
+        val localBytes = localIp.toByteArray(Charsets.UTF_8)
+        val pubBytes = pubIp.toByteArray(Charsets.UTF_8)
+        val idBytes = deviceId.toByteArray(Charsets.UTF_8)
+        fun clampLen(n: Int) = min(255, max(0, n))
+        val lb = clampLen(localBytes.size)
+        val pb = clampLen(pubBytes.size)
+        val ib = clampLen(idBytes.size)
+        val out = ByteArray(1 + 2 + 2 + 2 + 1 + 1 + lb + 1 + pb + 1 + ib)
+        var i = 0
+        out[i++] = WalkieProtocol.TYPE_PATH_UPDATE
+        out[i++] = ((localPort ushr 8) and 0xFF).toByte()
+        out[i++] = (localPort and 0xFF).toByte()
+        out[i++] = ((localVideoPort ushr 8) and 0xFF).toByte()
+        out[i++] = (localVideoPort and 0xFF).toByte()
+        out[i++] = ((pubPort ushr 8) and 0xFF).toByte()
+        out[i++] = (pubPort and 0xFF).toByte()
+        out[i++] = if (onWifi) 1 else 0
+        out[i++] = lb.toByte()
+        System.arraycopy(localBytes, 0, out, i, lb)
+        i += lb
+        out[i++] = pb.toByte()
+        System.arraycopy(pubBytes, 0, out, i, pb)
+        i += pb
+        out[i++] = ib.toByte()
+        System.arraycopy(idBytes, 0, out, i, ib)
+        return out
+    }
+
+    private fun sendPathUpdateTo(peer: WalkiePeer) {
+        thread(name = "walkie-path-tx", isDaemon = true) {
+            try {
+                val buf = buildPathUpdatePayload()
+                sendUdp(
+                    DatagramPacket(
+                        buf,
+                        buf.size,
+                        InetAddress.getByName(peer.host),
+                        peer.port
+                    )
+                )
+                Log.i(TAG, "PATH_UPDATE → ${peer.host}:${peer.port} len=${buf.size}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "sendPathUpdate", t)
+            }
+        }
+    }
+
+    private fun handlePathUpdate(data: ByteArray, fromHost: String, fromUdpPort: Int) {
+        if (data.size < 9) return
+        var i = 1
+        fun u16(): Int {
+            val v = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+            i += 2
+            return v
+        }
+        fun str(): String {
+            if (i >= data.size) return ""
+            val len = data[i].toInt() and 0xFF
+            i++
+            if (len <= 0 || i + len > data.size) return ""
+            val s = String(data, i, len, Charsets.UTF_8)
+            i += len
+            return s
+        }
+        val peerLocalUdp = u16()
+        val peerVideo = u16()
+        val peerPublicUdp = u16()
+        val flags = data[i++].toInt() and 0xFF
+        val peerLocalIp = str()
+        val peerPublicIp = str()
+        val deviceId = str()
+        val onWifi = flags and 1 != 0
+        // Prefer LAN if both we and they look private on same subnet; else public mapping.
+        val selfLocal = NetworkEndpoints.findLocalIpv4()
+        val preferLan = NetworkEndpoints.preferLanPath(
+            NetworkEndpoints.Snapshot(selfLocal, publicHost, publicUdpPort, NetworkEndpoints.isWifi(appContext), null),
+            peerLocalIp.takeIf { it.isNotBlank() },
+            null
+        )
+        val newHost = when {
+            preferLan && peerLocalIp.isNotBlank() -> peerLocalIp
+            peerPublicIp.isNotBlank() -> peerPublicIp
+            peerLocalIp.isNotBlank() -> peerLocalIp
+            else -> fromHost
+        }
+        val newUdp = when {
+            preferLan && peerLocalUdp > 0 -> peerLocalUdp
+            peerPublicUdp > 0 -> peerPublicUdp
+            peerLocalUdp > 0 -> peerLocalUdp
+            else -> fromUdpPort
+        }
+        val newVideo = if (peerVideo > 0) peerVideo else newUdp
+        Log.i(
+            TAG,
+            "PATH_UPDATE from=$fromHost → host=$newHost udp=$newUdp video=$newVideo " +
+                "local=$peerLocalIp public=$peerPublicIp wifi=$onWifi deviceId=$deviceId"
+        )
+        val oldHost = when {
+            !deviceId.isBlank() && peerHostByDeviceId.containsKey(deviceId) ->
+                peerHostByDeviceId[deviceId]
+            else -> fromHost
+        }
+        if (oldHost != null && (oldHost != newHost || peers.values.none { it.host == newHost })) {
+            remapPeerHost(
+                oldHost = oldHost,
+                newHost = newHost,
+                udpPort = newUdp,
+                videoPort = newVideo,
+                deviceId = deviceId.takeIf { it.isNotBlank() },
+                displayName = null
+            )
+        } else {
+            // Fresh peer path
+            val peer = WalkiePeer(
+                serviceName = "Barky-path-$newHost",
+                host = newHost,
+                port = newUdp,
+                videoPort = newVideo
+            )
+            peers[key(peer)] = peer
+            learnedVideoPorts[newHost] = newVideo
+            peerLastHelloMs[newHost] = System.currentTimeMillis()
+            if (!deviceId.isBlank()) {
+                peerHostByDeviceId[deviceId] = newHost
+                hostToDeviceId[newHost] = deviceId
+            }
+            if (selectedPeerKey == null) selectedPeerKey = key(peer)
+            postPeers()
+        }
+        // Keep NAT warm back
+        val p = peers.values.find { it.host == newHost }
+        if (p != null) {
+            sendHelloTo(p)
+            sendPathUpdateTo(p)
+        }
+    }
+
+    /**
+     * Move a peer's host/ports after NIC change so ongoing talk/SEE/LISTEN target the new IP.
+     */
+    private fun remapPeerHost(
+        oldHost: String,
+        newHost: String,
+        udpPort: Int,
+        videoPort: Int,
+        deviceId: String?,
+        displayName: String?
+    ) {
+        if (newHost.isBlank() || udpPort <= 0) return
+        if (oldHost == newHost) {
+            // Same host, update ports only
+            peers.entries.filter { it.value.host == newHost }.forEach { e ->
+                val updated = e.value.copy(port = udpPort, videoPort = videoPort)
+                peers[e.key] = updated
+                if (selectedPeerKey == e.key) selectedPeerKey = key(updated)
+            }
+            learnedVideoPorts[newHost] = videoPort
+            peerLastHelloMs[newHost] = System.currentTimeMillis()
+            postPeers()
+            return
+        }
+        val oldPeers = peers.entries.filter { it.value.host == oldHost }
+        val baseName = displayName
+            ?: oldPeers.firstOrNull()?.value?.displayName
+            ?: newHost
+        // Remove old host entries
+        oldPeers.forEach { peers.remove(it.key) }
+        peerLastHelloMs.remove(oldHost)
+        learnedVideoPorts.remove(oldHost)
+        hostToDeviceId.remove(oldHost)
+        val peer = WalkiePeer(
+            serviceName = "Barky-$baseName",
+            host = newHost,
+            port = udpPort,
+            videoPort = videoPort
+        )
+        peers[key(peer)] = peer
+        learnedVideoPorts[newHost] = videoPort
+        peerLastHelloMs[newHost] = System.currentTimeMillis()
+        if (!deviceId.isNullOrBlank()) {
+            peerHostByDeviceId[deviceId] = newHost
+            hostToDeviceId[newHost] = deviceId
+        }
+        // Retarget session state
+        if (selectedPeerKey != null && peers[selectedPeerKey] == null) {
+            selectedPeerKey = key(peer)
+        } else if (selectedPeerKey == null || oldPeers.any { it.key == selectedPeerKey }) {
+            selectedPeerKey = key(peer)
+        }
+        if (seeWatchPeer?.host == oldHost) seeWatchPeer = peer
+        if (monitorTarget?.host == oldHost) monitorTarget = peer
+        postPeers()
+        Log.i(TAG, "remapped peer $oldHost → $newHost:$udpPort (video=$videoPort) deviceId=$deviceId")
+        // Reconnect video if we were streaming to old host
+        if (servingSee.get() || talking.get()) {
+            thread(name = "walkie-remap-video", isDaemon = true) {
+                try {
+                    closeVideoOut()
+                    openVideoOut(peer)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "remap video reconnect", t)
+                }
+            }
+        }
+        // Announce back so peer also has our path (bidirectional)
+        sendHelloTo(peer)
+        sendPathUpdateTo(peer)
+        videoDebug("Peer path remapped $oldHost → $newHost:$udpPort")
+    }
+
     private fun handleHello(data: ByteArray, fromHost: String, fromUdpPort: Int) {
         if (data.size < 3) return
         val vport = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
         if (vport <= 0 || vport > 65535) return
+        if (data.size >= 4) {
+            peerCaps[fromHost] = data[3].toInt() and 0xFF
+        }
         learnedVideoPorts[fromHost] = vport
-        // Upsert peer so audio-discovered hosts also become full peers
+        // Upsert peer so audio-discovered hosts also become full peers.
+        // Never replace a good Contacts/Firebase name with udp-/NSD junk.
         val existing = peers.values.find { it.host == fromHost }
-        val peer = existing?.copy(port = fromUdpPort, videoPort = vport)
-            ?: WalkiePeer(
+        val peer = if (existing != null) {
+            existing.copy(port = fromUdpPort, videoPort = vport)
+        } else {
+            WalkiePeer(
                 serviceName = "udp-$fromHost",
                 host = fromHost,
                 port = fromUdpPort,
                 videoPort = vport
             )
+        }
+        // Collapse host:oldPort keys → single live key
+        peers.entries.removeIf { it.value.host == fromHost && it.key != key(peer) }
         peers[key(peer)] = peer
         peerLastHelloMs[fromHost] = System.currentTimeMillis()
         // Prefer freshest peer when nothing selected, or selected host went stale
@@ -1658,13 +2093,20 @@ class WalkieTalkieEngine(
         }
     }
 
-    /** @return true if sent on TCP */
-    private fun sendVideoFrameTcp(jpeg: ByteArray): Boolean {
+    /** @return true if sent on TCP (JPEG or H.264 access unit). */
+    private fun sendVideoFrameTcp(payload: ByteArray, avc: Boolean = false): Boolean {
         synchronized(videoOutLock) {
             val out = videoOut ?: return false
             return try {
-                out.writeInt(jpeg.size)
-                out.write(jpeg)
+                if (avc) {
+                    // [len][0x01][access unit]
+                    out.writeInt(1 + payload.size)
+                    out.write(WalkieProtocol.TCP_CODEC_AVC.toInt())
+                    out.write(payload)
+                } else {
+                    out.writeInt(payload.size)
+                    out.write(payload)
+                }
                 out.flush()
                 true
             } catch (t: Throwable) {
@@ -1781,16 +2223,32 @@ class WalkieTalkieEngine(
                     videoDebug(lastVideoError)
                     break
                 }
-                val jpeg = ByteArray(len)
-                input.readFully(jpeg)
-                // SEE remote: live TCP frames only — do not store as a message clip
+                val payload = ByteArray(len)
+                input.readFully(payload)
+                // H.264: first byte TCP_CODEC_AVC
+                if (payload.isNotEmpty() && payload[0] == WalkieProtocol.TCP_CODEC_AVC) {
+                    val au = payload.copyOfRange(1, payload.size)
+                    frames++
+                    videoRxOk++
+                    monitorVideoRxCount++
+                    if (monitorVideoRxCount == 1 || seeWatchPeer?.host != from) {
+                        seeWatchPeer = peers.values.firstOrNull { it.host == from }
+                            ?: WalkiePeer("see-$from", from, 0, learnedVideoPorts[from] ?: 0)
+                    }
+                    if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
+                        Log.i(TAG, "SEE_VIDEO_AVC_TCP n=$monitorVideoRxCount bytes=${au.size} from=$from")
+                    }
+                    if (!replaying.get()) emitAvcAccessUnit(au, from, storeClip = false)
+                    continue
+                }
+                val jpeg = payload
+                // SEE remote: live TCP JPEG frames
                 if (requestingSee.get() &&
                     jpeg.size >= 2 && jpeg[0] == 0xFF.toByte() && jpeg[1] == 0xD8.toByte()
                 ) {
                     frames++
                     videoRxOk++
                     monitorVideoRxCount++
-                    // Lock flip target to the host actually sending us video
                     if (monitorVideoRxCount == 1 || seeWatchPeer?.host != from) {
                         val live = peers.values.firstOrNull { it.host == from }
                             ?: WalkiePeer("see-$from", from, 0, learnedVideoPorts[from] ?: 0)
@@ -1822,7 +2280,7 @@ class WalkieTalkieEngine(
                         decodeAndEmit(jpeg, live = true)
                     }
                 } else {
-                    lastVideoError = "RX TCP payload not JPEG (${jpeg.size}B)"
+                    lastVideoError = "RX TCP payload not JPEG/AVC (${jpeg.size}B)"
                     videoDebug(lastVideoError)
                 }
             }
@@ -2052,10 +2510,23 @@ class WalkieTalkieEngine(
                     ?: resolveVideoPort(resolved)
                     ?: parseVideoPortFromName(resolved.serviceName)
                     ?: resolved.port
-                val peer = WalkiePeer(resolved.serviceName, host, resolved.port, vport)
+                val existing = peers.values.find { it.host == host }
+                val nsdName = resolved.serviceName
+                val serviceName = when {
+                    existing != null && !isUglyPeerName(existing.serviceName) -> existing.serviceName
+                    else -> {
+                        val clean = friendlyDisplayName(nsdName, host)
+                        if (clean == host) nsdName else "Barky-$clean"
+                    }
+                }
+                val peer = WalkiePeer(serviceName, host, resolved.port, vport)
+                peers.entries.removeIf { it.value.host == host && it.key != key(peer) }
                 peers[key(peer)] = peer
                 if (peers.size == 1 || selectedPeerKey == null) {
                     selectedPeerKey = key(peer)
+                } else if (selectedPeerKey != null) {
+                    val sel = peers[selectedPeerKey]
+                    if (sel?.host == host) selectedPeerKey = key(peer)
                 }
                 postPeers()
                 postStatus("Found ${peer.displayName}")
@@ -2127,7 +2598,9 @@ class WalkieTalkieEngine(
                     val fromPort = packet.port
                     when (snapshot[0]) {
                         WalkieProtocol.TYPE_AUDIO -> handleAudioBytes(snapshot, from)
+                        WalkieProtocol.TYPE_AUDIO_OPUS -> handleAudioOpus(snapshot, from)
                         WalkieProtocol.TYPE_VIDEO -> handleVideoBytes(snapshot, from)
+                        WalkieProtocol.TYPE_VIDEO_AVC -> handleVideoAvcUdp(snapshot, from)
                         WalkieProtocol.TYPE_WAKEUP -> {
                             val quiet = snapshot.size >= 2 && snapshot[1] != 0.toByte()
                             handleWakeupFrom(from, quiet)
@@ -2160,10 +2633,15 @@ class WalkieTalkieEngine(
                         WalkieProtocol.TYPE_LISTEN_STOP -> stopServingListen()
                         WalkieProtocol.TYPE_SEE_REQ -> handleSeeReq(snapshot, from, fromPort)
                         WalkieProtocol.TYPE_SEE_STOP -> stopServingSee()
+                        WalkieProtocol.TYPE_SCREEN_REQ -> handleScreenReq(snapshot, from, fromPort)
+                        WalkieProtocol.TYPE_SCREEN_STOP -> stopServingScreen()
                         WalkieProtocol.TYPE_GPS -> handleGpsPacket(snapshot)
                         WalkieProtocol.TYPE_MONITOR_AUDIO -> handleMonitorAudio(snapshot)
+                        WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS -> handleMonitorAudioOpus(snapshot)
                         WalkieProtocol.TYPE_MONITOR_VIDEO -> handleMonitorVideo(snapshot, from)
+                        WalkieProtocol.TYPE_MONITOR_VIDEO_AVC -> handleMonitorVideoAvc(snapshot, from)
                         WalkieProtocol.TYPE_CAMERA_FLIP -> handleCameraFlipReq(from)
+                        WalkieProtocol.TYPE_PATH_UPDATE -> handlePathUpdate(snapshot, from, fromPort)
                     }
                 } catch (_: java.net.SocketTimeoutException) {
                 } catch (t: Throwable) {
@@ -2229,29 +2707,138 @@ class WalkieTalkieEngine(
         mainHandler.postDelayed(receivingIdle, RECEIVE_IDLE_MS)
     }
 
+    private fun handleAudioOpus(data: ByteArray, from: String) {
+        if (data.size < 2) return
+        if (!opusRx.isDecoderReady()) opusRx.startDecoder()
+        val pcm = opusRx.decode(data.copyOfRange(1, data.size)) ?: return
+        handleDecodedPcm(pcm, from, storeClip = true)
+    }
+
     private fun handleAudioBytes(data: ByteArray, from: String) {
         val dataLen = data.size - 1
         if (dataLen < 2) return
         val pcm = data.copyOfRange(1, data.size)
+        handleDecodedPcm(pcm, from, storeClip = true)
+    }
+
+    private fun handleDecodedPcm(pcm: ByteArray, from: String, storeClip: Boolean) {
         // Learn peer from live audio path
         ensurePeerFromHost(from)
-        if (rxClipSealed && !receiving.get()) {
-            // late audio after finalize — do not reopen a 0-frame junk clip
-            return
-        }
-        beginIncomingIfNeeded(from)
-        if (rxClipSealed) return
-        synchronized(incomingAudio) {
-            try {
-                incomingAudio.write(pcm)
-            } catch (_: Exception) {
+        if (storeClip) {
+            if (rxClipSealed && !receiving.get()) {
+                return
+            }
+            beginIncomingIfNeeded(from)
+            if (rxClipSealed) return
+            synchronized(incomingAudio) {
+                try {
+                    incomingAudio.write(pcm)
+                } catch (_: Exception) {
+                }
             }
         }
-        // Never write live RX audio while Replay owns AudioTrack — concurrent write
-        // aborts the process (releaseBuffer mUnreleased out of range / SIGABRT).
-        // Buffer-only while replaying; clip plays after Replay via pendingAfterReplay.
+        // Never write live RX audio while Replay owns AudioTrack
         if (!replaying.get()) {
             playPcm(pcm)
+        }
+    }
+
+    private fun handleMonitorAudioOpus(data: ByteArray) {
+        if (data.size < 2) return
+        if (!opusRx.isDecoderReady()) opusRx.startDecoder()
+        val pcm = opusRx.decode(data.copyOfRange(1, data.size)) ?: return
+        handleMonitorAudio(
+            ByteArray(1 + pcm.size).also {
+                it[0] = WalkieProtocol.TYPE_MONITOR_AUDIO
+                System.arraycopy(pcm, 0, it, 1, pcm.size)
+            }
+        )
+    }
+
+    private fun handleVideoAvcUdp(data: ByteArray, from: String) {
+        if (data.size < WalkieProtocol.VIDEO_HEADER) return
+        // Assemble chunks then H.264 decode (same reassembly as JPEG TYPE_VIDEO)
+        val frameId = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+        val part = data[3].toInt() and 0xFF
+        val parts = data[4].toInt() and 0xFF
+        if (parts <= 0 || part >= parts || parts > 64) return
+        val chunk = data.copyOfRange(WalkieProtocol.VIDEO_HEADER, data.size)
+        val au: ByteArray? = synchronized(videoAssembly) {
+            var slots = videoAssembly[frameId]
+            if (slots == null || slots.size != parts) {
+                slots = arrayOfNulls(parts)
+                videoAssembly[frameId] = slots
+            }
+            if (slots[part] == null) slots[part] = chunk
+            videoAssemblyTime[frameId] = System.currentTimeMillis()
+            if (slots.all { it != null }) {
+                videoAssembly.remove(frameId)
+                videoAssemblyTime.remove(frameId)
+                val total = slots.sumOf { it!!.size }
+                val out = ByteArray(total)
+                var o = 0
+                for (s in slots) {
+                    val b = s!!
+                    System.arraycopy(b, 0, out, o, b.size)
+                    o += b.size
+                }
+                out
+            } else null
+        }
+        if (au != null) emitAvcAccessUnit(au, from, storeClip = true)
+    }
+
+    private fun handleMonitorVideoAvc(data: ByteArray, from: String) {
+        if (!requestingSee.get() && !requestingScreen.get()) return
+        if (data.size < WalkieProtocol.VIDEO_HEADER) return
+        val frameId = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+        val part = data[3].toInt() and 0xFF
+        val parts = data[4].toInt() and 0xFF
+        if (parts <= 0 || part >= parts || parts > 64) return
+        val chunk = data.copyOfRange(WalkieProtocol.VIDEO_HEADER, data.size)
+        val au: ByteArray? = synchronized(videoAssembly) {
+            var slots = videoAssembly[frameId]
+            if (slots == null || slots.size != parts) {
+                slots = arrayOfNulls(parts)
+                videoAssembly[frameId] = slots
+            }
+            if (slots[part] == null) slots[part] = chunk
+            videoAssemblyTime[frameId] = System.currentTimeMillis()
+            if (slots.all { it != null }) {
+                videoAssembly.remove(frameId)
+                videoAssemblyTime.remove(frameId)
+                val total = slots.sumOf { it!!.size }
+                val out = ByteArray(total)
+                var o = 0
+                for (s in slots) {
+                    val b = s!!
+                    System.arraycopy(b, 0, out, o, b.size)
+                    o += b.size
+                }
+                out
+            } else null
+        }
+        if (au != null) emitAvcAccessUnit(au, from, storeClip = false)
+    }
+
+    private fun emitAvcAccessUnit(au: ByteArray, from: String, storeClip: Boolean) {
+        if (!avcDecoder.isReady()) avcDecoder.start(640, 480)
+        val bmp = avcDecoder.decodeToBitmap(au) ?: return
+        if (storeClip) {
+            beginIncomingIfNeeded(from)
+            // Store not used for AVC clips yet — live display only
+        }
+        if (requestingSee.get() || requestingScreen.get()) {
+            if (seeWatchPeer?.host != from) {
+                seeWatchPeer = peers.values.firstOrNull { it.host == from }
+                    ?: WalkiePeer("avc-$from", from, 0, learnedVideoPorts[from] ?: 0)
+            }
+        }
+        mainHandler.post {
+            try {
+                listener.onVideoFrame(bmp, live = true)
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -2523,6 +3110,14 @@ class WalkieTalkieEngine(
                 return
             }
             recorder.startRecording()
+            // Warm decoder for reply path
+            if ((localCaps and WalkieProtocol.CAP_OPUS) != 0) opusRx.startDecoder()
+            val useOpus = sendLive && peerWantsOpus(peer.host) && opusTx.startEncoder()
+            if (useOpus) {
+                videoDebug("TX audio codec=Opus ${OpusAudioCodec.BIT_RATE}bps")
+            } else if (sendLive) {
+                videoDebug("TX audio codec=PCM 16kHz (Opus unavailable or peer legacy)")
+            }
             val frame = ByteArray(WalkieProtocol.BYTES_PER_FRAME)
             val packetBuf = ByteArray(1 + WalkieProtocol.BYTES_PER_FRAME)
             packetBuf[0] = WalkieProtocol.TYPE_AUDIO
@@ -2542,8 +3137,18 @@ class WalkieTalkieEngine(
                 } catch (_: Exception) {
                 }
                 if (sendLive) {
-                    System.arraycopy(frame, 0, packetBuf, 1, filled)
-                    sendUdp(DatagramPacket(packetBuf, 1 + filled, dest, peer.port))
+                    if (useOpus) {
+                        val opus = opusTx.encode(frame, filled)
+                        if (opus != null && opus.isNotEmpty()) {
+                            val ob = ByteArray(1 + opus.size)
+                            ob[0] = WalkieProtocol.TYPE_AUDIO_OPUS
+                            System.arraycopy(opus, 0, ob, 1, opus.size)
+                            sendUdp(DatagramPacket(ob, ob.size, dest, peer.port))
+                        }
+                    } else {
+                        System.arraycopy(frame, 0, packetBuf, 1, filled)
+                        sendUdp(DatagramPacket(packetBuf, 1 + filled, dest, peer.port))
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -2627,19 +3232,35 @@ class WalkieTalkieEngine(
             if (live && replaying.get()) return
             if (live) {
                 val now = android.os.SystemClock.elapsedRealtime()
-                // Fewer UI paints = less flicker (encode still full rate for send/store)
+                // Pixel ImageView+TextureView combos flash hard — slower UI paint
+                val pixelOem = android.os.Build.MANUFACTURER.equals("Google", ignoreCase = true) ||
+                    android.os.Build.BRAND.equals("google", ignoreCase = true)
+                // SEE/SCRN remote: all OEMs paint slower to cut flicker (encode rate unchanged)
+                val watchingRemote = requestingSee.get() || requestingScreen.get()
                 val minGap = when {
-                    localPreview -> 120L
-                    else -> 66L // ~15 fps display
+                    localPreview && pixelOem -> 180L
+                    localPreview -> 140L
+                    watchingRemote && pixelOem -> 110L
+                    watchingRemote -> 90L // ~11 fps UI
+                    pixelOem -> 100L
+                    else -> 66L
                 }
                 if (now - lastUiEmitAt < minGap) return
                 if (!uiEmitBusy.compareAndSet(false, true)) return
                 lastUiEmitAt = now
             }
             val opts = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.RGB_565
+                // ARGB_8888 on Pixel reduces RGB_565 dither flicker; RGB_565 elsewhere for GC
+                val pixelOem = android.os.Build.MANUFACTURER.equals("Google", ignoreCase = true) ||
+                    android.os.Build.BRAND.equals("google", ignoreCase = true)
+                inPreferredConfig = if (pixelOem && !localPreview) {
+                    Bitmap.Config.ARGB_8888
+                } else {
+                    Bitmap.Config.RGB_565
+                }
                 // Local preview: half-res decode (flip still clear, much less GC flash)
                 if (localPreview) inSampleSize = 2
+                if (pixelOem && !localPreview) inSampleSize = 1
             }
             val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
             if (bmp == null) {
@@ -3007,14 +3628,23 @@ class WalkieTalkieEngine(
     fun isSeeingRemote(): Boolean = requestingSee.get()
     fun isServingListen(): Boolean = servingListen.get()
     fun isServingSee(): Boolean = servingSee.get()
+    fun isRequestingScreen(): Boolean = requestingScreen.get()
+    fun isServingScreen(): Boolean = servingScreen.get()
 
     /** Peer we are currently streaming monitor audio/video to (the requester). */
     @Volatile private var monitorTarget: WalkiePeer? = null
+    /** We asked peer to share **their** screen (SCRN). */
+    private val requestingScreen = AtomicBoolean(false)
+    /** Peer is viewing our screen (we serve MediaProjection frames). */
+    private val servingScreen = AtomicBoolean(false)
+    @Volatile private var screenWatchPeer: WalkiePeer? = null
+    private var screenShareThread: Thread? = null
 
     fun startListenRemote() {
+        // Selected contact only (same rule as SEE/SCRN)
         var peer = currentPeer() ?: getPeers().firstOrNull()
         if (peer == null) {
-            postError("No peer for LISTEN")
+            postError("No peer for LISTEN — Contacts → Select first")
             return
         }
         selectPeer(peer)
@@ -3124,10 +3754,11 @@ class WalkieTalkieEngine(
     }
 
     fun startSeeRemote() {
-        val live = allLivePeers()
-        var peer = bestLivePeer() ?: live.firstOrNull() ?: currentPeer() ?: getPeers().firstOrNull()
+        // Prefer the contact the user Selected — never fan-out to every live phone
+        // (that mixed S20 vs S918 when both HELLO'd).
+        var peer = currentPeer() ?: seeWatchPeer ?: bestLivePeer() ?: getPeers().firstOrNull()
         if (peer == null) {
-            postError("No peer for SEE")
+            postError("No peer for SEE — Contacts → Select first")
             return
         }
         selectPeer(peer)
@@ -3149,23 +3780,16 @@ class WalkieTalkieEngine(
             preparePlaybackAudio(headset = false)
         }
         val reply = localPort
-        // Fan-out to ALL live hosts — one-way SEE must not depend on picking the "right" ghost
-        val targets = if (live.isNotEmpty()) live else listOf(peer)
+        // Only this host (all known UDP ports on same IP — not other phones)
+        val target = peer
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
-                for (t in targets) {
-                    sendHelloTo(t)
-                }
+                sendHelloTo(target)
                 Thread.sleep(80)
-                for (t in targets) {
-                    sendSeeReqBurst(t, reply)
-                }
-                // Retry after short settle (UDP / stale port)
+                sendSeeReqBurst(target, reply)
                 Thread.sleep(350)
                 if (requestingSee.get()) {
-                    for (t in targets) {
-                        sendSeeReqBurst(t, reply)
-                    }
+                    sendSeeReqBurst(target, reply)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
@@ -3175,12 +3799,12 @@ class WalkieTalkieEngine(
             listener.onSeeStateChanged(true, servingSee.get())
         }
         postStatus(
-            if (requestingListen.get()) "SEE+LISTEN — watching + hearing peer…"
-            else "SEE — watching peer (video only)…"
+            if (requestingListen.get()) "SEE+LISTEN — ${peer.displayName}"
+            else "SEE — ${peer.displayName}"
         )
         Log.i(
             TAG,
-            "SEE_REQ primary → ${peer.host}:${peer.port} also=${targets.map { it.host }} " +
+            "SEE_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName} " +
                 "replyPort=$localPort withAudio=${requestingListen.get()}"
         )
     }
@@ -3248,6 +3872,241 @@ class WalkieTalkieEngine(
         )
         // SEE = camera/video only. Mic streams only if peer also sent LISTEN_REQ.
         startServingSee(peer)
+    }
+
+    /**
+     * SCRN: ask **peer** to share their phone screen (not our own).
+     * Received frames use the same path as SEE (monitor video).
+     */
+    fun startScreenRemote() {
+        // Must be the Selected contact only — bestLivePeer mixed S20/S918
+        var peer = currentPeer() ?: screenWatchPeer ?: getPeers().firstOrNull()
+        if (peer == null) {
+            postError("No contact selected for SCRN — open Contacts and Select first")
+            return
+        }
+        selectPeer(peer)
+        peer = currentPeer() ?: peer
+        if (!requestingScreen.compareAndSet(false, true)) {
+            stopScreenRemote()
+            return
+        }
+        screenWatchPeer = peer
+        seeWatchPeer = peer // reuse SEE display path for remote frames
+        requestingSee.set(true)
+        monitorReceiving.set(true)
+        val reply = localPort
+        val target = peer
+        thread(name = "walkie-screen-req", isDaemon = true) {
+            try {
+                sendHelloTo(target)
+                Thread.sleep(80)
+                // Same host only — all known ports for that IP (not other phones)
+                val ports = linkedSetOf(target.port)
+                peers.values.filter { it.host == target.host }.forEach { ports.add(it.port) }
+                repeat(3) {
+                    for (port in ports.filter { it > 0 }) {
+                        sendControlWithPort(target.copy(port = port), WalkieProtocol.TYPE_SCREEN_REQ, reply)
+                        Thread.sleep(40)
+                    }
+                    Thread.sleep(120)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "SCREEN_REQ send", t)
+            }
+        }
+        mainHandler.post {
+            listener.onSeeStateChanged(true, servingSee.get() || servingScreen.get())
+            listener.onScreenStateChanged(true, servingScreen.get())
+        }
+        postStatus("SCRN — ${peer.displayName} (${peer.host})")
+        Log.i(TAG, "SCREEN_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName}")
+    }
+
+    fun stopScreenRemote() {
+        if (!requestingScreen.getAndSet(false)) {
+            mainHandler.post { listener.onScreenStateChanged(false, servingScreen.get()) }
+            return
+        }
+        val peer = screenWatchPeer ?: seeWatchPeer ?: currentPeer()
+        peer?.let { sendControl(it, WalkieProtocol.TYPE_SCREEN_STOP) }
+        screenWatchPeer = null
+        if (!requestingSee.get()) {
+            // If we only used SEE flags for display, clear carefully
+        }
+        // Stop treating as SEE receive if we set it for screen-only
+        requestingSee.set(false)
+        if (!requestingListen.get()) monitorReceiving.set(false)
+        mainHandler.post {
+            listener.onSeeStateChanged(false, servingSee.get() || servingScreen.get())
+            listener.onScreenStateChanged(false, servingScreen.get())
+        }
+        postStatus("SCRN stopped")
+        Log.i(TAG, "SCREEN_STOP sent")
+    }
+
+    @Volatile private var lastScreenReqUiMs = 0L
+
+    private fun handleScreenReq(data: ByteArray, from: String, fromPort: Int) {
+        val payloadPort = parseControlPort(data, 0)
+        val replyPort = when {
+            fromPort in 1..65535 -> fromPort
+            payloadPort in 1..65535 -> payloadPort
+            else -> 0
+        }
+        val peer = resolvePeerForStream(from, replyPort)
+        // Burst SCRN sends many packets — only one consent dialog / auto-share attempt
+        val now = System.currentTimeMillis()
+        if (now - lastScreenReqUiMs < 4_000L) {
+            Log.d(TAG, "SCREEN_REQ from $from (debounced UI)")
+            return
+        }
+        if (servingScreen.get()) {
+            Log.i(TAG, "SCREEN_REQ from $from ignored — already serving screen")
+            return
+        }
+        lastScreenReqUiMs = now
+        Log.i(TAG, "SCREEN_REQ from $from → ask UI for MediaProjection to stream screen")
+        monitorTarget = peer
+        mainHandler.post {
+            listener.onScreenShareRequest(peer.host, peer.port, peer.videoPort)
+        }
+    }
+
+    /**
+     * After user accepts system screen-share dialog, stream their **own** screen to [peer]
+     * so the contact who pressed SCRN can watch.
+     */
+    fun startServingScreen(
+        peerHost: String,
+        peerUdp: Int,
+        peerVideo: Int,
+        projection: android.media.projection.MediaProjection
+    ) {
+        if (servingScreen.get()) {
+            Log.w(TAG, "already serving screen")
+            return
+        }
+        val peer = resolvePeerForStream(peerHost, peerUdp).let {
+            if (peerVideo > 0) it.copy(videoPort = peerVideo) else it
+        }
+        monitorTarget = peer
+        servingScreen.set(true)
+        mainHandler.post { listener.onScreenStateChanged(requestingScreen.get(), true) }
+        stopLocalPreviewInternal()
+        screenShareThread = thread(name = "walkie-serve-screen", isDaemon = true) {
+            var frames = 0
+            var virtualDisplay: android.hardware.display.VirtualDisplay? = null
+            var imageReader: android.media.ImageReader? = null
+            try {
+                openVideoOut(peer)
+                val dm = appContext.resources.displayMetrics
+                val w = (dm.widthPixels / 2).coerceIn(360, 720)
+                val h = (dm.heightPixels / 2).coerceIn(640, 1280)
+                val reader = android.media.ImageReader.newInstance(
+                    w, h, android.graphics.PixelFormat.RGBA_8888, 2
+                )
+                imageReader = reader
+                // Android 14+: Callback MUST be registered before createVirtualDisplay
+                projection.registerCallback(object : android.media.projection.MediaProjection.Callback() {
+                    override fun onStop() {
+                        Log.i(TAG, "MediaProjection onStop")
+                        servingScreen.set(false)
+                    }
+                }, mainHandler)
+                virtualDisplay = projection.createVirtualDisplay(
+                    "barky-contact-screen",
+                    w, h, dm.densityDpi,
+                    android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    reader.surface, null, null
+                )
+                Log.i(TAG, "VirtualDisplay created ${w}x$h for ${peer.host}")
+                var lastTx = 0L
+                while (servingScreen.get() && running.get()) {
+                    val image = try {
+                        reader.acquireLatestImage()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (image == null) {
+                        Thread.sleep(40)
+                        continue
+                    }
+                    try {
+                        val now = System.currentTimeMillis()
+                        if (now - lastTx < 80) {
+                            image.close()
+                            continue
+                        }
+                        lastTx = now
+                        val plane = image.planes[0]
+                        val buf = plane.buffer
+                        val pixelStride = plane.pixelStride
+                        val rowStride = plane.rowStride
+                        val rowPadding = rowStride - pixelStride * w
+                        val bmp = android.graphics.Bitmap.createBitmap(
+                            w + rowPadding / pixelStride.coerceAtLeast(1),
+                            h,
+                            android.graphics.Bitmap.Config.ARGB_8888
+                        )
+                        bmp.copyPixelsFromBuffer(buf)
+                        val cropped = android.graphics.Bitmap.createBitmap(bmp, 0, 0, w, h)
+                        if (bmp != cropped) bmp.recycle()
+                        val baos = java.io.ByteArrayOutputStream()
+                        cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, baos)
+                        cropped.recycle()
+                        val jpeg = baos.toByteArray()
+                        val viaTcp = sendVideoFrameTcp(jpeg)
+                        val ok = if (viaTcp) true else sendMonitorVideoUdp(jpeg, peer)
+                        if (ok) {
+                            frames++
+                            if (frames == 1 || frames % 30 == 0) {
+                                Log.i(TAG, "SCREEN_TX n=$frames bytes=${jpeg.size}")
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "screen frame", t)
+                    } finally {
+                        try {
+                            image.close()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "serve screen", t)
+            } finally {
+                try {
+                    virtualDisplay?.release()
+                } catch (_: Exception) {
+                }
+                try {
+                    imageReader?.close()
+                } catch (_: Exception) {
+                }
+                // Do NOT stop MediaProjection if held for auto-share re-use
+                val held = com.example.barky.screen.MediaProjectionHolder.get()
+                if (held !== projection) {
+                    try {
+                        projection.stop()
+                    } catch (_: Exception) {
+                    }
+                }
+                closeVideoOut()
+                servingScreen.set(false)
+                mainHandler.post { listener.onScreenStateChanged(requestingScreen.get(), false) }
+                if (!talking.get()) maybeResumeLocalPreview()
+                Log.i(TAG, "SCREEN serve end frames=$frames")
+            }
+        }
+        postStatus("Sharing screen with contact…")
+        Log.i(TAG, "SCREEN serve START → ${peer.host}:${peer.port}")
+    }
+
+    fun stopServingScreen() {
+        if (!servingScreen.getAndSet(false)) return
+        mainHandler.post { listener.onScreenStateChanged(requestingScreen.get(), false) }
+        Log.i(TAG, "stopServingScreen")
     }
 
     private fun parseControlPort(data: ByteArray, fallback: Int): Int {
@@ -3356,28 +4215,75 @@ class WalkieTalkieEngine(
                     "SEE serve video start → ${peer.host}:${peer.port} tcp=$tcpOk " +
                         "vport=${peer.videoPort} bgSafeSurface=true uiTex=${uiPreviewTexture != null}"
                 )
-                val cam = CameraFrameSource(
-                    context = appContext,
-                    compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
-                    config = CaptureConfig.Live,
-                    preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
-                    externalSurfaceTexture = { null },
-                    onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
-                    onPreviewReady = { w, h, orient, front ->
-                        mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
-                    },
-                    onError = { msg ->
-                        videoDebug("SEE cam: $msg")
-                        Log.w(TAG, "SEE cam error: $msg")
+                val useAvc = peerWantsAvc(peer.host)
+                if (useAvc) {
+                    avcEncoder?.release()
+                    avcEncoder = AvcVideoEncoder(640, 480, 2_000_000).also { it.start() }
+                    if (avcEncoder?.isReady() != true) {
+                        avcEncoder?.release()
+                        avcEncoder = null
+                    } else {
+                        videoDebug("TX video codec=H.264/AVC 640x480")
                     }
-                ) { jpeg ->
-                    if (!servingSee.get()) return@CameraFrameSource
-                    val viaTcp = sendVideoFrameTcp(jpeg)
-                    val ok = if (viaTcp) true else sendMonitorVideoUdp(jpeg, peer)
-                    if (ok) {
-                        frames++
-                        if (frames == 1 || frames % 30 == 0) {
-                            Log.i(TAG, "SEE VIDEO_TX n=$frames via=${if (viaTcp) "tcp" else "udp"} bytes=${jpeg.size}")
+                } else {
+                    videoDebug("TX video codec=MJPEG")
+                }
+                val enc = avcEncoder
+                val cam = if (enc != null && enc.isReady()) {
+                    CameraFrameSource(
+                        context = appContext,
+                        compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
+                        config = CaptureConfig.Live,
+                        preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
+                        externalSurfaceTexture = { null },
+                        onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
+                        onPreviewReady = { w, h, orient, front ->
+                            mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
+                        },
+                        onError = { msg ->
+                            videoDebug("SEE cam: $msg")
+                            Log.w(TAG, "SEE cam error: $msg")
+                        },
+                        onNv21Frame = { nv21, w, h ->
+                            if (!servingSee.get()) return@CameraFrameSource
+                            val units = enc.encodeNv21(nv21, w, h)
+                            for (au in units) {
+                                val viaTcp = sendVideoFrameTcp(au, avc = true)
+                                val ok = if (viaTcp) true else sendMonitorVideoAvcUdp(au, peer)
+                                if (ok) {
+                                    frames++
+                                    if (frames == 1 || frames % 30 == 0) {
+                                        Log.i(TAG, "SEE AVC_TX n=$frames bytes=${au.size}")
+                                    }
+                                }
+                            }
+                        },
+                        onJpegFrame = { }
+                    )
+                } else {
+                    CameraFrameSource(
+                        context = appContext,
+                        compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
+                        config = CaptureConfig.Live,
+                        preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
+                        externalSurfaceTexture = { null },
+                        onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
+                        onPreviewReady = { w, h, orient, front ->
+                            mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
+                        },
+                        onError = { msg ->
+                            videoDebug("SEE cam: $msg")
+                            Log.w(TAG, "SEE cam error: $msg")
+                        }
+                    ) { jpeg ->
+                        if (!servingSee.get()) return@CameraFrameSource
+                        val viaTcp = sendVideoFrameTcp(jpeg)
+                        val ok = if (viaTcp) true else sendMonitorVideoUdp(jpeg, peer)
+                        if (ok) {
+                            frames++
+                            if (frames == 1 || frames % 30 == 0) {
+                                Log.i(TAG, "SEE VIDEO_TX n=$frames via=${if (viaTcp) "tcp" else "udp"} bytes=${jpeg.size}")
+                            }
                         }
                     }
                 }
@@ -3397,6 +4303,8 @@ class WalkieTalkieEngine(
                 }
                 cam.stop()
                 if (cameraSource === cam) cameraSource = null
+                avcEncoder?.release()
+                avcEncoder = null
                 closeVideoOut()
             } catch (t: Throwable) {
                 Log.w(TAG, "serve see", t)
@@ -3457,6 +4365,7 @@ class WalkieTalkieEngine(
                 return
             }
             recorder.startRecording()
+            val useOpus = peerWantsOpus(peer.host) && opusTx.startEncoder()
             val frame = ByteArray(WalkieProtocol.BYTES_PER_FRAME)
             val packetBuf = ByteArray(1 + WalkieProtocol.BYTES_PER_FRAME)
             packetBuf[0] = WalkieProtocol.TYPE_MONITOR_AUDIO
@@ -3470,15 +4379,32 @@ class WalkieTalkieEngine(
                 }
                 val n = recorder.read(frame, 0, frame.size)
                 if (n <= 0) continue
-                System.arraycopy(frame, 0, packetBuf, 1, n)
                 try {
-                    val packet = DatagramPacket(
-                        packetBuf, 1 + n, InetAddress.getByName(dest.host), dest.port
-                    )
-                    sendUdp(packet)
-                    sent++
+                    if (useOpus) {
+                        val opus = opusTx.encode(frame, n)
+                        if (opus != null && opus.isNotEmpty()) {
+                            val ob = ByteArray(1 + opus.size)
+                            ob[0] = WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS
+                            System.arraycopy(opus, 0, ob, 1, opus.size)
+                            sendUdp(
+                                DatagramPacket(ob, ob.size, InetAddress.getByName(dest.host), dest.port)
+                            )
+                            sent++
+                        }
+                    } else {
+                        System.arraycopy(frame, 0, packetBuf, 1, n)
+                        sendUdp(
+                            DatagramPacket(
+                                packetBuf, 1 + n, InetAddress.getByName(dest.host), dest.port
+                            )
+                        )
+                        sent++
+                    }
                     if (sent == 1 || sent % 50 == 0) {
-                        Log.i(TAG, "MONITOR_AUDIO_TX frames=$sent → ${dest.host}:${dest.port}")
+                        Log.i(
+                            TAG,
+                            "MONITOR_AUDIO_TX frames=$sent opus=$useOpus → ${dest.host}:${dest.port}"
+                        )
                     }
                 } catch (_: Exception) {
                 }
@@ -3542,7 +4468,7 @@ class WalkieTalkieEngine(
     }
 
     private fun handleMonitorVideo(data: ByteArray, from: String) {
-        if (!requestingSee.get()) return
+        if (!requestingSee.get() && !requestingScreen.get()) return
         if (data.size < WalkieProtocol.VIDEO_HEADER) return
         handleVideoBytesAsMonitor(data)
     }
@@ -3587,22 +4513,29 @@ class WalkieTalkieEngine(
     }
 
     private fun sendMonitorVideoUdp(jpeg: ByteArray, peer: WalkiePeer): Boolean {
-        // Reuse sendVideoFrameUdp structure but TYPE_MONITOR_VIDEO
+        return sendChunkedMonitorVideo(jpeg, peer, WalkieProtocol.TYPE_MONITOR_VIDEO)
+    }
+
+    private fun sendMonitorVideoAvcUdp(au: ByteArray, peer: WalkiePeer): Boolean {
+        return sendChunkedMonitorVideo(au, peer, WalkieProtocol.TYPE_MONITOR_VIDEO_AVC)
+    }
+
+    private fun sendChunkedMonitorVideo(payload: ByteArray, peer: WalkiePeer, type: Byte): Boolean {
         return try {
             val chunk = WalkieProtocol.VIDEO_CHUNK
-            val parts = (jpeg.size + chunk - 1) / chunk
-            if (parts > 64) return false
+            val parts = (payload.size + chunk - 1) / chunk
+            if (parts > 64 || parts <= 0) return false
             val frameId = (System.currentTimeMillis() and 0xFFFF).toInt()
             var offset = 0
             for (part in 0 until parts) {
-                val len = min(chunk, jpeg.size - offset)
+                val len = min(chunk, payload.size - offset)
                 val buf = ByteArray(WalkieProtocol.VIDEO_HEADER + len)
-                buf[0] = WalkieProtocol.TYPE_MONITOR_VIDEO
+                buf[0] = type
                 buf[1] = ((frameId shr 8) and 0xFF).toByte()
                 buf[2] = (frameId and 0xFF).toByte()
                 buf[3] = part.toByte()
                 buf[4] = parts.toByte()
-                System.arraycopy(jpeg, offset, buf, WalkieProtocol.VIDEO_HEADER, len)
+                System.arraycopy(payload, offset, buf, WalkieProtocol.VIDEO_HEADER, len)
                 val packet = DatagramPacket(
                     buf, buf.size, InetAddress.getByName(peer.host), peer.port
                 )
@@ -3611,7 +4544,7 @@ class WalkieTalkieEngine(
             }
             true
         } catch (t: Throwable) {
-            Log.w(TAG, "sendMonitorVideoUdp", t)
+            Log.w(TAG, "sendChunkedMonitorVideo type=$type", t)
             false
         }
     }
@@ -3689,9 +4622,14 @@ class WalkieTalkieEngine(
     private fun key(peer: WalkiePeer) = "${peer.host}:${peer.port}"
 
     private fun safeDeviceName(): String {
-        val model = Build.MODEL?.replace(Regex("[^A-Za-z0-9_-]"), "")?.take(18)
-        val suffix = (1000 + (System.currentTimeMillis() % 9000)).toString()
-        return if (model.isNullOrBlank()) "Phone-$suffix" else "$model-$suffix"
+        // Stable label (no random) so Contacts/peers don't reshuffle every restart
+        val model = Build.MODEL?.replace(Regex("[^A-Za-z0-9]"), "")?.take(16)
+        val idTail = try {
+            com.example.barky.net.DeviceIdentity.deviceId(appContext).takeLast(4)
+        } catch (_: Throwable) {
+            "dev"
+        }
+        return if (model.isNullOrBlank()) "Phone-$idTail" else "$model-$idTail"
     }
 
     private fun postStatus(msg: String) {

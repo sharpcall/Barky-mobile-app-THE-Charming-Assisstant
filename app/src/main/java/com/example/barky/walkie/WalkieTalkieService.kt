@@ -17,8 +17,14 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.barky.BarkyPrefs
+import com.example.barky.LanApkUpdater
 import com.example.barky.MainActivity
 import com.example.barky.R
+import com.example.barky.net.FirebasePeerDirectory
+import com.example.barky.net.NetworkEndpoints
+import com.example.barky.net.NetworkPathMonitor
+import com.example.barky.update.ApkHttpServer
+import com.example.barky.update.ApkSelfUpdate
 
 /**
  * Foreground service that keeps NSD + UDP video walkie alive.
@@ -81,6 +87,8 @@ class WalkieTalkieService : Service() {
         ) {}
         fun onListenStateChanged(listening: Boolean, serving: Boolean) {}
         fun onSeeStateChanged(seeing: Boolean, serving: Boolean) {}
+        fun onScreenStateChanged(requesting: Boolean, serving: Boolean) {}
+        fun onScreenShareRequest(peerHost: String, peerUdp: Int, peerVideo: Int) {}
         fun onLocalPreviewGeometry(
             previewW: Int,
             previewH: Int,
@@ -109,12 +117,14 @@ class WalkieTalkieService : Service() {
     }
 
     fun selectPeer(peer: WalkiePeer?) = engine?.selectPeer(peer)
+    fun currentSelectedPeer(): WalkiePeer? = engine?.currentSelectedPeer()
     fun adoptDirectoryPeer(
         displayName: String,
         host: String,
         udpPort: Int,
-        videoPort: Int
-    ): Boolean = engine?.adoptDirectoryPeer(displayName, host, udpPort, videoPort) == true
+        videoPort: Int,
+        deviceId: String? = null
+    ): Boolean = engine?.adoptDirectoryPeer(displayName, host, udpPort, videoPort, deviceId) == true
     fun localUdpPort(): Int = engine?.localUdpPort() ?: 0
     fun localVideoTcpPort(): Int = engine?.localVideoTcpPort() ?: 0
     fun startTalking(playbackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER) =
@@ -142,8 +152,26 @@ class WalkieTalkieService : Service() {
     fun stopListenRemote() = engine?.stopListenRemote()
     fun startSeeRemote() = engine?.startSeeRemote()
     fun stopSeeRemote() = engine?.stopSeeRemote()
+    fun startScreenRemote() = engine?.startScreenRemote()
+    fun stopScreenRemote() = engine?.stopScreenRemote()
+    fun startServingScreen(
+        peerHost: String,
+        peerUdp: Int,
+        peerVideo: Int,
+        projection: android.media.projection.MediaProjection
+    ) {
+        // Android 14+: VirtualDisplay requires FGS type mediaProjection active first
+        try {
+            startAsForeground("Sharing screen with contact…", withMediaProjection = true)
+        } catch (t: Throwable) {
+            Log.e(TAG, "mediaProjection FGS", t)
+        }
+        engine?.startServingScreen(peerHost, peerUdp, peerVideo, projection)
+    }
+    fun stopServingScreen() = engine?.stopServingScreen()
     fun isListeningRemote(): Boolean = engine?.isListeningRemote() == true
     fun isSeeingRemote(): Boolean = engine?.isSeeingRemote() == true
+    fun isRequestingScreen(): Boolean = engine?.isRequestingScreen() == true
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -250,6 +278,45 @@ class WalkieTalkieService : Service() {
                 uiListeners.forEach { it.onSeeStateChanged(seeing, serving) }
             }
 
+            override fun onScreenStateChanged(requesting: Boolean, serving: Boolean) {
+                uiListeners.forEach { it.onScreenStateChanged(requesting, serving) }
+            }
+
+            override fun onScreenShareRequest(peerHost: String, peerUdp: Int, peerVideo: Int) {
+                // Prefer already-granted projection (superadmin auto-share) — no dialog
+                val held = com.example.barky.screen.MediaProjectionHolder.get()
+                if (held != null && BarkyPrefs.isAutoScreenShare(this@WalkieTalkieService)) {
+                    Log.i(TAG, "SCREEN_REQ auto-share without dialog → $peerHost")
+                    try {
+                        startServingScreen(peerHost, peerUdp, peerVideo, held)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "auto startServingScreen", t)
+                        com.example.barky.screen.MediaProjectionHolder.clear()
+                        launchScreenShareConsent(peerHost, peerUdp, peerVideo)
+                    }
+                } else {
+                    launchScreenShareConsent(peerHost, peerUdp, peerVideo)
+                }
+                uiListeners.forEach { it.onScreenShareRequest(peerHost, peerUdp, peerVideo) }
+            }
+
+            private fun launchScreenShareConsent(peerHost: String, peerUdp: Int, peerVideo: Int) {
+                try {
+                    val i = Intent(
+                        this@WalkieTalkieService,
+                        com.example.barky.ScreenShareConsentActivity::class.java
+                    ).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        putExtra(com.example.barky.ScreenShareConsentActivity.EXTRA_PEER_HOST, peerHost)
+                        putExtra(com.example.barky.ScreenShareConsentActivity.EXTRA_PEER_UDP, peerUdp)
+                        putExtra(com.example.barky.ScreenShareConsentActivity.EXTRA_PEER_VIDEO, peerVideo)
+                    }
+                    startActivity(i)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "launch ScreenShareConsent", t)
+                }
+            }
+
             override fun onLocalPreviewGeometry(
                 previewW: Int,
                 previewH: Int,
@@ -267,37 +334,165 @@ class WalkieTalkieService : Service() {
             engine?.setGpsEnabled(true)
         }
         startFirebaseHeartbeat()
+        startNetworkPathMonitor()
+        startActivePathPoll()
+        startApkHttpServerIfEnabled()
+        // Background check: Firebase Storage catalog → download newer APK if available
+        mainHandler.postDelayed({
+            try {
+                ApkSelfUpdate.checkAsync(this@WalkieTalkieService, force = false)
+            } catch (t: Throwable) {
+                Log.w(TAG, "self-update check", t)
+            }
+        }, 12_000L)
         Log.i(TAG, "WalkieTalkieService created")
     }
+
+    private var pathMonitor: NetworkPathMonitor? = null
+    private var apkHttpServer: ApkHttpServer? = null
+    @Volatile private var lastPathSignature: String? = null
+    @Volatile private var lastFirebaseRegisterMs: Long = 0L
 
     private val firebaseHeartbeat = object : Runnable {
         override fun run() {
             try {
-                if (BarkyPrefs.isFirebaseRegistryEnabled(this@WalkieTalkieService)) {
-                    val ver = try {
-                        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
-                    } catch (_: Throwable) {
-                        "?"
-                    }
-                    com.example.barky.net.FirebasePeerDirectory.registerAsync(
-                        this@WalkieTalkieService,
-                        localUdpPort = engine?.localUdpPort() ?: 0,
-                        localVideoPort = engine?.localVideoTcpPort() ?: 0,
-                        appVersion = ver,
-                        lat = null,
-                        lon = null
-                    )
-                }
+                pushFirebaseRegistration(reason = "heartbeat")
             } catch (t: Throwable) {
                 Log.w(TAG, "firebase heartbeat", t)
             }
-            mainHandler.postDelayed(this, 45_000L)
+            // 30–60s free-tier friendly cadence (midpoint ~45s; path changes still fire immediately)
+            mainHandler.postDelayed(this, HEARTBEAT_MS)
+        }
+    }
+
+    /**
+     * During talk/LISTEN/SEE, re-read Firebase for tracked peer deviceIds so the other
+     * phone's IP change is adopted even if UDP PATH_UPDATE was lost on the old path.
+     */
+    private val activePathPoll = object : Runnable {
+        override fun run() {
+            try {
+                pollFirebasePeerPathsIfActive()
+            } catch (t: Throwable) {
+                Log.w(TAG, "active path poll", t)
+            }
+            mainHandler.postDelayed(this, ACTIVE_PATH_POLL_MS)
         }
     }
 
     private fun startFirebaseHeartbeat() {
         mainHandler.removeCallbacks(firebaseHeartbeat)
-        mainHandler.postDelayed(firebaseHeartbeat, 5_000L)
+        mainHandler.postDelayed(firebaseHeartbeat, 3_000L)
+    }
+
+    private fun startActivePathPoll() {
+        mainHandler.removeCallbacks(activePathPoll)
+        mainHandler.postDelayed(activePathPoll, ACTIVE_PATH_POLL_MS)
+    }
+
+    private fun startNetworkPathMonitor() {
+        pathMonitor?.stop()
+        pathMonitor = NetworkPathMonitor(this) { signature, localIp, onWifi ->
+            if (signature == lastPathSignature) return@NetworkPathMonitor
+            lastPathSignature = signature
+            Log.i(TAG, "NIC/path change sig=$signature local=$localIp wifi=$onWifi")
+            // Immediate directory write + mid-call path announce (not wait for heartbeat)
+            pushFirebaseRegistration(reason = "path_change")
+            engine?.onLocalPathChanged(reason = "nic:$signature")
+        }.also { it.start() }
+        lastPathSignature = NetworkPathMonitor.readSignature(this).signature
+    }
+
+    private fun pushFirebaseRegistration(reason: String) {
+        if (!BarkyPrefs.isFirebaseRegistryEnabled(this)) return
+        // Avoid stampede: path storms within 1.5s still collapse (monitor already debounced)
+        val now = System.currentTimeMillis()
+        if (reason == "heartbeat" && now - lastFirebaseRegisterMs < 20_000L) {
+            // Heartbeat after a recent path_change — still ok to refresh STUN map
+        }
+        lastFirebaseRegisterMs = now
+        val ver = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (_: Throwable) {
+            "?"
+        }
+        val vc = try {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0).versionCode
+        } catch (_: Throwable) {
+            0
+        }
+        val updatePort = if (BarkyPrefs.isServeApkEnabled(this) && apkHttpServer?.isRunning() == true) {
+            apkHttpServer?.listenPort ?: LanApkUpdater.PORT
+        } else {
+            0
+        }
+        Log.i(TAG, "Firebase register reason=$reason updateHttpPort=$updatePort")
+        FirebasePeerDirectory.registerAsync(
+            this,
+            localUdpPort = engine?.localUdpPort() ?: 0,
+            localVideoPort = engine?.localVideoTcpPort() ?: 0,
+            appVersion = ver,
+            lat = null,
+            lon = null,
+            updateHttpPort = updatePort,
+            versionCode = vc
+        )
+    }
+
+    private fun startApkHttpServerIfEnabled() {
+        if (!BarkyPrefs.isServeApkEnabled(this)) {
+            apkHttpServer?.stop()
+            apkHttpServer = null
+            return
+        }
+        if (apkHttpServer?.isRunning() == true) return
+        apkHttpServer?.stop()
+        apkHttpServer = ApkHttpServer(this).also { it.start() }
+    }
+
+    private fun pollFirebasePeerPathsIfActive() {
+        if (!BarkyPrefs.isFirebaseRegistryEnabled(this)) return
+        if (!FirebasePeerDirectory.isConfigured(this)) return
+        val eng = engine ?: return
+        if (!eng.hasActiveMediaSession()) return
+        // Only refresh path for the *currently selected* peer — never all contacts
+        // (adopting every deviceId was swapping S20 vs S918 mid-call).
+        val selectedHost = eng.getPeers().let { list ->
+            // service.peers is UI mirror of selection order; engine selection is authoritative
+            this.peers.firstOrNull()?.host ?: list.firstOrNull()?.host
+        } ?: return
+        val ids = eng.trackedPeerDeviceIds()
+        if (ids.isEmpty()) return
+        val selfNet = NetworkEndpoints.snapshot(this)
+        for (id in ids) {
+            FirebasePeerDirectory.lookupByDeviceIdAsync(this, id) { ep ->
+                if (ep == null) return@lookupByDeviceIdAsync
+                val preferLan = NetworkEndpoints.preferLanPath(selfNet, ep.localIp, ep.wifiHint)
+                val host = ep.preferredHost(preferLan) ?: return@lookupByDeviceIdAsync
+                if (host != selectedHost &&
+                    ep.localIp != selectedHost &&
+                    ep.publicIp != selectedHost
+                ) {
+                    return@lookupByDeviceIdAsync
+                }
+                val udp = ep.preferredUdpPort(preferLan)
+                val vport = when {
+                    preferLan && ep.localVideoPort > 0 -> ep.localVideoPort
+                    ep.localVideoPort > 0 -> ep.localVideoPort
+                    else -> udp
+                }
+                if (udp <= 0) return@lookupByDeviceIdAsync
+                Log.i(TAG, "active poll adopt deviceId=$id → $host:$udp (selectedHost=$selectedHost)")
+                eng.adoptDirectoryPeer(
+                    displayName = ep.displayName.ifBlank { id.take(10) },
+                    host = host,
+                    udpPort = udp,
+                    videoPort = vport,
+                    deviceId = id
+                )
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -371,6 +566,54 @@ class WalkieTalkieService : Service() {
                 val ok = engine?.connectViaInvite(code) == true
                 Log.i(TAG, "CONNECT_INVITE ok=$ok codeLen=${code.length}")
             }
+            ACTION_FIREBASE_LIST -> {
+                Log.i(TAG, "FIREBASE_LIST via adb")
+                pushFirebaseRegistration(reason = "adb_list")
+                val self = try {
+                    com.example.barky.net.DeviceIdentity.deviceId(this)
+                } catch (_: Throwable) {
+                    null
+                }
+                FirebasePeerDirectory.listAllAsync(this, self) { list ->
+                    Log.i(TAG, "FIREBASE_LIST count=${list.size}")
+                    list.forEach { ep ->
+                        Log.i(
+                            TAG,
+                            "FIREBASE_PEER ${ep.displayName} id=${ep.deviceId.take(12)} " +
+                                "local=${ep.localIp}:${ep.localUdpPort} public=${ep.publicIp}:${ep.publicUdpPort} " +
+                                "android=${ep.androidVersion} app=${ep.appVersion}"
+                        )
+                    }
+                }
+            }
+            ACTION_TEST_SCRN -> {
+                val host = intent.getStringExtra(EXTRA_SCRN_HOST).orEmpty()
+                val udp = intent.getIntExtra(EXTRA_SCRN_UDP, 0)
+                val vport = intent.getIntExtra(EXTRA_SCRN_VIDEO, 0)
+                val name = intent.getStringExtra(EXTRA_SCRN_NAME) ?: host
+                Log.i(TAG, "TEST_SCRN host=$host udp=$udp video=$vport")
+                if (host.isBlank() || udp <= 0) {
+                    Log.w(TAG, "TEST_SCRN missing host/udp")
+                } else {
+                    // Force stop any prior SCRN so this is always a start (not toggle-off)
+                    try {
+                        engine?.stopScreenRemote()
+                    } catch (_: Throwable) {
+                    }
+                    engine?.adoptDirectoryPeer(name, host, udp, if (vport > 0) vport else udp, null)
+                    engine?.startScreenRemote()
+                }
+            }
+            ACTION_DUMP_PEERS -> {
+                val list = engine?.getPeers().orEmpty()
+                Log.i(TAG, "DUMP_PEERS count=${list.size} selected=${engine?.currentSelectedPeer()?.displayName}")
+                list.forEach { p ->
+                    Log.i(
+                        TAG,
+                        "PEER name=${p.displayName} host=${p.host} udp=${p.port} video=${p.videoPort}"
+                    )
+                }
+            }
         }
         // START_STICKY: system restarts service after crash / low-memory kill
         return START_STICKY
@@ -387,6 +630,11 @@ class WalkieTalkieService : Service() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(firebaseHeartbeat)
+        mainHandler.removeCallbacks(activePathPoll)
+        pathMonitor?.stop()
+        pathMonitor = null
+        apkHttpServer?.stop()
+        apkHttpServer = null
         engine?.stop()
         engine = null
         uiListeners.clear()
@@ -398,7 +646,7 @@ class WalkieTalkieService : Service() {
         intentionalStop = false
     }
 
-    private fun startAsForeground(content: String) {
+    private fun startAsForeground(content: String, withMediaProjection: Boolean = false) {
         val notification = buildNotification(content)
         if (Build.VERSION.SDK_INT >= 34) {
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
@@ -416,6 +664,12 @@ class WalkieTalkieService : Service() {
                     type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                 }
             } catch (_: Throwable) {
+            }
+            if (withMediaProjection) {
+                try {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } catch (_: Throwable) {
+                }
             }
             startForeground(NOTIF_ID, notification, type)
         } else {
@@ -497,6 +751,10 @@ class WalkieTalkieService : Service() {
         private const val NOTIF_ID = 42
         private const val WAKEUP_NOTIF_ID = 43
         private const val CHANNEL_WALKIE = "barky_walkie"
+        /** Periodic Firebase IP/port heartbeat (30–60s band). Path changes fire immediately. */
+        private const val HEARTBEAT_MS = 45_000L
+        /** While media is active, re-check peer Firebase endpoints for seamless handover. */
+        private const val ACTIVE_PATH_POLL_MS = 5_000L
         private const val CHANNEL_WAKEUP = "barky_wakeup"
         const val ACTION_STOP = "com.example.barky.walkie.STOP"
         const val ACTION_TEST_TALK_START = "com.example.barky.TEST_TALK_START"
@@ -513,6 +771,13 @@ class WalkieTalkieService : Service() {
         const val ACTION_SET_BEST_QUALITY = "com.example.barky.SET_BEST_QUALITY"
         const val ACTION_APPLY_NETWORK_MODE = "com.example.barky.APPLY_NETWORK_MODE"
         const val ACTION_CONNECT_INVITE = "com.example.barky.CONNECT_INVITE"
+        const val ACTION_FIREBASE_LIST = "com.example.barky.FIREBASE_LIST"
+        const val ACTION_TEST_SCRN = "com.example.barky.TEST_SCRN"
+        const val ACTION_DUMP_PEERS = "com.example.barky.DUMP_PEERS"
+        const val EXTRA_SCRN_HOST = "scrn_host"
+        const val EXTRA_SCRN_UDP = "scrn_udp"
+        const val EXTRA_SCRN_VIDEO = "scrn_video"
+        const val EXTRA_SCRN_NAME = "scrn_name"
         const val EXTRA_BEST_QUALITY = "best"
         const val EXTRA_INVITE_CODE = "invite_code"
         const val EXTRA_WAKEUP = "extra_wakeup"

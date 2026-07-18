@@ -22,6 +22,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -66,9 +67,22 @@
 
         <activity
             android:name=".ContactsActivity"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/contacts_title"
-            android:parentActivityName=".MainActivity" />
+            android:parentActivityName=".MainActivity">
+            <!-- exported for adb/UI automation; no sensitive data beyond peer names -->
+            <intent-filter>
+                <action android:name="com.example.barky.OPEN_CONTACTS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ScreenShareConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Barky"
+            android:label="@string/screen_share_consent_title" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -113,7 +127,7 @@
             android:name=".walkie.WalkieTalkieService"
             android:directBootAware="true"
             android:exported="true"
-            android:foregroundServiceType="microphone|camera|location"
+            android:foregroundServiceType="microphone|camera|location|mediaProjection"
             android:stopWithTask="false">
             <intent-filter>
                 <action android:name="com.example.barky.TEST_TALK_START" />
@@ -129,8 +143,16 @@
                 <action android:name="com.example.barky.SET_BEST_QUALITY" />
                 <action android:name="com.example.barky.APPLY_NETWORK_MODE" />
                 <action android:name="com.example.barky.CONNECT_INVITE" />
+                <action android:name="com.example.barky.FIREBASE_LIST" />
+                <action android:name="com.example.barky.TEST_SCRN" />
+                <action android:name="com.example.barky.DUMP_PEERS" />
             </intent-filter>
         </service>
+
+        <service
+            android:name=".screen.ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
     </application>
 
 </manifest>
