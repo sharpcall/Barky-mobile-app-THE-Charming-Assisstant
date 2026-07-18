@@ -1,0 +1,124 @@
+package com.example.barky.net
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
+import android.util.Log
+import com.example.barky.walkie.StunClient
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.NetworkInterface
+
+/**
+ * Discovers **local Wi‑Fi IPv4** and **public mapped address** (STUN).
+ * Used for Firebase registration and path selection (LAN first, then public IP).
+ */
+object NetworkEndpoints {
+    private const val TAG = "NetworkEndpoints"
+
+    data class Snapshot(
+        val localIp: String?,
+        val publicIp: String?,
+        val publicUdpPort: Int,
+        val onWifi: Boolean,
+        val wifiSsid: String?
+    )
+
+    fun snapshot(context: Context, walkieSocket: DatagramSocket? = null): Snapshot {
+        val onWifi = isWifi(context)
+        val local = findLocalIpv4()
+        val mapped = try {
+            StunClient.discoverMappedAddress(walkieSocket)
+        } catch (t: Throwable) {
+            Log.w(TAG, "STUN", t)
+            null
+        }
+        val ssid = if (onWifi) readSsid(context) else null
+        return Snapshot(
+            localIp = local,
+            publicIp = mapped?.host,
+            publicUdpPort = mapped?.port ?: 0,
+            onWifi = onWifi,
+            wifiSsid = ssid
+        )
+    }
+
+    fun isWifi(context: Context): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val n = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(n) ?: return false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun findLocalIpv4(): String? {
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            for (ni in ifaces) {
+                if (!ni.isUp || ni.isLoopback) continue
+                val addrs = ni.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val a = addrs.nextElement()
+                    if (a is Inet4Address && !a.isLoopbackAddress) {
+                        val host = a.hostAddress ?: continue
+                        if (PeerEndpoint.isPrivateIp(host) || host.startsWith("100.")) {
+                            return host
+                        }
+                    }
+                }
+            }
+            // Fallback: any non-loopback v4
+            val ifaces2 = NetworkInterface.getNetworkInterfaces() ?: return null
+            for (ni in ifaces2) {
+                if (!ni.isUp || ni.isLoopback) continue
+                val addrs = ni.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val a = addrs.nextElement()
+                    if (a is Inet4Address && !a.isLoopbackAddress) {
+                        return a.hostAddress
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "findLocalIpv4", t)
+        }
+        return null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readSsid(context: Context): String? {
+        return try {
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val ssid = wm.connectionInfo?.ssid?.trim('"')
+            if (ssid.isNullOrBlank() || ssid == "<unknown ssid>") null else ssid
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Prefer LAN host when both sides report private IPs (optionally same wifi hint).
+     * Otherwise use public STUN mapping.
+     */
+    fun preferLanPath(self: Snapshot, peerLocalIp: String?, peerWifiHint: String?): Boolean {
+        val a = self.localIp
+        val b = peerLocalIp
+        if (a.isNullOrBlank() || b.isNullOrBlank()) return false
+        if (!PeerEndpoint.isPrivateIp(a) || !PeerEndpoint.isPrivateIp(b)) return false
+        // Same /16 or /24 family on home LAN is a strong hint
+        val aParts = a.split(".")
+        val bParts = b.split(".")
+        if (aParts.size == 4 && bParts.size == 4) {
+            if (aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]) {
+                return true
+            }
+        }
+        if (!self.wifiSsid.isNullOrBlank() && self.wifiSsid == peerWifiHint) return true
+        return false
+    }
+}

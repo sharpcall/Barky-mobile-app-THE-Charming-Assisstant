@@ -58,6 +58,26 @@ class SettingsActivity : AppCompatActivity() {
             ).show()
         }
 
+        val firebaseReg = findViewById<MaterialCheckBox>(R.id.firebase_registry_enabled)
+        val firebaseHelp = findViewById<android.widget.TextView>(R.id.firebase_device_id_label)
+        val deviceId = com.example.barky.net.DeviceIdentity.deviceId(this)
+        firebaseHelp.text = getString(R.string.settings_firebase_registry_help, deviceId)
+        firebaseReg.isChecked = BarkyPrefs.isFirebaseRegistryEnabled(this)
+        firebaseReg.setOnCheckedChangeListener { _, checked ->
+            BarkyPrefs.setFirebaseRegistryEnabled(this, checked)
+            if (checked && !com.example.barky.net.FirebasePeerDirectory.isConfigured(this)) {
+                Toast.makeText(this, R.string.settings_firebase_not_configured, Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(
+                    this,
+                    if (checked) R.string.settings_firebase_on else R.string.settings_firebase_off,
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            // Nudge service to register soon
+            WalkieTalkieService.start(this)
+        }
+
         val conversion = findViewById<MaterialCheckBox>(R.id.unit_conversion_enabled)
         conversion.isChecked = BarkyPrefs.isConversionEnabled(this)
         conversion.setOnCheckedChangeListener { _, checked ->

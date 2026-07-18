@@ -23,6 +23,11 @@
     <string name="settings_wifi_only_help">Checked (default): phones find each other only on the same Wi‑Fi.\nUnchecked: Internet mode — each phone learns a public address via free public STUN (not a Barky server). Share pair codes so the phones can hole-punch. Symmetric carrier NATs may still block pure P2P; a future relay would fix hard cases.</string>
     <string name="settings_wifi_only_saved_on">Wi‑Fi only: local discovery</string>
     <string name="settings_wifi_only_saved_off">Internet pairing enabled — share codes on the main screen</string>
+    <string name="settings_firebase_registry">Register this phone on Firebase (free directory)</string>
+    <string name="settings_firebase_registry_help">Publishes LAN + public IP (STUN) so remote phones can find each other. Media stays peer-to-peer. Configure project IDs in firebase_config.xml — see docs/FIREBASE_SETUP.md.\nDevice ID: %1$s</string>
+    <string name="settings_firebase_on">Firebase registry ON (heartbeat every ~45s)</string>
+    <string name="settings_firebase_off">Firebase registry OFF</string>
+    <string name="settings_firebase_not_configured">Firebase not configured yet (YOUR_* placeholders in firebase_config.xml)</string>
 
     <string name="walkie_internet_title">Internet pair (no central Barky server)</string>
     <string name="walkie_my_code_waiting">Your pair code: discovering…</string>

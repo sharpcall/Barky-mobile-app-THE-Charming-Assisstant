@@ -2,6 +2,12 @@
 
 Android walkie / companion app (same Wi‑Fi video messages, optional internet pair codes, unit conversion overlay settings).
 
+## Firebase free directory (optional remote discovery)
+
+See **[docs/FIREBASE_SETUP.md](docs/FIREBASE_SETUP.md)**.  
+Put project id + API key in `app/src/main/res/values/firebase_config.xml`, enable **Firebase registry** in Settings.  
+Media stays peer-to-peer (Wi‑Fi first, then public STUN IPs); Firebase only stores registration / lookup fields.
+
 ## Build
 
 - Open the `barky` folder in Android Studio  

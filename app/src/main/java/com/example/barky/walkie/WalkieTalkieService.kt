@@ -11,7 +11,9 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.barky.BarkyPrefs
@@ -27,6 +29,7 @@ class WalkieTalkieService : Service() {
     }
 
     private val binder = LocalBinder()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var engine: WalkieTalkieEngine? = null
     /** True only when the user/app explicitly requested stop — skip auto-respawn. */
     private var intentionalStop = false
@@ -255,7 +258,38 @@ class WalkieTalkieService : Service() {
         if (BarkyPrefs.isGpsEnabled(this)) {
             engine?.setGpsEnabled(true)
         }
+        startFirebaseHeartbeat()
         Log.i(TAG, "WalkieTalkieService created")
+    }
+
+    private val firebaseHeartbeat = object : Runnable {
+        override fun run() {
+            try {
+                if (BarkyPrefs.isFirebaseRegistryEnabled(this@WalkieTalkieService)) {
+                    val ver = try {
+                        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+                    } catch (_: Throwable) {
+                        "?"
+                    }
+                    com.example.barky.net.FirebasePeerDirectory.registerAsync(
+                        this@WalkieTalkieService,
+                        localUdpPort = engine?.localUdpPort() ?: 0,
+                        localVideoPort = engine?.localVideoTcpPort() ?: 0,
+                        appVersion = ver,
+                        lat = null,
+                        lon = null
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "firebase heartbeat", t)
+            }
+            mainHandler.postDelayed(this, 45_000L)
+        }
+    }
+
+    private fun startFirebaseHeartbeat() {
+        mainHandler.removeCallbacks(firebaseHeartbeat)
+        mainHandler.postDelayed(firebaseHeartbeat, 5_000L)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -344,6 +378,7 @@ class WalkieTalkieService : Service() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(firebaseHeartbeat)
         engine?.stop()
         engine = null
         uiListeners.clear()

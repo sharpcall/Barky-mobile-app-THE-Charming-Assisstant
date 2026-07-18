@@ -127,6 +127,24 @@
                         android:text="@string/settings_wifi_only_help"
                         android:textColor="@color/barky_on_surface_muted"
                         android:textSize="13sp" />
+
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/firebase_registry_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:text="@string/settings_firebase_registry"
+                        android:textColor="@color/barky_on_surface"
+                        android:textSize="15sp" />
+
+                    <TextView
+                        android:id="@+id/firebase_device_id_label"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/settings_firebase_registry_help"
+                        android:textColor="@color/barky_on_surface_muted"
+                        android:textSize="13sp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

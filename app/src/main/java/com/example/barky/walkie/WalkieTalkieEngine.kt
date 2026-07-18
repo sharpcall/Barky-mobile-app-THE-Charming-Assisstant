@@ -224,6 +224,9 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onVideoDebug(msg) }
     }
 
+    fun localUdpPort(): Int = localPort
+    fun localVideoTcpPort(): Int = localVideoPort
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
         thread(name = "walkie-start", isDaemon = true) {

@@ -23,6 +23,8 @@ object BarkyPrefs {
     const val KEY_LAN_UPDATE_HOST = "lan_update_host"
     /** Soft WAKEUP for automated tests (no loud alarm). */
     const val KEY_QUIET_TESTS = "quiet_tests"
+    /** When true: heartbeat device IP map to Firebase free-tier directory. */
+    const val KEY_FIREBASE_REGISTRY = "firebase_registry_enabled"
 
     fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -75,5 +77,12 @@ object BarkyPrefs {
 
     fun setQuietTests(context: Context, quiet: Boolean) {
         prefs(context).edit().putBoolean(KEY_QUIET_TESTS, quiet).apply()
+    }
+
+    fun isFirebaseRegistryEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_FIREBASE_REGISTRY, false)
+
+    fun setFirebaseRegistryEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_FIREBASE_REGISTRY, enabled).apply()
     }
 }
