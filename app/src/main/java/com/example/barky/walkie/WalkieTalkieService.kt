@@ -25,6 +25,7 @@ import com.example.barky.net.NetworkEndpoints
 import com.example.barky.net.NetworkPathMonitor
 import com.example.barky.update.ApkHttpServer
 import com.example.barky.update.ApkSelfUpdate
+import kotlin.concurrent.thread
 
 /**
  * Foreground service that keeps NSD + UDP video walkie alive.
@@ -433,11 +434,26 @@ class WalkieTalkieService : Service() {
         override fun run() {
             try {
                 pushFirebaseRegistration(reason = "heartbeat")
+                // Cellular: keep STUN mapping warm in background
+                if (!BarkyPrefs.isWifiOnly(this@WalkieTalkieService) &&
+                    !NetworkEndpoints.isWifi(this@WalkieTalkieService)
+                ) {
+                    thread(name = "walkie-stun-hb", isDaemon = true) {
+                        try {
+                            engine?.applyNetworkMode()
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "firebase heartbeat", t)
             }
-            // 30–60s free-tier friendly cadence (midpoint ~45s; path changes still fire immediately)
-            mainHandler.postDelayed(this, HEARTBEAT_MS)
+            val delay = if (NetworkEndpoints.isWifi(this@WalkieTalkieService)) {
+                HEARTBEAT_MS
+            } else {
+                HEARTBEAT_CELL_MS
+            }
+            mainHandler.postDelayed(this, delay)
         }
     }
 
@@ -831,10 +847,12 @@ class WalkieTalkieService : Service() {
         private const val NOTIF_ID = 42
         private const val WAKEUP_NOTIF_ID = 43
         private const val CHANNEL_WALKIE = "barky_walkie"
-        /** Periodic Firebase IP/port heartbeat (30–60s band). Path changes fire immediately. */
-        private const val HEARTBEAT_MS = 45_000L
+        /** Periodic Firebase IP/port heartbeat on Wi‑Fi. */
+        private const val HEARTBEAT_MS = 30_000L
+        /** Faster heartbeat on cellular so public STUN maps stay fresh. */
+        private const val HEARTBEAT_CELL_MS = 15_000L
         /** While media is active, re-check peer Firebase endpoints for seamless handover. */
-        private const val ACTIVE_PATH_POLL_MS = 5_000L
+        private const val ACTIVE_PATH_POLL_MS = 4_000L
         private const val CHANNEL_WAKEUP = "barky_wakeup"
         const val ACTION_STOP = "com.example.barky.walkie.STOP"
         const val ACTION_TEST_TALK_START = "com.example.barky.TEST_TALK_START"

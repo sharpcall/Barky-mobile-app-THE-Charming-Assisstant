@@ -339,11 +339,17 @@ class WalkieTalkieEngine(
                 try {
                     sendHelloTo(peer)
                     sendPathUpdateTo(peer)
-                    // Internet / cellular peer: hole-punch NAT mapping warm
+                    // Internet / cellular peer: aggressive hole-punch both ways
                     if (!com.example.barky.net.PeerEndpoint.isPrivateIp(host) &&
                         !BarkyPrefs.isWifiOnly(appContext)
                     ) {
-                        holePunchPeer(peer, rounds = 20)
+                        if (publicHost.isNullOrBlank()) {
+                            try {
+                                refreshInternetInvite()
+                            } catch (_: Throwable) {
+                            }
+                        }
+                        holePunchPeer(peer, rounds = 40)
                     }
                 } catch (_: Throwable) {
                 }
@@ -806,58 +812,99 @@ class WalkieTalkieEngine(
         return true
     }
 
+    @Volatile private var lastStunOkMs = 0L
+    @Volatile private var stunFailStreak = 0
+    @Volatile private var stunRetryScheduled = false
+
     private fun refreshInternetInvite() {
         val sock = socket
         if (sock == null || sock.isClosed) {
             postError("Internet mode: UDP socket not ready")
             return
         }
+        val onWifi = NetworkEndpoints.isWifi(appContext)
+        // Quick first when we already have a mapping or on cellular (fail-fast)
+        val quick = !onWifi || !publicHost.isNullOrBlank()
         stunExclusive = true
         val mapped = try {
-            // Let any in-flight receive timeout
             try {
-                Thread.sleep(50)
+                Thread.sleep(40)
             } catch (_: InterruptedException) {
             }
-            StunClient.discoverMappedAddress(sock)
+            StunClient.discoverMappedAddress(sock, quick = quick)
+                ?: if (quick) StunClient.discoverMappedAddress(sock, quick = false) else null
         } finally {
             stunExclusive = false
         }
         if (mapped == null) {
-            // Keep last known public mapping if any (better than blank on brief cellular blip)
-            Log.w(TAG, "STUN failed — keep last public=$publicHost:$publicUdpPort")
-            postStatus(
-                if (!publicHost.isNullOrBlank()) {
-                    "Cellular STUN busy — using last public IP $publicHost (retrying…)"
-                } else {
-                    "STUN not ready on this network yet — retrying; Wi‑Fi works best for video"
-                }
+            stunFailStreak++
+            Log.w(
+                TAG,
+                "STUN failed streak=$stunFailStreak keep last public=$publicHost:$publicUdpPort wifi=$onWifi"
             )
-            // Schedule one delayed retry (cellular brings up late)
-            mainHandler.postDelayed({
-                if (running.get() && !BarkyPrefs.isWifiOnly(appContext)) {
-                    thread(name = "walkie-stun-retry", isDaemon = true) {
-                        try {
-                            refreshInternetInvite()
-                        } catch (_: Throwable) {
-                        }
+            // Don't spam "STUN busy" on every fail — only when mapping missing or every ~20s
+            val now = System.currentTimeMillis()
+            if (publicHost.isNullOrBlank() || now - lastStunOkMs > 20_000L) {
+                postStatus(
+                    if (!publicHost.isNullOrBlank()) {
+                        "Public path: $publicHost (refreshing…)"
+                    } else {
+                        "Finding public path for cellular… (retry $stunFailStreak)"
                     }
-                }
-            }, 4_000L)
+                )
+            }
+            scheduleStunRetry(if (onWifi) 5_000L else 2_500L)
             return
         }
+        stunFailStreak = 0
+        lastStunOkMs = System.currentTimeMillis()
+        val changed = publicHost != mapped.host || publicUdpPort != mapped.port
         publicHost = mapped.host
         publicUdpPort = mapped.port
-        // Encode public UDP mapping + our TCP video listen port (video may fall back to UDP)
         val code = PeerInviteCodec.encode(mapped.host, mapped.port, localVideoPort)
         myInviteCode = code
         Log.i(
             TAG,
             "Internet invite ready public=${mapped.host}:${mapped.port} " +
-                "localUdp=$localPort localVideoTcp=$localVideoPort code=$code"
+                "localUdp=$localPort localVideoTcp=$localVideoPort wifi=$onWifi changed=$changed"
         )
-        postStatus("Public path ready ${mapped.host}:${mapped.port} (STUN)")
+        postStatus("Public path ${mapped.host}:${mapped.port}")
         mainHandler.post { listener.onInternetInviteChanged(code) }
+        // Keep NAT mapping warm on cellular
+        if (!onWifi) {
+            scheduleStunRetry(25_000L)
+        }
+        // Push Firebase + PATH_UPDATE so peers learn our public endpoint
+        if (changed) {
+            try {
+                for (p in getPeers()) {
+                    sendHelloTo(p)
+                    sendPathUpdateTo(p)
+                    if (!com.example.barky.net.PeerEndpoint.isPrivateIp(p.host)) {
+                        thread(name = "walkie-punch-path", isDaemon = true) {
+                            holePunchPeer(p, rounds = 12)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun scheduleStunRetry(delayMs: Long) {
+        if (BarkyPrefs.isWifiOnly(appContext)) return
+        if (stunRetryScheduled) return
+        stunRetryScheduled = true
+        mainHandler.postDelayed({
+            stunRetryScheduled = false
+            if (!running.get() || BarkyPrefs.isWifiOnly(appContext)) return@postDelayed
+            thread(name = "walkie-stun-retry", isDaemon = true) {
+                try {
+                    refreshInternetInvite()
+                } catch (_: Throwable) {
+                }
+            }
+        }, delayMs)
     }
 
     fun stop() {
@@ -2884,7 +2931,8 @@ class WalkieTalkieEngine(
     }
 
     private fun emitAvcAccessUnit(au: ByteArray, from: String, storeClip: Boolean) {
-        if (!avcDecoder.isReady()) avcDecoder.start(640, 480)
+        // Screen is 720x1280; camera SEE often smaller — decoder rescales
+        if (!avcDecoder.isReady()) avcDecoder.start(720, 1280)
         val bmp = avcDecoder.decodeToBitmap(au) ?: return
         if (storeClip) {
             beginIncomingIfNeeded(from)
@@ -3298,14 +3346,17 @@ class WalkieTalkieEngine(
                 val pixelOem = android.os.Build.MANUFACTURER.equals("Google", ignoreCase = true) ||
                     android.os.Build.BRAND.equals("google", ignoreCase = true)
                 // SEE/SCRN remote: all OEMs paint slower to cut flicker (encode rate unchanged)
-                val watchingRemote = requestingSee.get() || requestingScreen.get()
+                val watchingScreen = requestingScreen.get()
+                val watchingRemote = requestingSee.get() || watchingScreen
+                // SCRN: paint ~30fps. SEE camera: slightly slower to cut flicker.
                 val minGap = when {
-                    localPreview && pixelOem -> 180L
-                    localPreview -> 140L
-                    watchingRemote && pixelOem -> 110L
-                    watchingRemote -> 90L // ~11 fps UI
-                    pixelOem -> 100L
-                    else -> 66L
+                    localPreview && pixelOem -> 160L
+                    localPreview -> 120L
+                    watchingScreen -> 32L // smooth screen share UI
+                    watchingRemote && pixelOem -> 66L
+                    watchingRemote -> 50L
+                    pixelOem -> 80L
+                    else -> 50L
                 }
                 if (now - lastUiEmitAt < minGap) return
                 if (!uiEmitBusy.compareAndSet(false, true)) return
@@ -4099,24 +4150,38 @@ class WalkieTalkieEngine(
             var frames = 0
             var virtualDisplay: android.hardware.display.VirtualDisplay? = null
             var imageReader: android.media.ImageReader? = null
+            var avcEnc: com.example.barky.walkie.codec.AvcVideoEncoder? = null
             try {
-                // Give FGS mediaProjection a beat (Android 14+)
-                Thread.sleep(120)
-                // Prefer TCP video to viewer's listen port; keep retrying
+                Thread.sleep(100)
                 var tcpOk = openVideoOut(peer)
                 if (!tcpOk) {
-                    Log.w(TAG, "SCREEN TCP not ready — will use UDP MONITOR_VIDEO + retry TCP")
+                    Log.w(TAG, "SCREEN TCP not ready — UDP monitor until retry")
                 }
-                val dm = appContext.resources.displayMetrics
-                // Fixed capture size — avoids OEM density/row-stride surprises
-                val w = 540
-                val h = 960
-                val density = dm.densityDpi.coerceIn(160, 480)
+                // Smooth/fast: 720p-ish @ ~30fps, H.264 when peer supports it
+                val w = 720
+                val h = 1280
+                val density = appContext.resources.displayMetrics.densityDpi.coerceIn(160, 480)
+                val useAvc = peerWantsAvc(peer.host)
+                if (useAvc) {
+                    avcEnc = com.example.barky.walkie.codec.AvcVideoEncoder(
+                        width = w,
+                        height = h,
+                        bitRate = com.example.barky.walkie.codec.AvcVideoEncoder.SCREEN_BITRATE,
+                        frameRate = com.example.barky.walkie.codec.AvcVideoEncoder.SCREEN_FRAME_RATE,
+                        iFrameIntervalSec = 1
+                    )
+                    if (!avcEnc.start()) {
+                        Log.w(TAG, "SCREEN AVC encoder failed — JPEG fallback")
+                        avcEnc.release()
+                        avcEnc = null
+                    } else {
+                        Log.i(TAG, "SCREEN using H.264/AVC ${w}x$h @30fps")
+                    }
+                }
                 val reader = android.media.ImageReader.newInstance(
                     w, h, android.graphics.PixelFormat.RGBA_8888, 4
                 )
                 imageReader = reader
-                // Android 14+: Callback MUST be registered before createVirtualDisplay
                 try {
                     projection.registerCallback(object : android.media.projection.MediaProjection.Callback() {
                         override fun onStop() {
@@ -4125,7 +4190,7 @@ class WalkieTalkieEngine(
                         }
                     }, mainHandler)
                 } catch (t: Throwable) {
-                    Log.w(TAG, "projection callback (may already be registered)", t)
+                    Log.w(TAG, "projection callback", t)
                 }
                 val vdFlags =
                     android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or
@@ -4135,18 +4200,17 @@ class WalkieTalkieEngine(
                     w, h, density,
                     vdFlags,
                     reader.surface, null, null
-                )
-                if (virtualDisplay == null) {
-                    throw IllegalStateException("createVirtualDisplay returned null")
-                }
+                ) ?: throw IllegalStateException("createVirtualDisplay returned null")
                 Log.i(
                     TAG,
-                    "VirtualDisplay created ${w}x$h dens=$density → ${peer.host} " +
-                        "udp=${peer.port} v=${peer.videoPort}"
+                    "VirtualDisplay ${w}x$h dens=$density avc=${avcEnc != null} → " +
+                        "${peer.host} udp=${peer.port} v=${peer.videoPort}"
                 )
                 var lastTx = 0L
                 var lastTcpRetry = 0L
                 var nullImages = 0
+                // ~30 fps target (33ms). Was 80ms (~12fps) — felt choppy.
+                val minIntervalMs = 33L
                 while (servingScreen.get() && running.get()) {
                     val image = try {
                         reader.acquireLatestImage()
@@ -4158,38 +4222,58 @@ class WalkieTalkieEngine(
                         if (nullImages == 40 || nullImages % 150 == 0) {
                             Log.w(TAG, "SCREEN no frames yet nullImages=$nullImages")
                         }
-                        Thread.sleep(25)
+                        Thread.sleep(8)
                         continue
                     }
                     nullImages = 0
                     try {
                         val now = System.currentTimeMillis()
-                        if (now - lastTx < 80) {
+                        if (now - lastTx < minIntervalMs) {
                             image.close()
                             continue
                         }
                         lastTx = now
-                        if (!tcpOk && now - lastTcpRetry > 1200) {
+                        if (!tcpOk && now - lastTcpRetry > 800) {
                             lastTcpRetry = now
                             tcpOk = openVideoOut(peer)
                         }
-                        val jpeg = rgbaImageToJpeg(image, w, h) ?: continue
-                        // Prefer TCP (same as SEE). Always also UDP MONITOR so viewer sees frames
-                        // even when TCP is blocked.
-                        val viaTcp = tcpOk && sendVideoFrameTcp(jpeg)
-                        if (!viaTcp) tcpOk = false
-                        val viaUdp = sendMonitorVideoUdp(jpeg, peer)
-                        if (viaTcp || viaUdp) {
+                        val enc = avcEnc
+                        var sent = false
+                        if (enc != null && enc.isReady()) {
+                            val bmp = rgbaImageToBitmap(image, w, h)
+                            if (bmp != null) {
+                                val units = enc.encodeBitmap(bmp)
+                                bmp.recycle()
+                                for (au in units) {
+                                    val viaTcp = tcpOk && sendVideoFrameTcp(au, avc = true)
+                                    if (!viaTcp) {
+                                        tcpOk = false
+                                        sent = sendMonitorVideoAvcUdp(au, peer) || sent
+                                    } else {
+                                        sent = true
+                                    }
+                                }
+                            }
+                        }
+                        if (!sent) {
+                            // JPEG path (fallback or no AVC units yet)
+                            val jpeg = rgbaImageToJpeg(image, w, h, quality = 72) ?: continue
+                            val viaTcp = tcpOk && sendVideoFrameTcp(jpeg)
+                            if (!viaTcp) tcpOk = false
+                            // Prefer TCP when up (smooth). UDP only as backup to avoid double load.
+                            sent = viaTcp || sendMonitorVideoUdp(jpeg, peer)
+                        }
+                        if (sent) {
                             frames++
-                            if (frames == 1 || frames % 30 == 0) {
+                            if (frames == 1 || frames % 60 == 0) {
                                 Log.i(
                                     TAG,
-                                    "SCREEN_TX n=$frames bytes=${jpeg.size} tcp=$viaTcp udp=$viaUdp " +
+                                    "SCREEN_TX n=$frames avc=${enc != null} tcp=$tcpOk " +
                                         "→ ${peer.host}:${peer.port}"
                                 )
                             }
                         } else if (frames == 0) {
-                            Log.w(TAG, "SCREEN_TX failed tcp+udp to ${peer.host}:${peer.port}")
+                            Log.w(TAG, "SCREEN_TX failed to ${peer.host}:${peer.port}")
                         }
                     } catch (t: Throwable) {
                         Log.w(TAG, "screen frame", t)
@@ -4205,6 +4289,10 @@ class WalkieTalkieEngine(
                 postError("Screen share failed: ${t.message}")
             } finally {
                 try {
+                    avcEnc?.release()
+                } catch (_: Exception) {
+                }
+                try {
                     virtualDisplay?.release()
                 } catch (_: Exception) {
                 }
@@ -4212,7 +4300,6 @@ class WalkieTalkieEngine(
                     imageReader?.close()
                 } catch (_: Exception) {
                 }
-                // Do NOT stop MediaProjection if held for auto-share re-use
                 val held = com.example.barky.screen.MediaProjectionHolder.get()
                 if (held !== projection) {
                     try {
@@ -4227,7 +4314,7 @@ class WalkieTalkieEngine(
                 Log.i(TAG, "SCREEN serve end frames=$frames")
             }
         }
-        postStatus("Sharing screen with contact…")
+        postStatus("Sharing screen (smooth)…")
         Log.i(TAG, "SCREEN serve START → ${peer.host}:udp=${peer.port} video=${peer.videoPort}")
     }
 
@@ -4237,8 +4324,7 @@ class WalkieTalkieEngine(
         Log.i(TAG, "stopServingScreen")
     }
 
-    /** Safe RGBA ImageReader → JPEG (handles rowStride/pixelStride padding). */
-    private fun rgbaImageToJpeg(image: android.media.Image, width: Int, height: Int): ByteArray? {
+    private fun rgbaImageToBitmap(image: android.media.Image, width: Int, height: Int): android.graphics.Bitmap? {
         return try {
             val plane = image.planes[0]
             val buffer = plane.buffer
@@ -4253,13 +4339,14 @@ class WalkieTalkieEngine(
                 buffer.rewind()
                 bmp.copyPixelsFromBuffer(buffer)
             } else {
-                // Copy row-by-row into tightly packed ARGB
                 val packed = ByteArray(width * height * 4)
                 var dst = 0
                 val row = ByteArray(rowStride)
                 for (y in 0 until height) {
                     buffer.position(y * rowStride)
-                    buffer.get(row, 0, min(rowStride, buffer.remaining()))
+                    val toRead = min(rowStride, buffer.remaining())
+                    if (toRead <= 0) break
+                    buffer.get(row, 0, toRead)
                     var src = 0
                     for (x in 0 until width) {
                         packed[dst++] = row[src]
@@ -4274,8 +4361,24 @@ class WalkieTalkieEngine(
                 )
                 bmp.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(packed))
             }
+            bmp
+        } catch (t: Throwable) {
+            Log.w(TAG, "rgbaImageToBitmap", t)
+            null
+        }
+    }
+
+    /** Safe RGBA ImageReader → JPEG (handles rowStride/pixelStride padding). */
+    private fun rgbaImageToJpeg(
+        image: android.media.Image,
+        width: Int,
+        height: Int,
+        quality: Int = 70
+    ): ByteArray? {
+        return try {
+            val bmp = rgbaImageToBitmap(image, width, height) ?: return null
             val baos = java.io.ByteArrayOutputStream()
-            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, baos)
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality.coerceIn(40, 90), baos)
             bmp.recycle()
             baos.toByteArray()
         } catch (t: Throwable) {

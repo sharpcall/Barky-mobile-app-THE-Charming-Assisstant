@@ -4,29 +4,44 @@ import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.ThreadLocalRandom
 
 /**
  * Minimal STUN Binding request against public STUN servers.
  * Used only to learn this device's **public** UDP address — not an app backend.
+ *
+ * Cellular/CGNAT: fail-fast first pass, then one longer pass. Prefer short exclusive
+ * socket time so walkie RX is not blocked for tens of seconds.
  */
 object StunClient {
     data class MappedAddress(val host: String, val port: Int)
 
     private const val TAG = "StunClient"
-    private val SERVERS = listOf(
+    private val SERVERS_FAST = listOf(
         "stun.l.google.com" to 19302,
         "stun1.l.google.com" to 19302,
         "stun.cloudflare.com" to 3478
+    )
+    private val SERVERS_FULL = listOf(
+        "stun.l.google.com" to 19302,
+        "stun1.l.google.com" to 19302,
+        "stun2.l.google.com" to 19302,
+        "stun3.l.google.com" to 19302,
+        "stun.cloudflare.com" to 3478,
+        "stun.nextcloud.com" to 3478
     )
 
     /**
      * Query STUN using an existing bound socket when possible so the mapped port
      * matches the walkie UDP socket (required for hole punching).
+     *
+     * [quick] = cellular-friendly: ~3–5s max instead of multi-server multi-second stalls.
      */
-    fun discoverMappedAddress(preferSocket: DatagramSocket? = null): MappedAddress? {
+    fun discoverMappedAddress(
+        preferSocket: DatagramSocket? = null,
+        quick: Boolean = false
+    ): MappedAddress? {
         val owned: DatagramSocket
         val reuse: Boolean
         if (preferSocket != null && !preferSocket.isClosed) {
@@ -42,18 +57,44 @@ object StunClient {
             1000
         }
         try {
-            owned.soTimeout = 1500
-            for ((host, port) in SERVERS) {
+            // Pass 1: fast servers, short timeout
+            val t1 = if (quick) 900 else 1400
+            owned.soTimeout = t1
+            for ((host, port) in SERVERS_FAST) {
                 try {
-                    val result = bindingRequest(owned, host, port)
+                    val result = bindingRequest(owned, host, port, t1)
                     if (result != null) {
-                        Log.i(TAG, "STUN mapped ${result.host}:${result.port} via $host:$port")
+                        Log.i(TAG, "STUN mapped ${result.host}:${result.port} via $host:$port (fast)")
                         return result
                     }
                 } catch (t: Throwable) {
-                    Log.w(TAG, "STUN $host failed: ${t.message}")
+                    Log.w(TAG, "STUN fast $host: ${t.message}")
                 }
             }
+            if (quick) {
+                Log.w(TAG, "STUN quick pass failed")
+                return null
+            }
+            // Pass 2: full list, longer timeout (cellular settle)
+            try {
+                Thread.sleep(250)
+            } catch (_: InterruptedException) {
+                return null
+            }
+            val t2 = 2200
+            owned.soTimeout = t2
+            for ((host, port) in SERVERS_FULL) {
+                try {
+                    val result = bindingRequest(owned, host, port, t2)
+                    if (result != null) {
+                        Log.i(TAG, "STUN mapped ${result.host}:${result.port} via $host:$port (full)")
+                        return result
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "STUN full $host: ${t.message}")
+                }
+            }
+            Log.w(TAG, "STUN failed all servers")
         } finally {
             try {
                 owned.soTimeout = prevTimeout
@@ -69,9 +110,13 @@ object StunClient {
         return null
     }
 
-    private fun bindingRequest(sock: DatagramSocket, stunHost: String, stunPort: Int): MappedAddress? {
+    private fun bindingRequest(
+        sock: DatagramSocket,
+        stunHost: String,
+        stunPort: Int,
+        timeoutMs: Int
+    ): MappedAddress? {
         val txId = ByteArray(12).also { ThreadLocalRandom.current().nextBytes(it) }
-        // STUN header: type=Binding Request 0x0001, length=0, magic cookie, tx id
         val req = ByteBuffer.allocate(20)
         req.putShort(0x0001)
         req.putShort(0)
@@ -79,67 +124,64 @@ object StunClient {
         req.put(txId)
         val packet = DatagramPacket(req.array(), 20, InetAddress.getByName(stunHost), stunPort)
         sock.send(packet)
-
+        // Send twice — cellular often drops first UDP
+        try {
+            sock.send(packet)
+        } catch (_: Exception) {
+        }
         val buf = ByteArray(512)
-        val resp = DatagramPacket(buf, buf.size)
-        sock.receive(resp)
-        if (resp.length < 20) return null
-        val bb = ByteBuffer.wrap(buf, 0, resp.length)
-        val type = bb.short.toInt() and 0xFFFF
-        val length = bb.short.toInt() and 0xFFFF
-        val magic = bb.int
-        if (magic != 0x2112A442) return null
-        val rTx = ByteArray(12)
-        bb.get(rTx)
-        if (!rTx.contentEquals(txId)) return null
-        // Success response 0x0101
-        if (type != 0x0101) return null
-        var remaining = length
-        while (remaining >= 4 && bb.remaining() >= 4) {
-            val attrType = bb.short.toInt() and 0xFFFF
-            val attrLen = bb.short.toInt() and 0xFFFF
-            remaining -= 4
-            if (bb.remaining() < attrLen) break
-            val attrVal = ByteArray(attrLen)
-            bb.get(attrVal)
-            remaining -= attrLen
-            // padding to 4 bytes
-            val pad = (4 - (attrLen % 4)) % 4
-            if (pad > 0 && bb.remaining() >= pad) {
-                bb.position(bb.position() + pad)
-                remaining -= pad
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val resp = DatagramPacket(buf, buf.size)
+            try {
+                sock.receive(resp)
+            } catch (_: java.net.SocketTimeoutException) {
+                return null
             }
-            // XOR-MAPPED-ADDRESS 0x0020 or MAPPED-ADDRESS 0x0001
-            if (attrType == 0x0020 || attrType == 0x0001) {
-                val mapped = parseAddress(attrVal, xor = attrType == 0x0020, txId = rTx)
-                if (mapped != null) return mapped
-            }
+            if (resp.length < 20) continue
+            val bb = ByteBuffer.wrap(buf, 0, resp.length)
+            val type = bb.short.toInt() and 0xFFFF
+            if (type != 0x0101) continue
+            bb.short // length
+            val magic = bb.int
+            if (magic != 0x2112A442) continue
+            val rtx = ByteArray(12)
+            bb.get(rtx)
+            if (!rtx.contentEquals(txId)) continue
+            return parseMapped(bb, magic, rtx)
         }
         return null
     }
 
-    private fun parseAddress(value: ByteArray, xor: Boolean, txId: ByteArray): MappedAddress? {
-        if (value.size < 8) return null
-        val family = value[1].toInt() and 0xFF
-        var port = ((value[2].toInt() and 0xFF) shl 8) or (value[3].toInt() and 0xFF)
-        if (xor) port = port xor 0x2112
-        return when (family) {
-            0x01 -> { // IPv4
-                if (value.size < 8) return null
-                val ip = ByteArray(4)
-                for (i in 0 until 4) {
-                    var b = value[4 + i].toInt() and 0xFF
-                    if (xor) {
-                        val magic = byteArrayOf(0x21, 0x12, 0xA4.toByte(), 0x42)
-                        b = b xor (magic[i].toInt() and 0xFF)
+    private fun parseMapped(bb: ByteBuffer, magic: Int, txId: ByteArray): MappedAddress? {
+        while (bb.remaining() >= 4) {
+            val atype = bb.short.toInt() and 0xFFFF
+            val alen = bb.short.toInt() and 0xFFFF
+            if (bb.remaining() < alen) return null
+            val end = bb.position() + alen
+            // XOR-MAPPED-ADDRESS 0x0020 or MAPPED-ADDRESS 0x0001
+            if ((atype == 0x0020 || atype == 0x0001) && alen >= 8) {
+                bb.get() // reserved
+                val family = bb.get().toInt() and 0xFF
+                var port = bb.short.toInt() and 0xFFFF
+                if (atype == 0x0020) port = port xor ((magic ushr 16) and 0xFFFF)
+                if (family == 0x01 && bb.remaining() >= 4) {
+                    val ipBytes = ByteArray(4)
+                    bb.get(ipBytes)
+                    if (atype == 0x0020) {
+                        // XOR with magic cookie 0x2112A442
+                        val mc = byteArrayOf(0x21, 0x12, 0xA4.toByte(), 0x42)
+                        for (i in 0..3) {
+                            ipBytes[i] =
+                                (ipBytes[i].toInt() xor (mc[i].toInt() and 0xFF)).toByte()
+                        }
                     }
-                    ip[i] = b.toByte()
+                    val host = ipBytes.joinToString(".") { (it.toInt() and 0xFF).toString() }
+                    return MappedAddress(host, port)
                 }
-                val host = "${ip[0].toInt() and 0xFF}.${ip[1].toInt() and 0xFF}." +
-                    "${ip[2].toInt() and 0xFF}.${ip[3].toInt() and 0xFF}"
-                MappedAddress(host, port)
             }
-            else -> null // skip IPv6 for now
+            bb.position(end)
         }
+        return null
     }
 }
