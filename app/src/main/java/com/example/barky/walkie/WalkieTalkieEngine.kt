@@ -110,6 +110,11 @@ class WalkieTalkieEngine(
     /** Last HELLO wall-clock per host — used to drop stale ghost peers. */
     private val peerLastHelloMs = ConcurrentHashMap<String, Long>()
     @Volatile private var selectedPeerKey: String? = null
+    /**
+     * When true, Contacts / user picked a peer — HELLO/NSD must NOT steal selection.
+     * (Was a real bug: fresher HELLO from another phone mixed S20/S918/Pixel.)
+     */
+    private val userLockedSelection = AtomicBoolean(false)
     /** Peer we asked to SEE (so peer-flip targets the phone we are watching). */
     @Volatile private var seeWatchPeer: WalkiePeer? = null
 
@@ -297,6 +302,7 @@ class WalkieTalkieEngine(
             // Drop other host:port keys so selection is unique
             peers.entries.removeIf { it.value.host == host && it.key != key(renamed) }
             selectedPeerKey = key(renamed)
+            userLockedSelection.set(true)
             peers[key(renamed)] = renamed
             if (!deviceId.isNullOrBlank()) {
                 peerHostByDeviceId[deviceId] = host
@@ -304,7 +310,11 @@ class WalkieTalkieEngine(
             }
             postPeers()
             postStatus("Selected $cleanName @ $host:$udpPort")
-            Log.i(TAG, "adoptDirectoryPeer re-select $cleanName → $host (unchanged path, name fixed)")
+            Log.i(
+                TAG,
+                "adoptDirectoryPeer re-select $cleanName → $host udp=$udpPort " +
+                    "video=$vport deviceId=$deviceId LOCKED"
+            )
             return true
         }
         if (existingHost != null && existingHost != host) {
@@ -319,6 +329,7 @@ class WalkieTalkieEngine(
         } else {
             peers[key(peer)] = peer
             selectedPeerKey = key(peer)
+            userLockedSelection.set(true)
             if (!deviceId.isNullOrBlank()) {
                 peerHostByDeviceId[deviceId] = host
                 hostToDeviceId[host] = deviceId
@@ -338,10 +349,12 @@ class WalkieTalkieEngine(
                 }
             }
         }
+        userLockedSelection.set(true)
         postStatus("Selected $cleanName @ $host:$udpPort")
         Log.i(
             TAG,
-            "adoptDirectoryPeer $cleanName → $host udp=$udpPort video=$videoPort deviceId=$deviceId"
+            "adoptDirectoryPeer $cleanName → $host udp=$udpPort video=$videoPort " +
+                "deviceId=$deviceId LOCKED"
         )
         return true
     }
@@ -893,12 +906,14 @@ class WalkieTalkieEngine(
         peers.clear()
         learnedVideoPorts.clear()
         selectedPeerKey = null
+        userLockedSelection.set(false)
         postPeers()
         postStatus("Walkie stopped")
     }
 
     fun selectPeer(peer: WalkiePeer?) {
         selectedPeerKey = peer?.let { key(it) }
+        userLockedSelection.set(peer != null)
         postStatus(
             if (peer == null) "No peer selected"
             else "Selected ${peer.displayName} (${peer.host})"
@@ -2022,24 +2037,34 @@ class WalkieTalkieEngine(
         peers.entries.removeIf { it.value.host == fromHost && it.key != key(peer) }
         peers[key(peer)] = peer
         peerLastHelloMs[fromHost] = System.currentTimeMillis()
-        // Prefer freshest peer when nothing selected, or selected host went stale
-        if (selectedPeerKey == null || peers.size == 1) {
-            selectedPeerKey = key(peer)
+        // Never steal Contacts selection — only auto-pick when nothing is locked
+        if (!userLockedSelection.get()) {
+            if (selectedPeerKey == null || peers.size == 1) {
+                selectedPeerKey = key(peer)
+            }
         } else {
-            // If selected key is a different host that is older, promote this HELLO
+            // Keep lock on the same host if key rotated (port change)
             val sel = selectedPeerKey?.let { peers[it] }
-            if (sel != null && sel.host != fromHost) {
-                val selAge = peerLastHelloMs[sel.host] ?: 0L
-                val thisAge = peerLastHelloMs[fromHost] ?: 0L
-                if (thisAge - selAge > 4000L) {
-                    selectedPeerKey = key(peer)
-                    Log.i(TAG, "peer select → $fromHost (fresher HELLO than ${sel.host})")
+            if (sel == null) {
+                val byHost = peers.values.find { it.host == fromHost && peerLastHelloMs.containsKey(it.host) }
+                // Only re-bind key if selected host still matches an existing peer
+                val lockedHost = peers.values.firstOrNull {
+                    selectedPeerKey?.startsWith("${it.host}:") == true || selectedPeerKey == key(it)
+                }?.host
+                if (lockedHost != null) {
+                    peers.values.find { it.host == lockedHost }?.let { selectedPeerKey = key(it) }
                 }
+            } else if (sel.host == fromHost) {
+                selectedPeerKey = key(peer)
             }
         }
         pruneStalePeers()
         postPeers()
-        Log.i(TAG, "HELLO from $fromHost videoPort=$vport udpPort=$fromUdpPort")
+        Log.i(
+            TAG,
+            "HELLO from $fromHost videoPort=$vport udpPort=$fromUdpPort " +
+                "sel=${currentPeer()?.host} locked=${userLockedSelection.get()}"
+        )
         // Push latest GPS whenever we learn a peer (mutual map paths)
         if (locationTracker?.isEnabled() == true) {
             locationTracker?.latest()?.let { sendGpsPoint(it) }
@@ -2559,7 +2584,7 @@ class WalkieTalkieEngine(
                 val peer = WalkiePeer(serviceName, host, resolved.port, vport)
                 peers.entries.removeIf { it.value.host == host && it.key != key(peer) }
                 peers[key(peer)] = peer
-                if (peers.size == 1 || selectedPeerKey == null) {
+                if (!userLockedSelection.get() && (peers.size == 1 || selectedPeerKey == null)) {
                     selectedPeerKey = key(peer)
                 } else if (selectedPeerKey != null) {
                     val sel = peers[selectedPeerKey]
@@ -3678,13 +3703,14 @@ class WalkieTalkieEngine(
     private var screenShareThread: Thread? = null
 
     fun startListenRemote() {
-        // Selected contact only (same rule as SEE/SCRN)
-        var peer = currentPeer() ?: getPeers().firstOrNull()
+        // Selected contact only — never firstOrNull (wrong phone)
+        var peer = currentPeer()
         if (peer == null) {
             postError("No peer for LISTEN — Contacts → Select first")
             return
         }
         selectPeer(peer)
+        userLockedSelection.set(true)
         peer = currentPeer() ?: peer
         if (!requestingListen.compareAndSet(false, true)) {
             stopListenRemote()
@@ -3791,14 +3817,14 @@ class WalkieTalkieEngine(
     }
 
     fun startSeeRemote() {
-        // Prefer the contact the user Selected — never fan-out to every live phone
-        // (that mixed S20 vs S918 when both HELLO'd).
-        var peer = currentPeer() ?: seeWatchPeer ?: bestLivePeer() ?: getPeers().firstOrNull()
+        // Selected contact only — never bestLivePeer (mixed S20/S918/Pixel).
+        var peer = currentPeer() ?: seeWatchPeer
         if (peer == null) {
             postError("No peer for SEE — Contacts → Select first")
             return
         }
         selectPeer(peer)
+        userLockedSelection.set(true)
         peer = currentPeer() ?: peer
         if (!requestingSee.compareAndSet(false, true)) {
             stopSeeRemote()
@@ -3917,12 +3943,14 @@ class WalkieTalkieEngine(
      */
     fun startScreenRemote() {
         // Must be the Selected contact only — bestLivePeer mixed S20/S918
-        var peer = currentPeer() ?: screenWatchPeer ?: getPeers().firstOrNull()
+        var peer = currentPeer() ?: screenWatchPeer
         if (peer == null) {
             postError("No contact selected for SCRN — open Contacts and Select first")
             return
         }
+        // Pin selection so HELLO cannot retarget mid-SCRN
         selectPeer(peer)
+        userLockedSelection.set(true)
         peer = currentPeer() ?: peer
         if (!requestingScreen.compareAndSet(false, true)) {
             stopScreenRemote()
@@ -3936,6 +3964,7 @@ class WalkieTalkieEngine(
         val replyUdp = localPort
         val replyVideo = localVideoPort
         val target = peer
+        val lockedHost = target.host
         thread(name = "walkie-screen-req", isDaemon = true) {
             try {
                 sendHelloTo(target)
@@ -3945,9 +3974,14 @@ class WalkieTalkieEngine(
                 } else {
                     Thread.sleep(80)
                 }
-                // Same host only — all known ports for that IP (not other phones)
+                // Same host only — never fan-out to other phones
                 val ports = linkedSetOf(target.port)
-                peers.values.filter { it.host == target.host }.forEach { ports.add(it.port) }
+                peers.values.filter { it.host == lockedHost }.forEach { ports.add(it.port) }
+                Log.i(
+                    TAG,
+                    "SCREEN_REQ burst host=$lockedHost ports=$ports " +
+                        "replyUdp=$replyUdp replyVideo=$replyVideo name=${target.displayName}"
+                )
                 repeat(4) {
                     for (port in ports.filter { it > 0 }) {
                         sendScreenReq(target.copy(port = port), replyUdp, replyVideo)
@@ -3967,7 +4001,7 @@ class WalkieTalkieEngine(
         Log.i(
             TAG,
             "SCREEN_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName} " +
-                "replyUdp=$replyUdp replyVideo=$replyVideo"
+                "replyUdp=$replyUdp replyVideo=$replyVideo locked=$lockedHost"
         )
     }
 
