@@ -877,12 +877,61 @@ class MainActivity : AppCompatActivity() {
                 LanApkUpdater(this).checkAndInstall(preferLanScan = true)
                 true
             }
+            R.id.action_wireless_debug -> {
+                enableWirelessDebugging()
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
     private fun openSettings() {
         startActivity(Intent(this, SettingsActivity::class.java))
+    }
+
+    /**
+     * Turn on Wireless debugging (adb over Wi‑Fi) when possible, and always open the
+     * system Wireless debugging screen so the user can confirm / pair.
+     */
+    private fun enableWirelessDebugging() {
+        var flipped = false
+        try {
+            // Requires WRITE_SECURE_SETTINGS (granted once via adb install script)
+            val cr = contentResolver
+            android.provider.Settings.Global.putInt(cr, "adb_enabled", 1)
+            flipped = android.provider.Settings.Global.putInt(cr, "adb_wifi_enabled", 1)
+            if (flipped) {
+                Toast.makeText(this, R.string.wireless_debug_on, Toast.LENGTH_SHORT).show()
+            }
+        } catch (se: SecurityException) {
+            android.util.Log.i("Barky", "WRITE_SECURE_SETTINGS not granted — open settings UI")
+        } catch (t: Throwable) {
+            android.util.Log.w("Barky", "enableWirelessDebugging", t)
+        }
+        // Always surface the system panel (port is shown there)
+        val opened = openWirelessDebugSettings()
+        if (!flipped && opened) {
+            Toast.makeText(this, R.string.wireless_debug_open_settings, Toast.LENGTH_LONG).show()
+        } else if (!flipped && !opened) {
+            Toast.makeText(this, R.string.wireless_debug_need_dev, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openWirelessDebugSettings(): Boolean {
+        val candidates = listOf(
+            "android.settings.WIRELESS_DEBUGGING_SETTINGS",
+            "com.android.settings.APPLICATION_DEVELOPMENT_SETTINGS",
+            android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS,
+            android.provider.Settings.ACTION_DEVICE_INFO_SETTINGS
+        )
+        for (action in candidates) {
+            try {
+                startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return true
+            } catch (_: Exception) {
+            }
+        }
+        return false
     }
 
     /** Compact subtitle under "Barky": "5.29 · 07-19 14:22" */

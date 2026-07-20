@@ -6,6 +6,10 @@
 
     <string name="settings">Settings</string>
     <string name="action_lan_update">Check for update (Wi‑Fi / internet)</string>
+    <string name="action_wireless_debug">Wireless debugging ON</string>
+    <string name="wireless_debug_on">Wireless debugging enabled</string>
+    <string name="wireless_debug_open_settings">Opened Wireless debugging — turn it ON if needed</string>
+    <string name="wireless_debug_need_dev">Enable Developer options first, then try again</string>
     <string name="lan_update_searching">Looking for APK (LAN, Firebase peers, catalog)…</string>
     <string name="lan_update_found">Update found — installing…</string>
     <string name="lan_update_none">No update found. Need a phone serving APK, PC serve-apk.ps1, or Firebase _meta/app_update apkUrl.</string>

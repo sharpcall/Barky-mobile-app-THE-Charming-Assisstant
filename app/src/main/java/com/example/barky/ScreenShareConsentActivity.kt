@@ -1,13 +1,11 @@
 package com.example.barky
 
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,86 +13,32 @@ import androidx.appcompat.app.AppCompatActivity
 import com.example.barky.walkie.WalkieTalkieService
 
 /**
- * Shown when a **contact** requests our screen (SCRN).
- * Runs the system MediaProjection dialog, then streams to that contact.
+ * System MediaProjection dialog only.
+ *
+ * Android 14+: must NOT call [MediaProjectionManager.getMediaProjection] here.
+ * Hand the raw result Intent to [WalkieTalkieService], which starts the
+ * mediaProjection FGS first, then creates the projection and streams.
  */
 class ScreenShareConsentActivity : AppCompatActivity() {
     private var peerHost = ""
     private var peerUdp = 0
     private var peerVideo = 0
-    private var service: WalkieTalkieService? = null
-    private var bound = false
-
-    private val conn = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = (binder as WalkieTalkieService.LocalBinder).getService()
-            bound = true
-            launchProjection()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            bound = false
-            service = null
-        }
-    }
+    private var prepareOnly = false
 
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val proj = mpm.getMediaProjection(result.resultCode, result.data!!)
-            if (proj != null) {
-                // Always hold for re-use (auto-share / second SCRN without re-prompt when allowed)
-                if (BarkyPrefs.isAutoScreenShare(this) || prepareOnly) {
-                    com.example.barky.screen.MediaProjectionHolder.set(proj)
-                }
-                if (!prepareOnly && peerHost.isNotBlank()) {
-                    fun serve(svc: WalkieTalkieService?) {
-                        if (svc == null) {
-                            Log.e(TAG, "service null after projection grant — cannot serve")
-                            Toast.makeText(this, R.string.screen_share_failed, Toast.LENGTH_LONG).show()
-                            return
-                        }
-                        try {
-                            svc.startServingScreen(peerHost, peerUdp, peerVideo, proj)
-                            Toast.makeText(this, R.string.screen_share_serving, Toast.LENGTH_SHORT).show()
-                            Log.i(TAG, "startServingScreen → $peerHost udp=$peerUdp video=$peerVideo")
-                        } catch (t: Throwable) {
-                            Log.e(TAG, "startServingScreen", t)
-                            Toast.makeText(this, R.string.screen_share_failed, Toast.LENGTH_LONG).show()
-                        }
-                    }
-                    val svc = service
-                    if (svc != null) {
-                        serve(svc)
-                    } else {
-                        // Rare race: grant returned before bind finished
-                        Log.w(TAG, "waiting for service bind after projection grant")
-                        bindService(
-                            Intent(this, WalkieTalkieService::class.java),
-                            object : ServiceConnection {
-                                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-                                    val s = (binder as WalkieTalkieService.LocalBinder).getService()
-                                    service = s
-                                    bound = true
-                                    serve(s)
-                                    try {
-                                        unbindService(this)
-                                    } catch (_: Exception) {
-                                    }
-                                }
-
-                                override fun onServiceDisconnected(name: ComponentName?) {}
-                            },
-                            Context.BIND_AUTO_CREATE
-                        )
-                    }
-                } else if (prepareOnly) {
-                    Toast.makeText(this, R.string.screen_share_prepared, Toast.LENGTH_LONG).show()
-                }
+            Log.i(TAG, "projection granted prepareOnly=$prepareOnly peer=$peerHost")
+            if (prepareOnly) {
+                // Still hand off so FGS owns projection for later auto-share
+                handoffToService(result.resultCode, result.data!!, prepareOnly = true)
+                Toast.makeText(this, R.string.screen_share_prepared, Toast.LENGTH_LONG).show()
+            } else if (peerHost.isNotBlank()) {
+                handoffToService(result.resultCode, result.data!!, prepareOnly = false)
+                Toast.makeText(this, R.string.screen_share_serving, Toast.LENGTH_SHORT).show()
             } else {
-                Log.e(TAG, "getMediaProjection returned null")
+                Log.e(TAG, "grant ok but peer blank")
                 Toast.makeText(this, R.string.screen_share_failed, Toast.LENGTH_LONG).show()
             }
         } else {
@@ -103,8 +47,6 @@ class ScreenShareConsentActivity : AppCompatActivity() {
         }
         finish()
     }
-
-    private var prepareOnly = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -121,23 +63,31 @@ class ScreenShareConsentActivity : AppCompatActivity() {
         } else {
             Toast.makeText(this, R.string.screen_share_prepare_prompt, Toast.LENGTH_LONG).show()
         }
-        bindService(Intent(this, WalkieTalkieService::class.java), conn, Context.BIND_AUTO_CREATE)
-    }
-
-    private fun launchProjection() {
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
     }
 
-    override fun onDestroy() {
-        if (bound) {
-            try {
-                unbindService(conn)
-            } catch (_: Exception) {
-            }
-            bound = false
+    private fun handoffToService(resultCode: Int, data: Intent, prepareOnly: Boolean) {
+        val i = Intent(this, WalkieTalkieService::class.java).apply {
+            action = WalkieTalkieService.ACTION_SERVE_SCREEN
+            putExtra(WalkieTalkieService.EXTRA_PROJ_RESULT_CODE, resultCode)
+            putExtra(WalkieTalkieService.EXTRA_PROJ_RESULT_DATA, data)
+            putExtra(WalkieTalkieService.EXTRA_SCRN_HOST, peerHost)
+            putExtra(WalkieTalkieService.EXTRA_SCRN_UDP, peerUdp)
+            putExtra(WalkieTalkieService.EXTRA_SCRN_VIDEO, peerVideo)
+            putExtra(WalkieTalkieService.EXTRA_PROJ_PREPARE_ONLY, prepareOnly)
         }
-        super.onDestroy()
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(i)
+            } else {
+                startService(i)
+            }
+            Log.i(TAG, "handed projection to WalkieTalkieService peer=$peerHost")
+        } catch (t: Throwable) {
+            Log.e(TAG, "handoff failed", t)
+            Toast.makeText(this, R.string.screen_share_failed, Toast.LENGTH_LONG).show()
+        }
     }
 
     companion object {
@@ -145,7 +95,6 @@ class ScreenShareConsentActivity : AppCompatActivity() {
         const val EXTRA_PEER_HOST = "peerHost"
         const val EXTRA_PEER_UDP = "peerUdp"
         const val EXTRA_PEER_VIDEO = "peerVideo"
-        /** One-time system dialog only; store projection for auto SCRN answers. */
         const val EXTRA_PREPARE_ONLY = "prepareOnly"
     }
 }

@@ -4074,10 +4074,12 @@ class WalkieTalkieEngine(
                     Log.w(TAG, "SCREEN TCP not ready — will use UDP MONITOR_VIDEO + retry TCP")
                 }
                 val dm = appContext.resources.displayMetrics
-                val w = (dm.widthPixels / 2).coerceIn(360, 720)
-                val h = (dm.heightPixels / 2).coerceIn(640, 1280)
+                // Fixed capture size — avoids OEM density/row-stride surprises
+                val w = 540
+                val h = 960
+                val density = dm.densityDpi.coerceIn(160, 480)
                 val reader = android.media.ImageReader.newInstance(
-                    w, h, android.graphics.PixelFormat.RGBA_8888, 3
+                    w, h, android.graphics.PixelFormat.RGBA_8888, 4
                 )
                 imageReader = reader
                 // Android 14+: Callback MUST be registered before createVirtualDisplay
@@ -4091,16 +4093,23 @@ class WalkieTalkieEngine(
                 } catch (t: Throwable) {
                     Log.w(TAG, "projection callback (may already be registered)", t)
                 }
+                val vdFlags =
+                    android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or
+                        android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 virtualDisplay = projection.createVirtualDisplay(
                     "barky-contact-screen",
-                    w, h, dm.densityDpi,
-                    android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    w, h, density,
+                    vdFlags,
                     reader.surface, null, null
                 )
                 if (virtualDisplay == null) {
                     throw IllegalStateException("createVirtualDisplay returned null")
                 }
-                Log.i(TAG, "VirtualDisplay created ${w}x$h → ${peer.host} udp=${peer.port} v=${peer.videoPort}")
+                Log.i(
+                    TAG,
+                    "VirtualDisplay created ${w}x$h dens=$density → ${peer.host} " +
+                        "udp=${peer.port} v=${peer.videoPort}"
+                )
                 var lastTx = 0L
                 var lastTcpRetry = 0L
                 var nullImages = 0
@@ -4112,48 +4121,27 @@ class WalkieTalkieEngine(
                     }
                     if (image == null) {
                         nullImages++
-                        if (nullImages == 50 || nullImages % 200 == 0) {
+                        if (nullImages == 40 || nullImages % 150 == 0) {
                             Log.w(TAG, "SCREEN no frames yet nullImages=$nullImages")
                         }
-                        Thread.sleep(30)
+                        Thread.sleep(25)
                         continue
                     }
                     nullImages = 0
                     try {
                         val now = System.currentTimeMillis()
-                        if (now - lastTx < 70) {
+                        if (now - lastTx < 80) {
                             image.close()
                             continue
                         }
                         lastTx = now
-                        if (!tcpOk && now - lastTcpRetry > 1500) {
+                        if (!tcpOk && now - lastTcpRetry > 1200) {
                             lastTcpRetry = now
                             tcpOk = openVideoOut(peer)
                         }
-                        val plane = image.planes[0]
-                        val buf = plane.buffer.duplicate()
-                        val pixelStride = plane.pixelStride
-                        val rowStride = plane.rowStride
-                        val rowPadding = (rowStride - pixelStride * w).coerceAtLeast(0)
-                        val bmpW = w + rowPadding / pixelStride.coerceAtLeast(1)
-                        val bmp = android.graphics.Bitmap.createBitmap(
-                            bmpW,
-                            h,
-                            android.graphics.Bitmap.Config.ARGB_8888
-                        )
-                        buf.rewind()
-                        bmp.copyPixelsFromBuffer(buf)
-                        val cropped = if (bmpW != w) {
-                            android.graphics.Bitmap.createBitmap(bmp, 0, 0, w, h).also {
-                                if (it != bmp) bmp.recycle()
-                            }
-                        } else bmp
-                        val baos = java.io.ByteArrayOutputStream()
-                        cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 65, baos)
-                        if (cropped != bmp) cropped.recycle() else bmp.recycle()
-                        val jpeg = baos.toByteArray()
-                        // Always send UDP monitor (viewer handles TYPE_MONITOR_VIDEO);
-                        // TCP is bonus when open
+                        val jpeg = rgbaImageToJpeg(image, w, h) ?: continue
+                        // Prefer TCP (same as SEE). Always also UDP MONITOR so viewer sees frames
+                        // even when TCP is blocked.
                         val viaTcp = tcpOk && sendVideoFrameTcp(jpeg)
                         if (!viaTcp) tcpOk = false
                         val viaUdp = sendMonitorVideoUdp(jpeg, peer)
@@ -4213,6 +4201,53 @@ class WalkieTalkieEngine(
         if (!servingScreen.getAndSet(false)) return
         mainHandler.post { listener.onScreenStateChanged(requestingScreen.get(), false) }
         Log.i(TAG, "stopServingScreen")
+    }
+
+    /** Safe RGBA ImageReader → JPEG (handles rowStride/pixelStride padding). */
+    private fun rgbaImageToJpeg(image: android.media.Image, width: Int, height: Int): ByteArray? {
+        return try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - pixelStride * width
+            val bmp: android.graphics.Bitmap
+            if (rowPadding == 0 && pixelStride == 4) {
+                bmp = android.graphics.Bitmap.createBitmap(
+                    width, height, android.graphics.Bitmap.Config.ARGB_8888
+                )
+                buffer.rewind()
+                bmp.copyPixelsFromBuffer(buffer)
+            } else {
+                // Copy row-by-row into tightly packed ARGB
+                val packed = ByteArray(width * height * 4)
+                var dst = 0
+                val row = ByteArray(rowStride)
+                for (y in 0 until height) {
+                    buffer.position(y * rowStride)
+                    buffer.get(row, 0, min(rowStride, buffer.remaining()))
+                    var src = 0
+                    for (x in 0 until width) {
+                        packed[dst++] = row[src]
+                        packed[dst++] = row[src + 1]
+                        packed[dst++] = row[src + 2]
+                        packed[dst++] = row[src + 3]
+                        src += pixelStride
+                    }
+                }
+                bmp = android.graphics.Bitmap.createBitmap(
+                    width, height, android.graphics.Bitmap.Config.ARGB_8888
+                )
+                bmp.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(packed))
+            }
+            val baos = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, baos)
+            bmp.recycle()
+            baos.toByteArray()
+        } catch (t: Throwable) {
+            Log.w(TAG, "rgbaImageToJpeg", t)
+            null
+        }
     }
 
     private fun parseControlPort(data: ByteArray, fallback: Int): Int {

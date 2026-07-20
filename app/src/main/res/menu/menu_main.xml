@@ -10,6 +10,10 @@
         android:title="@string/action_lan_update"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_wireless_debug"
+        android:title="@string/action_wireless_debug"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_settings"
         android:icon="@drawable/ic_settings"
         android:title="@string/settings"

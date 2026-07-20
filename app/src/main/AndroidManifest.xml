@@ -145,6 +145,7 @@
                 <action android:name="com.example.barky.CONNECT_INVITE" />
                 <action android:name="com.example.barky.FIREBASE_LIST" />
                 <action android:name="com.example.barky.TEST_SCRN" />
+                <action android:name="com.example.barky.SERVE_SCREEN" />
                 <action android:name="com.example.barky.DUMP_PEERS" />
             </intent-filter>
         </service>

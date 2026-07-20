@@ -160,13 +160,71 @@ class WalkieTalkieService : Service() {
         peerVideo: Int,
         projection: android.media.projection.MediaProjection
     ) {
-        // Android 14+: VirtualDisplay requires FGS type mediaProjection active first
         try {
             startAsForeground("Sharing screen with contact…", withMediaProjection = true)
         } catch (t: Throwable) {
             Log.e(TAG, "mediaProjection FGS", t)
         }
         engine?.startServingScreen(peerHost, peerUdp, peerVideo, projection)
+    }
+
+    /**
+     * Android 14+ correct order:
+     * 1) FGS with mediaProjection type
+     * 2) [MediaProjectionManager.getMediaProjection]
+     * 3) VirtualDisplay / stream
+     *
+     * Consent activity must not call getMediaProjection itself.
+     */
+    private fun handleServeScreenIntent(intent: Intent) {
+        val resultCode = intent.getIntExtra(EXTRA_PROJ_RESULT_CODE, 0)
+        val data = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(EXTRA_PROJ_RESULT_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_PROJ_RESULT_DATA)
+        }
+        val peerHost = intent.getStringExtra(EXTRA_SCRN_HOST).orEmpty()
+        val peerUdp = intent.getIntExtra(EXTRA_SCRN_UDP, 0)
+        val peerVideo = intent.getIntExtra(EXTRA_SCRN_VIDEO, 0)
+        val prepareOnly = intent.getBooleanExtra(EXTRA_PROJ_PREPARE_ONLY, false)
+        Log.i(
+            TAG,
+            "SERVE_SCREEN prepareOnly=$prepareOnly peer=$peerHost udp=$peerUdp video=$peerVideo " +
+                "resultCode=$resultCode data=${data != null}"
+        )
+        if (resultCode == 0 || data == null) {
+            Log.e(TAG, "SERVE_SCREEN missing projection result")
+            return
+        }
+        try {
+            startAsForeground("Sharing screen with contact…", withMediaProjection = true)
+        } catch (t: Throwable) {
+            Log.e(TAG, "SERVE_SCREEN FGS", t)
+        }
+        // Brief yield so system registers FGS type before getMediaProjection (API 34+)
+        mainHandler.postDelayed({
+            try {
+                val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                    as android.media.projection.MediaProjectionManager
+                val proj = mpm.getMediaProjection(resultCode, data)
+                if (proj == null) {
+                    Log.e(TAG, "getMediaProjection null after FGS")
+                    return@postDelayed
+                }
+                if (prepareOnly || BarkyPrefs.isAutoScreenShare(this)) {
+                    com.example.barky.screen.MediaProjectionHolder.set(proj)
+                }
+                if (!prepareOnly && peerHost.isNotBlank()) {
+                    engine?.startServingScreen(peerHost, peerUdp, peerVideo, proj)
+                    Log.i(TAG, "SERVE_SCREEN engine started → $peerHost")
+                } else {
+                    Log.i(TAG, "SERVE_SCREEN prepared (held projection only)")
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "SERVE_SCREEN getMediaProjection/start", t)
+            }
+        }, 200L)
     }
     fun stopServingScreen() = engine?.stopServingScreen()
     fun isListeningRemote(): Boolean = engine?.isListeningRemote() == true
@@ -297,9 +355,18 @@ class WalkieTalkieService : Service() {
                 if (held != null && BarkyPrefs.isAutoScreenShare(this@WalkieTalkieService)) {
                     Log.i(TAG, "SCREEN_REQ auto-share without dialog → $peerHost")
                     try {
-                        startServingScreen(peerHost, peerUdp, peerVideo, held)
+                        startAsForeground("Sharing screen with contact…", withMediaProjection = true)
+                        mainHandler.postDelayed({
+                            try {
+                                engine?.startServingScreen(peerHost, peerUdp, peerVideo, held)
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "auto startServingScreen", t)
+                                com.example.barky.screen.MediaProjectionHolder.clear()
+                                launchScreenShareConsent(peerHost, peerUdp, peerVideo)
+                            }
+                        }, 150L)
                     } catch (t: Throwable) {
-                        Log.e(TAG, "auto startServingScreen", t)
+                        Log.e(TAG, "auto startServingScreen FGS", t)
                         com.example.barky.screen.MediaProjectionHolder.clear()
                         launchScreenShareConsent(peerHost, peerUdp, peerVideo)
                     }
@@ -609,10 +676,14 @@ class WalkieTalkieService : Service() {
                         engine?.stopScreenRemote()
                     } catch (_: Throwable) {
                     }
-                    engine?.adoptDirectoryPeer(name, host, udp, if (vport > 0) vport else udp, null)
-                    engine?.startScreenRemote()
+                    // Small delay so stop settles before start (toggle race)
+                    mainHandler.postDelayed({
+                        engine?.adoptDirectoryPeer(name, host, udp, if (vport > 0) vport else udp, null)
+                        engine?.startScreenRemote()
+                    }, 120L)
                 }
             }
+            ACTION_SERVE_SCREEN -> handleServeScreenIntent(intent)
             ACTION_DUMP_PEERS -> {
                 val list = engine?.getPeers().orEmpty()
                 Log.i(TAG, "DUMP_PEERS count=${list.size} selected=${engine?.currentSelectedPeer()?.displayName}")
@@ -782,11 +853,16 @@ class WalkieTalkieService : Service() {
         const val ACTION_CONNECT_INVITE = "com.example.barky.CONNECT_INVITE"
         const val ACTION_FIREBASE_LIST = "com.example.barky.FIREBASE_LIST"
         const val ACTION_TEST_SCRN = "com.example.barky.TEST_SCRN"
+        /** Consent activity → FGS owns MediaProjection (API 34+ order). */
+        const val ACTION_SERVE_SCREEN = "com.example.barky.SERVE_SCREEN"
         const val ACTION_DUMP_PEERS = "com.example.barky.DUMP_PEERS"
         const val EXTRA_SCRN_HOST = "scrn_host"
         const val EXTRA_SCRN_UDP = "scrn_udp"
         const val EXTRA_SCRN_VIDEO = "scrn_video"
         const val EXTRA_SCRN_NAME = "scrn_name"
+        const val EXTRA_PROJ_RESULT_CODE = "proj_result_code"
+        const val EXTRA_PROJ_RESULT_DATA = "proj_result_data"
+        const val EXTRA_PROJ_PREPARE_ONLY = "proj_prepare_only"
         const val EXTRA_BEST_QUALITY = "best"
         const val EXTRA_INVITE_CODE = "invite_code"
         const val EXTRA_WAKEUP = "extra_wakeup"
