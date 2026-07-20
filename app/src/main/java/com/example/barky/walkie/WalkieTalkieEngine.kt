@@ -825,6 +825,7 @@ class WalkieTalkieEngine(
         val onWifi = NetworkEndpoints.isWifi(appContext)
         // Quick first when we already have a mapping or on cellular (fail-fast)
         val quick = !onWifi || !publicHost.isNullOrBlank()
+        Log.i(TAG, "STUN begin quick=$quick wifi=$onWifi last=$publicHost:$publicUdpPort")
         stunExclusive = true
         val mapped = try {
             try {
@@ -836,6 +837,7 @@ class WalkieTalkieEngine(
         } finally {
             stunExclusive = false
         }
+        Log.i(TAG, "STUN end mapped=${mapped?.host}:${mapped?.port}")
         if (mapped == null) {
             stunFailStreak++
             Log.w(
@@ -2061,6 +2063,9 @@ class WalkieTalkieEngine(
 
     private fun handleHello(data: ByteArray, fromHost: String, fromUdpPort: Int) {
         if (data.size < 3) return
+        // Never treat our own IP as a peer (breaks selection / SCRN targeting)
+        val selfIp = NetworkEndpoints.findLocalIpv4()
+        if (!selfIp.isNullOrBlank() && fromHost == selfIp) return
         val vport = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
         if (vport <= 0 || vport > 65535) return
         if (data.size >= 4) {
