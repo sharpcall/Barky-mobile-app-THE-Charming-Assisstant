@@ -22,6 +22,8 @@
             app:title="@string/app_name"
             app:titleTextAppearance="@style/TextAppearance.Barky.Toolbar.Title"
             app:titleTextColor="@color/barky_on_surface"
+            app:subtitleTextAppearance="@style/TextAppearance.Barky.Toolbar.Subtitle"
+            app:subtitleTextColor="@color/barky_on_surface_muted"
             app:subtitleCentered="false" />
 
         <!-- Inset floating stage card -->

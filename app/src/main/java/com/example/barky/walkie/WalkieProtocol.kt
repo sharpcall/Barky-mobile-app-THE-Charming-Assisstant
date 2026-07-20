@@ -1,11 +1,11 @@
 package com.example.barky.walkie
 
 /**
- * Audio/control: UDP. Video: TCP preferred (Motion JPEG), UDP fallback.
+ * Audio/control: UDP. Video: TCP preferred (H.264/AVC), UDP fallback.
  *
- * **Codec:** Motion JPEG (MJPEG) — each frame is a standard JPEG still.
- * Encoder: Android `Bitmap.compress(JPEG)` / `YuvImage.compressToJpeg` (platform libjpeg).
- * No third-party native codec library.
+ * Codecs (MediaCodec — WhatsApp-class free/platform):
+ * - Voice: Opus (TYPE_AUDIO_OPUS) with PCM fallback (TYPE_AUDIO)
+ * - Video: H.264/AVC with MJPEG fallback (TYPE_VIDEO)
  */
 object WalkieProtocol {
     const val SERVICE_TYPE = "_barkytalk._udp."
@@ -43,6 +43,39 @@ object WalkieProtocol {
      * Used so either party can switch the other party’s lens during SEE.
      */
     const val TYPE_CAMERA_FLIP: Byte = 0x11
+    /**
+     * Mid-call path update after NIC / Wi‑Fi / cell change.
+     * Payload (UTF‑8 length-prefixed strings):
+     * [type]
+     * [localUdpPort:u16 BE][localVideoPort:u16 BE][publicUdpPort:u16 BE][flags:u8]
+     * [localIpLen:u8][localIp…][publicIpLen:u8][publicIp…][deviceIdLen:u8][deviceId…]
+     * flags bit0 = onWifi.
+     * Peer remaps send targets so audio/video can continue on the new address.
+     */
+    const val TYPE_PATH_UPDATE: Byte = 0x12
+    /**
+     * Request peer to share **their** screen continuously (contact screen view).
+     * Payload: [replyUdp:u16 BE][replyVideoTcp:u16 BE] (video port optional for older peers).
+     * Peer must accept MediaProjection and stream TYPE_MONITOR_VIDEO / TCP JPEG frames.
+     */
+    const val TYPE_SCREEN_REQ: Byte = 0x13
+    /** Stop peer screen share. */
+    const val TYPE_SCREEN_STOP: Byte = 0x14
+    /** Opus-encoded speech (PCM fallback remains TYPE_AUDIO). */
+    const val TYPE_AUDIO_OPUS: Byte = 0x15
+    /** H.264 access unit, same chunk header as TYPE_VIDEO. */
+    const val TYPE_VIDEO_AVC: Byte = 0x16
+    /** Continuous monitor Opus audio (LISTEN). */
+    const val TYPE_MONITOR_AUDIO_OPUS: Byte = 0x17
+    /** Continuous monitor H.264 (SEE/SCRN). */
+    const val TYPE_MONITOR_VIDEO_AVC: Byte = 0x18
+
+    /** HELLO[3] capability flags (optional 4th byte). */
+    const val CAP_OPUS: Int = 0x01
+    const val CAP_AVC: Int = 0x02
+    /** TCP payload marker: not JPEG, first payload byte after length. */
+    const val TCP_CODEC_AVC: Byte = 0x01
+    const val TCP_CODEC_JPEG: Byte = 0x00
 
     const val AUDIO_MODE_SPEAKER: Byte = 0
     const val AUDIO_MODE_HEADSET: Byte = 1

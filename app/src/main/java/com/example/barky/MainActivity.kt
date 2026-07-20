@@ -432,9 +432,9 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
-        // One compact line: "Barky  5.2 · 07-17 15:14" (no description, smaller title style)
-        supportActionBar?.subtitle = null
-        supportActionBar?.title = "${getString(R.string.app_name)}  ${appVersionSubtitle()}"
+        // Title + subtitle so version/date never overflow the top bar
+        supportActionBar?.title = getString(R.string.app_name)
+        supportActionBar?.subtitle = appVersionSubtitle()
 
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
@@ -885,7 +885,7 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent(this, SettingsActivity::class.java))
     }
 
-    /** Compact for title: "5.2 · 07-17 15:14" (no description text). */
+    /** Compact subtitle under "Barky": "5.29 · 07-19 14:22" */
     private fun appVersionSubtitle(): String {
         return try {
             val pi = if (Build.VERSION.SDK_INT >= 33) {
@@ -898,7 +898,7 @@ class MainActivity : AppCompatActivity() {
                 packageManager.getPackageInfo(packageName, 0)
             }
             val raw = pi.versionName ?: "?"
-            // "5.2-listen-see-quiet" → "5.2"
+            // Keep short version + optional tag start: "5.29-violet-pulse" → "5.29"
             val shortVer = raw.substringBefore('-').ifBlank { raw }
             val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
             "$shortVer · ${fmt.format(Date(pi.lastUpdateTime))}"

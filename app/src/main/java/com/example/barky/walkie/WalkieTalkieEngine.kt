@@ -328,6 +328,12 @@ class WalkieTalkieEngine(
                 try {
                     sendHelloTo(peer)
                     sendPathUpdateTo(peer)
+                    // Internet / cellular peer: hole-punch NAT mapping warm
+                    if (!com.example.barky.net.PeerEndpoint.isPrivateIp(host) &&
+                        !BarkyPrefs.isWifiOnly(appContext)
+                    ) {
+                        holePunchPeer(peer, rounds = 20)
+                    }
                 } catch (_: Throwable) {
                 }
             }
@@ -338,6 +344,32 @@ class WalkieTalkieEngine(
             "adoptDirectoryPeer $cleanName → $host udp=$udpPort video=$videoPort deviceId=$deviceId"
         )
         return true
+    }
+
+    /** UDP HELLO/PING burst so public-IP peers can receive SCRN/LISTEN on cellular. */
+    private fun holePunchPeer(peer: WalkiePeer, rounds: Int = 15) {
+        repeat(rounds) {
+            if (!running.get()) return
+            try {
+                sendHelloTo(peer)
+                val poke = byteArrayOf(WalkieProtocol.TYPE_PING)
+                sendUdp(
+                    DatagramPacket(
+                        poke,
+                        poke.size,
+                        InetAddress.getByName(peer.host),
+                        peer.port
+                    )
+                )
+            } catch (_: Throwable) {
+            }
+            try {
+                Thread.sleep(60)
+            } catch (_: InterruptedException) {
+                return
+            }
+        }
+        Log.i(TAG, "holePunch done → ${peer.host}:${peer.port}")
     }
 
     /** Strip NSD junk (Barky-Pixel8-2050-v45851 → Pixel 8 style label). */
@@ -2242,8 +2274,8 @@ class WalkieTalkieEngine(
                     continue
                 }
                 val jpeg = payload
-                // SEE remote: live TCP JPEG frames
-                if (requestingSee.get() &&
+                // SEE / SCRN remote: live TCP JPEG frames
+                if ((requestingSee.get() || requestingScreen.get()) &&
                     jpeg.size >= 2 && jpeg[0] == 0xFF.toByte() && jpeg[1] == 0xD8.toByte()
                 ) {
                     frames++
@@ -2253,9 +2285,14 @@ class WalkieTalkieEngine(
                         val live = peers.values.firstOrNull { it.host == from }
                             ?: WalkiePeer("see-$from", from, 0, learnedVideoPorts[from] ?: 0)
                         seeWatchPeer = live
+                        if (requestingScreen.get()) screenWatchPeer = live
                     }
                     if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
-                        Log.i(TAG, "SEE_VIDEO_TCP_RX n=$monitorVideoRxCount bytes=${jpeg.size} from=$from")
+                        Log.i(
+                            TAG,
+                            "SEE/SCRN_VIDEO_TCP_RX n=$monitorVideoRxCount bytes=${jpeg.size} " +
+                                "from=$from scrn=${requestingScreen.get()}"
+                        )
                     }
                     if (!replaying.get()) decodeAndEmit(jpeg, live = true)
                     continue
@@ -3895,21 +3932,28 @@ class WalkieTalkieEngine(
         seeWatchPeer = peer // reuse SEE display path for remote frames
         requestingSee.set(true)
         monitorReceiving.set(true)
-        val reply = localPort
+        monitorVideoRxCount = 0
+        val replyUdp = localPort
+        val replyVideo = localVideoPort
         val target = peer
         thread(name = "walkie-screen-req", isDaemon = true) {
             try {
                 sendHelloTo(target)
-                Thread.sleep(80)
+                sendPathUpdateTo(target)
+                if (!com.example.barky.net.PeerEndpoint.isPrivateIp(target.host)) {
+                    holePunchPeer(target, rounds = 12)
+                } else {
+                    Thread.sleep(80)
+                }
                 // Same host only — all known ports for that IP (not other phones)
                 val ports = linkedSetOf(target.port)
                 peers.values.filter { it.host == target.host }.forEach { ports.add(it.port) }
-                repeat(3) {
+                repeat(4) {
                     for (port in ports.filter { it > 0 }) {
-                        sendControlWithPort(target.copy(port = port), WalkieProtocol.TYPE_SCREEN_REQ, reply)
-                        Thread.sleep(40)
+                        sendScreenReq(target.copy(port = port), replyUdp, replyVideo)
+                        Thread.sleep(35)
                     }
-                    Thread.sleep(120)
+                    Thread.sleep(100)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "SCREEN_REQ send", t)
@@ -3920,7 +3964,11 @@ class WalkieTalkieEngine(
             listener.onScreenStateChanged(true, servingScreen.get())
         }
         postStatus("SCRN — ${peer.displayName} (${peer.host})")
-        Log.i(TAG, "SCREEN_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName}")
+        Log.i(
+            TAG,
+            "SCREEN_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName} " +
+                "replyUdp=$replyUdp replyVideo=$replyVideo"
+        )
     }
 
     fun stopScreenRemote() {
@@ -3948,13 +3996,23 @@ class WalkieTalkieEngine(
     @Volatile private var lastScreenReqUiMs = 0L
 
     private fun handleScreenReq(data: ByteArray, from: String, fromPort: Int) {
-        val payloadPort = parseControlPort(data, 0)
-        val replyPort = when {
+        val payloadUdp = parseControlPort(data, 0)
+        val payloadVideo = if (data.size >= 5) {
+            ((data[3].toInt() and 0xFF) shl 8) or (data[4].toInt() and 0xFF)
+        } else 0
+        val replyUdp = when {
             fromPort in 1..65535 -> fromPort
-            payloadPort in 1..65535 -> payloadPort
+            payloadUdp in 1..65535 -> payloadUdp
             else -> 0
         }
-        val peer = resolvePeerForStream(from, replyPort)
+        val replyVideo = when {
+            payloadVideo in 1..65535 -> payloadVideo
+            else -> learnedVideoPorts[from] ?: 0
+        }
+        if (replyVideo > 0) learnedVideoPorts[from] = replyVideo
+        val peer = resolvePeerForStream(from, replyUdp).let {
+            if (replyVideo > 0) it.copy(videoPort = replyVideo) else it
+        }
         // Burst SCRN sends many packets — only one consent dialog / auto-share attempt
         val now = System.currentTimeMillis()
         if (now - lastScreenReqUiMs < 4_000L) {
@@ -3966,7 +4024,11 @@ class WalkieTalkieEngine(
             return
         }
         lastScreenReqUiMs = now
-        Log.i(TAG, "SCREEN_REQ from $from → ask UI for MediaProjection to stream screen")
+        Log.i(
+            TAG,
+            "SCREEN_REQ from $from → MediaProjection " +
+                "replyUdp=${peer.port} replyVideo=${peer.videoPort}"
+        )
         monitorTarget = peer
         mainHandler.post {
             listener.onScreenShareRequest(peer.host, peer.port, peer.videoPort)
@@ -3987,8 +4049,13 @@ class WalkieTalkieEngine(
             Log.w(TAG, "already serving screen")
             return
         }
+        val vport = when {
+            peerVideo > 0 -> peerVideo
+            learnedVideoPorts[peerHost] != null -> learnedVideoPorts[peerHost]!!
+            else -> 0
+        }
         val peer = resolvePeerForStream(peerHost, peerUdp).let {
-            if (peerVideo > 0) it.copy(videoPort = peerVideo) else it
+            if (vport > 0) it.copy(videoPort = vport) else it
         }
         monitorTarget = peer
         servingScreen.set(true)
@@ -3999,29 +4066,44 @@ class WalkieTalkieEngine(
             var virtualDisplay: android.hardware.display.VirtualDisplay? = null
             var imageReader: android.media.ImageReader? = null
             try {
-                openVideoOut(peer)
+                // Give FGS mediaProjection a beat (Android 14+)
+                Thread.sleep(120)
+                // Prefer TCP video to viewer's listen port; keep retrying
+                var tcpOk = openVideoOut(peer)
+                if (!tcpOk) {
+                    Log.w(TAG, "SCREEN TCP not ready — will use UDP MONITOR_VIDEO + retry TCP")
+                }
                 val dm = appContext.resources.displayMetrics
                 val w = (dm.widthPixels / 2).coerceIn(360, 720)
                 val h = (dm.heightPixels / 2).coerceIn(640, 1280)
                 val reader = android.media.ImageReader.newInstance(
-                    w, h, android.graphics.PixelFormat.RGBA_8888, 2
+                    w, h, android.graphics.PixelFormat.RGBA_8888, 3
                 )
                 imageReader = reader
                 // Android 14+: Callback MUST be registered before createVirtualDisplay
-                projection.registerCallback(object : android.media.projection.MediaProjection.Callback() {
-                    override fun onStop() {
-                        Log.i(TAG, "MediaProjection onStop")
-                        servingScreen.set(false)
-                    }
-                }, mainHandler)
+                try {
+                    projection.registerCallback(object : android.media.projection.MediaProjection.Callback() {
+                        override fun onStop() {
+                            Log.i(TAG, "MediaProjection onStop")
+                            servingScreen.set(false)
+                        }
+                    }, mainHandler)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "projection callback (may already be registered)", t)
+                }
                 virtualDisplay = projection.createVirtualDisplay(
                     "barky-contact-screen",
                     w, h, dm.densityDpi,
                     android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     reader.surface, null, null
                 )
-                Log.i(TAG, "VirtualDisplay created ${w}x$h for ${peer.host}")
+                if (virtualDisplay == null) {
+                    throw IllegalStateException("createVirtualDisplay returned null")
+                }
+                Log.i(TAG, "VirtualDisplay created ${w}x$h → ${peer.host} udp=${peer.port} v=${peer.videoPort}")
                 var lastTx = 0L
+                var lastTcpRetry = 0L
+                var nullImages = 0
                 while (servingScreen.get() && running.get()) {
                     val image = try {
                         reader.acquireLatestImage()
@@ -4029,40 +4111,63 @@ class WalkieTalkieEngine(
                         null
                     }
                     if (image == null) {
-                        Thread.sleep(40)
+                        nullImages++
+                        if (nullImages == 50 || nullImages % 200 == 0) {
+                            Log.w(TAG, "SCREEN no frames yet nullImages=$nullImages")
+                        }
+                        Thread.sleep(30)
                         continue
                     }
+                    nullImages = 0
                     try {
                         val now = System.currentTimeMillis()
-                        if (now - lastTx < 80) {
+                        if (now - lastTx < 70) {
                             image.close()
                             continue
                         }
                         lastTx = now
+                        if (!tcpOk && now - lastTcpRetry > 1500) {
+                            lastTcpRetry = now
+                            tcpOk = openVideoOut(peer)
+                        }
                         val plane = image.planes[0]
-                        val buf = plane.buffer
+                        val buf = plane.buffer.duplicate()
                         val pixelStride = plane.pixelStride
                         val rowStride = plane.rowStride
-                        val rowPadding = rowStride - pixelStride * w
+                        val rowPadding = (rowStride - pixelStride * w).coerceAtLeast(0)
+                        val bmpW = w + rowPadding / pixelStride.coerceAtLeast(1)
                         val bmp = android.graphics.Bitmap.createBitmap(
-                            w + rowPadding / pixelStride.coerceAtLeast(1),
+                            bmpW,
                             h,
                             android.graphics.Bitmap.Config.ARGB_8888
                         )
+                        buf.rewind()
                         bmp.copyPixelsFromBuffer(buf)
-                        val cropped = android.graphics.Bitmap.createBitmap(bmp, 0, 0, w, h)
-                        if (bmp != cropped) bmp.recycle()
+                        val cropped = if (bmpW != w) {
+                            android.graphics.Bitmap.createBitmap(bmp, 0, 0, w, h).also {
+                                if (it != bmp) bmp.recycle()
+                            }
+                        } else bmp
                         val baos = java.io.ByteArrayOutputStream()
-                        cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, baos)
-                        cropped.recycle()
+                        cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, 65, baos)
+                        if (cropped != bmp) cropped.recycle() else bmp.recycle()
                         val jpeg = baos.toByteArray()
-                        val viaTcp = sendVideoFrameTcp(jpeg)
-                        val ok = if (viaTcp) true else sendMonitorVideoUdp(jpeg, peer)
-                        if (ok) {
+                        // Always send UDP monitor (viewer handles TYPE_MONITOR_VIDEO);
+                        // TCP is bonus when open
+                        val viaTcp = tcpOk && sendVideoFrameTcp(jpeg)
+                        if (!viaTcp) tcpOk = false
+                        val viaUdp = sendMonitorVideoUdp(jpeg, peer)
+                        if (viaTcp || viaUdp) {
                             frames++
                             if (frames == 1 || frames % 30 == 0) {
-                                Log.i(TAG, "SCREEN_TX n=$frames bytes=${jpeg.size}")
+                                Log.i(
+                                    TAG,
+                                    "SCREEN_TX n=$frames bytes=${jpeg.size} tcp=$viaTcp udp=$viaUdp " +
+                                        "→ ${peer.host}:${peer.port}"
+                                )
                             }
+                        } else if (frames == 0) {
+                            Log.w(TAG, "SCREEN_TX failed tcp+udp to ${peer.host}:${peer.port}")
                         }
                     } catch (t: Throwable) {
                         Log.w(TAG, "screen frame", t)
@@ -4074,7 +4179,8 @@ class WalkieTalkieEngine(
                     }
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "serve screen", t)
+                Log.e(TAG, "serve screen failed", t)
+                postError("Screen share failed: ${t.message}")
             } finally {
                 try {
                     virtualDisplay?.release()
@@ -4100,7 +4206,7 @@ class WalkieTalkieEngine(
             }
         }
         postStatus("Sharing screen with contact…")
-        Log.i(TAG, "SCREEN serve START → ${peer.host}:${peer.port}")
+        Log.i(TAG, "SCREEN serve START → ${peer.host}:udp=${peer.port} video=${peer.videoPort}")
     }
 
     fun stopServingScreen() {
@@ -4592,6 +4698,25 @@ class WalkieTalkieEngine(
             } catch (t: Throwable) {
                 Log.w(TAG, "sendControl $type", t)
             }
+        }
+    }
+
+    /** SCRN control: [type][replyUdp:u16][replyVideoTcp:u16] so peer can open TCP video out. */
+    private fun sendScreenReq(peer: WalkiePeer, replyUdp: Int, replyVideo: Int) {
+        try {
+            val payload = byteArrayOf(
+                WalkieProtocol.TYPE_SCREEN_REQ,
+                ((replyUdp shr 8) and 0xFF).toByte(),
+                (replyUdp and 0xFF).toByte(),
+                ((replyVideo shr 8) and 0xFF).toByte(),
+                (replyVideo and 0xFF).toByte()
+            )
+            val packet = DatagramPacket(
+                payload, payload.size, InetAddress.getByName(peer.host), peer.port
+            )
+            sendUdp(packet)
+        } catch (t: Throwable) {
+            Log.w(TAG, "sendScreenReq", t)
         }
     }
 

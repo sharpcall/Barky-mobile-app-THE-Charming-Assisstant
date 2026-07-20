@@ -26,14 +26,9 @@ import com.google.android.material.button.MaterialButton
 import java.util.concurrent.TimeUnit
 
 /**
- * Contacts = real Barky phones only.
- *
- * Rules:
- * - One row per **deviceId** (fallback: host IP). Never key only by public IP —
- *   home NAT often shares one public address across all phones.
- * - Prefer private LAN IP when both sides are on the same subnet.
- * - Seed/template Firebase docs never shown.
- * - Friendly titles (model names), not NSD junk like "Pixel8-2050-v45851".
+ * Contacts = one row per real Barky **device** (deviceId).
+ * Never list the same phone twice (LAN IP + public IP).
+ * Firebase registry is force-enabled; seeds never shown.
  */
 class ContactsActivity : AppCompatActivity() {
 
@@ -49,6 +44,9 @@ class ContactsActivity : AppCompatActivity() {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as WalkieTalkieService.LocalBinder).getService()
             bound = true
+            // Always keep directory registration on while Contacts is used
+            BarkyPrefs.setFirebaseRegistryEnabled(this@ContactsActivity, true)
+            service?.forceFirebaseRegister()
             loadContacts()
         }
 
@@ -65,7 +63,9 @@ class ContactsActivity : AppCompatActivity() {
         val udpPort: Int,
         val videoPort: Int,
         val source: String,
-        val deviceId: String?
+        val deviceId: String?,
+        val localIp: String? = null,
+        val publicIp: String? = null
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -90,7 +90,12 @@ class ContactsActivity : AppCompatActivity() {
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
 
-        refresh.setOnClickListener { loadContacts() }
+        refresh.setOnClickListener {
+            BarkyPrefs.setFirebaseRegistryEnabled(this, true)
+            service?.forceFirebaseRegister()
+            loadContacts()
+        }
+        BarkyPrefs.setFirebaseRegistryEnabled(this, true)
         WalkieTalkieService.start(this)
         bindService(Intent(this, WalkieTalkieService::class.java), conn, Context.BIND_AUTO_CREATE)
     }
@@ -157,20 +162,11 @@ class ContactsActivity : AppCompatActivity() {
         val selfId = DeviceIdentity.deviceId(this)
         val selfNet = NetworkEndpoints.snapshot(this)
         val selfIp = selfNet.localIp
-        // Key = deviceId if known, else "host:$ip" — never public-IP-only
-        val byKey = LinkedHashMap<String, ContactRow>()
-        val hostClaimed = HashSet<String>()
-
-        fun keyOf(deviceId: String?, host: String): String {
-            val id = deviceId?.takeIf { it.isNotBlank() && !it.startsWith("_") }
-            return id ?: "host:$host"
-        }
 
         fun isUglyTitle(t: String): Boolean {
             if (t.isBlank()) return true
             if (t.startsWith("udp-") || t.startsWith("path-") || t.startsWith("inet-")) return true
             if (t.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) return true
-            // NSD: Pixel8-2050-v45851
             if (t.contains(Regex("-v\\d{2,5}$"))) return true
             if (t.matches(Regex("^[A-Za-z0-9]+-\\d{4}$"))) return true
             return false
@@ -181,7 +177,6 @@ class ContactsActivity : AppCompatActivity() {
                 .removePrefix("Barky-")
                 .removePrefix("barky-")
             s = s.replace(Regex("-v\\d{2,5}$"), "")
-            // Drop random 4-digit NSD suffix (Pixel8-2050 → Pixel8)
             s = s.replace(Regex("-\\d{4}$"), "")
             if (isUglyTitle(s) || s.isBlank()) {
                 if (fallbackModel.isNotBlank()) return fallbackModel
@@ -190,70 +185,128 @@ class ContactsActivity : AppCompatActivity() {
             return s
         }
 
-        fun pickBetter(a: ContactRow, b: ContactRow): ContactRow {
-            val preferB =
-                (b.deviceId != null && a.deviceId == null) ||
-                    (b.source == "Firebase" && a.source != "Firebase") ||
-                    (isUglyTitle(a.title) && !isUglyTitle(b.title)) ||
-                    (PeerEndpoint.isPrivateIp(b.host) && !PeerEndpoint.isPrivateIp(a.host))
-            val prefer = if (preferB) b else a
-            val other = if (prefer === b) a else b
-            val host = when {
-                PeerEndpoint.isPrivateIp(prefer.host) -> prefer.host
-                PeerEndpoint.isPrivateIp(other.host) -> other.host
-                else -> prefer.host
-            }
+        fun normalizeTitleKey(t: String): String =
+            t.lowercase()
+                .replace(Regex("[^a-z0-9]"), "")
+                .replace("google", "")
+                .replace("samsung", "")
+
+        // Canonical map: deviceId → row (LAN-only temp keys use "host:…")
+        val byId = LinkedHashMap<String, ContactRow>()
+        // localIp / publicIp → deviceId for merge
+        val ipToId = HashMap<String, String>()
+
+        fun mergeRows(a: ContactRow, b: ContactRow, net: NetworkEndpoints.Snapshot): ContactRow {
+            val deviceId = a.deviceId ?: b.deviceId
             val title = when {
-                !isUglyTitle(prefer.title) -> prefer.title
-                !isUglyTitle(other.title) -> other.title
-                else -> prefer.title
+                !isUglyTitle(a.title) && a.source == "Firebase" -> a.title
+                !isUglyTitle(b.title) && b.source == "Firebase" -> b.title
+                !isUglyTitle(a.title) -> a.title
+                !isUglyTitle(b.title) -> b.title
+                else -> a.title
             }
-            return prefer.copy(
+            val localIp = a.localIp ?: b.localIp
+            val publicIp = a.publicIp ?: b.publicIp
+            // Reachability: LAN if we and peer share private subnet, else public
+            val preferLan = preferLanStrict(net, localIp)
+            val host = when {
+                preferLan && !localIp.isNullOrBlank() -> localIp
+                !preferLan && !publicIp.isNullOrBlank() -> publicIp
+                PeerEndpoint.isPrivateIp(a.host) && preferLan -> a.host
+                PeerEndpoint.isPrivateIp(b.host) && preferLan -> b.host
+                !PeerEndpoint.isPrivateIp(a.host) && !preferLan -> a.host
+                !PeerEndpoint.isPrivateIp(b.host) && !preferLan -> b.host
+                PeerEndpoint.isPrivateIp(a.host) -> a.host
+                PeerEndpoint.isPrivateIp(b.host) -> b.host
+                else -> a.host
+            }
+            val udp = when {
+                host == localIp && a.localIp == localIp -> a.udpPort
+                host == localIp && b.localIp == localIp -> b.udpPort
+                host == a.host -> a.udpPort
+                host == b.host -> b.udpPort
+                else -> a.udpPort.takeIf { it > 0 } ?: b.udpPort
+            }
+            val vport = when {
+                a.videoPort > 0 && a.videoPort != a.udpPort -> a.videoPort
+                b.videoPort > 0 && b.videoPort != b.udpPort -> b.videoPort
+                a.videoPort > 0 -> a.videoPort
+                else -> b.videoPort
+            }
+            val path = if (PeerEndpoint.isPrivateIp(host)) "Wi-Fi" else "Internet"
+            val sub = buildString {
+                append(path).append(' ').append(host).append(" UDP ").append(udp)
+                if (!localIp.isNullOrBlank() && !publicIp.isNullOrBlank() && localIp != publicIp) {
+                    append(" · also ").append(if (host == localIp) publicIp else localIp)
+                }
+                // keep version hint from either subtitle
+                val ver = listOf(a.subtitle, b.subtitle).firstNotNullOfOrNull { s ->
+                    Regex("·\\s*([\\d.]+[\\w-]*)\\s*$").find(s)?.groupValues?.getOrNull(1)
+                }
+                if (ver != null) append(" · ").append(ver)
+            }
+            return ContactRow(
                 title = title,
+                subtitle = sub,
                 host = host,
-                udpPort = if (host == prefer.host) prefer.udpPort else other.udpPort,
-                videoPort = if (host == prefer.host) prefer.videoPort else other.videoPort,
-                deviceId = prefer.deviceId ?: other.deviceId,
-                subtitle = prefer.subtitle
+                udpPort = udp,
+                videoPort = if (vport > 0) vport else udp,
+                source = if (a.source == "Firebase" || b.source == "Firebase") "Firebase" else "LAN",
+                deviceId = deviceId,
+                localIp = localIp,
+                publicIp = publicIp
             )
         }
 
-        fun put(row: ContactRow) {
+        fun store(row: ContactRow) {
             if (row.host.isBlank()) return
             if (selfIp != null && row.host == selfIp) return
-            // Never use shared public NAT IP alone as contact address when private exists later
-            val k = keyOf(row.deviceId, row.host)
-            val existing = byKey[k]
-            if (existing == null) {
-                // Also block same host under different keys
-                val hostDup = byKey.entries.find { it.value.host == row.host && it.key != k }
-                if (hostDup != null) {
-                    // Merge into hostDup preferring better name/deviceId
-                    val better = pickBetter(hostDup.value, row)
-                    byKey.remove(hostDup.key)
-                    byKey[keyOf(better.deviceId, better.host)] = better
-                    hostClaimed.add(better.host)
-                    return
+            val id = row.deviceId?.takeIf { it.isNotBlank() && !it.startsWith("_") }
+            val key = id ?: "host:${row.host}"
+
+            val existingKey = when {
+                byId.containsKey(key) -> key
+                id != null && byId.containsKey(id) -> id
+                row.localIp != null && ipToId[row.localIp] != null -> ipToId[row.localIp]!!
+                row.publicIp != null && ipToId[row.publicIp] != null -> ipToId[row.publicIp]!!
+                ipToId[row.host] != null -> ipToId[row.host]!!
+                else -> {
+                    val nt = normalizeTitleKey(row.title)
+                    if (nt.length >= 4) {
+                        byId.entries.firstOrNull { normalizeTitleKey(it.value.title) == nt }?.key
+                    } else null
                 }
-                byKey[k] = row
-                hostClaimed.add(row.host)
-                return
             }
-            byKey[k] = pickBetter(existing, row)
-            hostClaimed.add(byKey[k]!!.host)
+
+            val mergeKey = existingKey ?: key
+            val prev = byId[mergeKey]
+            val merged = if (prev == null) row else mergeRows(prev, row, selfNet)
+            val finalKey = merged.deviceId?.takeIf { it.isNotBlank() } ?: mergeKey
+            if (finalKey != mergeKey) byId.remove(mergeKey)
+            byId[finalKey] = merged
+            merged.localIp?.let { ipToId[it] = finalKey }
+            merged.publicIp?.let { ipToId[it] = finalKey }
+            ipToId[merged.host] = finalKey
         }
 
-        // 1) Firebase first (canonical names + deviceIds)
-        fun mergeLanAfterFirebase() {
+        fun addLan() {
             service?.peers?.forEach { p: WalkiePeer ->
                 if (selfIp != null && p.host == selfIp) return@forEach
-                if (hostClaimed.contains(p.host)) return@forEach
-                // Skip pure public IP ghosts when we already have private-LAN contacts
-                if (!PeerEndpoint.isPrivateIp(p.host) && byKey.values.any { PeerEndpoint.isPrivateIp(it.host) }) {
+                // If this IP already mapped to a device, skip creating a new row
+                if (ipToId.containsKey(p.host)) {
+                    // Optionally refresh ports on existing
+                    val k = ipToId[p.host]!!
+                    val prev = byId[k] ?: return@forEach
+                    if (prev.host == p.host && (p.port > 0 || p.videoPort > 0)) {
+                        byId[k] = prev.copy(
+                            udpPort = p.port.takeIf { it > 0 } ?: prev.udpPort,
+                            videoPort = p.videoPort.takeIf { it > 0 } ?: prev.videoPort
+                        )
+                    }
                     return@forEach
                 }
                 val title = humanTitle(p.displayName, p.host)
-                put(
+                store(
                     ContactRow(
                         title = title,
                         subtitle = getString(R.string.contacts_row_lan, p.host, p.port, p.videoPort),
@@ -261,50 +314,44 @@ class ContactsActivity : AppCompatActivity() {
                         udpPort = p.port,
                         videoPort = p.videoPort,
                         source = "LAN",
-                        deviceId = null
+                        deviceId = null,
+                        localIp = p.host.takeIf { PeerEndpoint.isPrivateIp(it) },
+                        publicIp = p.host.takeUnless { PeerEndpoint.isPrivateIp(it) }
                     )
                 )
             }
         }
 
         if (!FirebasePeerDirectory.isConfigured(this)) {
-            mergeLanAfterFirebase()
-            finishUi(byKey, selfNet, getString(R.string.contacts_firebase_off))
+            addLan()
+            finishUi(byId, selfNet, getString(R.string.contacts_firebase_off))
             return
         }
-        if (!BarkyPrefs.isFirebaseRegistryEnabled(this)) {
-            mergeLanAfterFirebase()
-            finishUi(byKey, selfNet, getString(R.string.contacts_registry_disabled))
-            return
-        }
+
+        // Force registry for directory
+        BarkyPrefs.setFirebaseRegistryEnabled(this, true)
 
         FirebasePeerDirectory.listAllAsync(this, selfId) { remote ->
             val now = System.currentTimeMillis()
             for (ep in remote) {
                 if (!isRealContactDevice(ep, selfId, now, selfIp)) continue
-                // Always prefer LAN host when peer has a private local IP and we do too
                 val preferLan = preferLanStrict(selfNet, ep.localIp)
                 val host = when {
-                    preferLan && !ep.localIp.isNullOrBlank() -> ep.localIp
-                    !ep.localIp.isNullOrBlank() && PeerEndpoint.isPrivateIp(ep.localIp) &&
-                        selfIp != null && PeerEndpoint.isPrivateIp(selfIp) -> ep.localIp
-                    !ep.publicIp.isNullOrBlank() -> ep.publicIp
-                    !ep.localIp.isNullOrBlank() -> ep.localIp
-                    else -> null
-                } ?: continue
+                    preferLan && !ep.localIp.isNullOrBlank() -> ep.localIp!!
+                    !preferLan && !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
+                    !ep.localIp.isNullOrBlank() -> ep.localIp!!
+                    !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
+                    else -> continue
+                }
                 if (selfIp != null && host == selfIp) continue
-                val udp = if (host == ep.localIp && ep.localUdpPort > 0) {
-                    ep.localUdpPort
-                } else if (ep.publicUdpPort > 0 && host == ep.publicIp) {
-                    ep.publicUdpPort
-                } else {
-                    ep.localUdpPort.takeIf { it > 0 } ?: ep.publicUdpPort
+                val udp = when {
+                    host == ep.localIp && ep.localUdpPort > 0 -> ep.localUdpPort
+                    host == ep.publicIp && ep.publicUdpPort > 0 -> ep.publicUdpPort
+                    ep.localUdpPort > 0 -> ep.localUdpPort
+                    else -> ep.publicUdpPort
                 }
                 if (udp <= 0) continue
-                val vport = when {
-                    ep.localVideoPort > 0 -> ep.localVideoPort
-                    else -> udp
-                }
+                val vport = ep.localVideoPort.takeIf { it > 0 } ?: udp
                 val path = if (PeerEndpoint.isPrivateIp(host)) "Wi-Fi" else "Internet"
                 val age = now - ep.updatedAtMs
                 val online = age in 0..TimeUnit.MINUTES.toMillis(5)
@@ -322,7 +369,7 @@ class ContactsActivity : AppCompatActivity() {
                     if (online) append(" · online") else append(" · last seen ").append(age / 60_000L).append("m")
                     if (ep.appVersion.isNotBlank()) append(" · ").append(ep.appVersion)
                 }
-                put(
+                store(
                     ContactRow(
                         title = title,
                         subtitle = sub,
@@ -330,31 +377,37 @@ class ContactsActivity : AppCompatActivity() {
                         udpPort = udp,
                         videoPort = vport,
                         source = "Firebase",
-                        deviceId = ep.deviceId
+                        deviceId = ep.deviceId,
+                        localIp = ep.localIp,
+                        publicIp = ep.publicIp
                     )
                 )
             }
-            mergeLanAfterFirebase()
-            runOnUiThread { finishUi(byKey, selfNet, null) }
+            addLan()
+            // Final pass: collapse any remaining title-key duplicates
+            val collapsed = LinkedHashMap<String, ContactRow>()
+            for (r in byId.values) {
+                val tk = r.deviceId?.takeIf { it.isNotBlank() }
+                    ?: "t:${normalizeTitleKey(r.title).ifBlank { r.host }}"
+                val prev = collapsed[tk]
+                collapsed[tk] = if (prev == null) r else mergeRows(prev, r, selfNet)
+            }
+            runOnUiThread { finishUi(collapsed, selfNet, null) }
         }
     }
 
-    /**
-     * Prefer LAN when both sides report private IPs on same /16 (home/office).
-     * Stricter than generic path so we never collapse multiple phones onto one public IP.
-     */
     private fun preferLanStrict(self: NetworkEndpoints.Snapshot, peerLocalIp: String?): Boolean {
         val a = self.localIp
         val b = peerLocalIp
         if (a.isNullOrBlank() || b.isNullOrBlank()) return false
         if (!PeerEndpoint.isPrivateIp(a) || !PeerEndpoint.isPrivateIp(b)) return false
+        // Same /16 or both private and self on Wi‑Fi
         val aParts = a.split(".")
         val bParts = b.split(".")
         if (aParts.size == 4 && bParts.size == 4) {
-            // same /16 is enough for typical home 192.168.x
             if (aParts[0] == bParts[0] && aParts[1] == bParts[1]) return true
         }
-        return NetworkEndpoints.preferLanPath(self, peerLocalIp, null)
+        return self.onWifi && NetworkEndpoints.preferLanPath(self, peerLocalIp, null)
     }
 
     private fun finishUi(
@@ -376,7 +429,7 @@ class ContactsActivity : AppCompatActivity() {
             Log.i(
                 TAG,
                 "CONTACT ${r.title} host=${r.host} udp=${r.udpPort} v=${r.videoPort} " +
-                    "src=${r.source} id=${r.deviceId?.take(12)}"
+                    "src=${r.source} id=${r.deviceId?.take(12)} local=${r.localIp} pub=${r.publicIp}"
             )
         }
         Log.i(TAG, "contacts_ready count=${rows.size} self=${selfNet.localIp}")
@@ -402,8 +455,7 @@ class ContactsActivity : AppCompatActivity() {
         }
         if (ep.appVersion.equals("seed", true)) return false
         if (ep.localIp.isNullOrBlank() && ep.publicIp.isNullOrBlank()) return false
-        if (selfIp != null && (ep.localIp == selfIp)) return false
-        // Stale > 2 hours — drop
+        if (selfIp != null && ep.localIp == selfIp) return false
         if (ep.updatedAtMs > 0L && now - ep.updatedAtMs > TimeUnit.HOURS.toMillis(2)) return false
         return true
     }

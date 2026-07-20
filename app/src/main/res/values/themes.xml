@@ -66,12 +66,16 @@
         <item name="strokeWidth">1dp</item>
     </style>
 
-    <!-- Compact single-line title: "Barky  5.2 · 07-17 15:14" -->
     <style name="TextAppearance.Barky.Toolbar.Title" parent="TextAppearance.MaterialComponents.Headline6">
-        <item name="android:textSize">16sp</item>
+        <item name="android:textSize">18sp</item>
         <item name="android:textColor">@color/barky_on_surface</item>
         <item name="android:textStyle">bold</item>
         <item name="android:fontFamily">sans-serif-medium</item>
         <item name="android:letterSpacing">0.01</item>
+    </style>
+
+    <style name="TextAppearance.Barky.Toolbar.Subtitle" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/barky_on_surface_muted</item>
     </style>
 </resources>

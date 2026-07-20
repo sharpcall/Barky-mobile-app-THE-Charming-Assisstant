@@ -173,12 +173,21 @@ class WalkieTalkieService : Service() {
     fun isSeeingRemote(): Boolean = engine?.isSeeingRemote() == true
     fun isRequestingScreen(): Boolean = engine?.isRequestingScreen() == true
 
+    /** Force Firebase directory heartbeat (Contacts refresh / first open). */
+    fun forceFirebaseRegister() {
+        BarkyPrefs.setFirebaseRegistryEnabled(this, true)
+        pushFirebaseRegistration(reason = "force_contacts")
+    }
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
-        startAsForeground("Video walkie ready on Wi‑Fi")
+        // Contacts / cellular need directory + public mapping without a settings visit
+        BarkyPrefs.ensureConnectivityDefaults(this)
+        BarkyPrefs.setFirebaseRegistryEnabled(this, true)
+        startAsForeground("Video walkie ready…")
         engine = WalkieTalkieEngine(this, object : WalkieTalkieEngine.Listener {
             override fun onStatus(message: String) {
                 statusText = message
