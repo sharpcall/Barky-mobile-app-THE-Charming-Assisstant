@@ -17,8 +17,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.example.barky.BarkyPrefs
+import com.example.barky.net.ContactLabels
 import com.example.barky.net.DeviceIdentity
 import com.example.barky.net.NetworkEndpoints
+import com.example.barky.net.PeerEndpoint
 import com.example.barky.walkie.codec.AvcVideoDecoder
 import com.example.barky.walkie.codec.AvcVideoEncoder
 import com.example.barky.walkie.codec.OpusAudioCodec
@@ -196,6 +198,8 @@ class WalkieTalkieEngine(
     private var savedMusicVolume = -1
 
     private var cameraSource: CameraFrameSource? = null
+    /** Active SEE serve camera (own file: [SeeCameraSession]). */
+    @Volatile private var seeCameraSession: SeeCameraSession? = null
     /** Local idle preview (so flip works before HOLD). */
     private var previewSource: CameraFrameSource? = null
     @Volatile private var localPreviewWanted = false
@@ -391,19 +395,9 @@ class WalkieTalkieEngine(
         Log.i(TAG, "holePunch done → ${peer.host}:${peer.port}")
     }
 
-    /** Strip NSD junk (Barky-Pixel8-2050-v45851 → Pixel 8 style label). */
+    /** Strip NSD junk → stable label (Pixel 8 / S20 / S23). Never return bare IP. */
     private fun friendlyDisplayName(raw: String, host: String): String {
-        var s = raw.trim()
-            .removePrefix(WalkieProtocol.SERVICE_NAME_PREFIX)
-            .removePrefix("Barky-")
-        s = s.replace(Regex("-v\\d{2,5}$"), "")
-        s = s.replace(Regex("-\\d{4}$"), "")
-        if (s.startsWith("udp-") || s.startsWith("path-") || s.startsWith("inet-") ||
-            s.isBlank() || s == host || s.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))
-        ) {
-            return host
-        }
-        return s
+        return ContactLabels.fromPeerName(raw, host)
     }
 
     private fun isUglyPeerName(serviceName: String): Boolean {
@@ -544,6 +538,12 @@ class WalkieTalkieEngine(
             talkCam.switchCamera()
             Log.i(TAG, "switchCamera via cameraSource talking=${talking.get()} servingSee=${servingSee.get()}")
             return true
+        }
+        val seeCam = seeCameraSession
+        if (seeCam != null && seeCam.isRunning()) {
+            val ok = seeCam.switchCamera()
+            Log.i(TAG, "switchCamera via SeeCameraSession ok=$ok")
+            return ok
         }
         val prev = previewSource
         if (prev != null) {
@@ -1923,12 +1923,16 @@ class WalkieTalkieEngine(
         val peerPublicIp = str()
         val deviceId = str()
         val onWifi = flags and 1 != 0
-        // Prefer LAN if both we and they look private on same subnet; else public mapping.
+        // Prefer LAN only with live HELLO on private IP; else public mapping (cellular-safe).
         val selfLocal = NetworkEndpoints.findLocalIpv4()
+        val liveLanHello = peerLocalIp.isNotBlank() &&
+            PeerEndpoint.isPrivateIp(peerLocalIp) &&
+            (System.currentTimeMillis() - (peerLastHelloMs[peerLocalIp] ?: 0L)) < 15_000L
         val preferLan = NetworkEndpoints.preferLanPath(
             NetworkEndpoints.Snapshot(selfLocal, publicHost, publicUdpPort, NetworkEndpoints.isWifi(appContext), null),
             peerLocalIp.takeIf { it.isNotBlank() },
-            null
+            null,
+            liveLanHello = liveLanHello
         )
         val newHost = when {
             preferLan && peerLocalIp.isNotBlank() -> peerLocalIp
@@ -3899,16 +3903,31 @@ class WalkieTalkieEngine(
             preparePlaybackAudio(headset = false)
         }
         val reply = localPort
-        // Only this host (all known UDP ports on same IP — not other phones)
         val target = peer
+        val lockedHost = target.host
+        val viaPublic = !com.example.barky.net.PeerEndpoint.isPrivateIp(lockedHost)
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
                 sendHelloTo(target)
-                Thread.sleep(80)
+                sendPathUpdateTo(target)
+                // Cellular / internet: hole-punch like SCRN so peer can reply through NAT
+                if (viaPublic && !BarkyPrefs.isWifiOnly(appContext)) {
+                    if (publicHost.isNullOrBlank()) {
+                        try {
+                            refreshInternetInvite()
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    holePunchPeer(target, rounds = 20)
+                } else {
+                    Thread.sleep(80)
+                }
                 sendSeeReqBurst(target, reply)
                 Thread.sleep(350)
                 if (requestingSee.get()) {
                     sendSeeReqBurst(target, reply)
+                    // Keep NAT warm while waiting for first video frames
+                    if (viaPublic) holePunchPeer(target, rounds = 8)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
@@ -3924,7 +3943,7 @@ class WalkieTalkieEngine(
         Log.i(
             TAG,
             "SEE_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName} " +
-                "replyPort=$localPort withAudio=${requestingListen.get()}"
+                "replyPort=$localPort withAudio=${requestingListen.get()} public=$viaPublic"
         )
     }
 
@@ -4480,102 +4499,59 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), true) }
         // Release idle preview so Camera1 is free (critical for dual SEE — one camera only)
         stopLocalPreviewInternal()
-        // Ensure FGS still claims camera while we stream from background (YouTube / home)
         try {
             listener.onStatus("Sharing camera (SEE)…")
         } catch (_: Throwable) {
         }
-        // Video only — mic is owned by LISTEN serve (if any)
+        // Video only — mic is owned by LISTEN serve (if any). Camera in SeeCameraSession.
         monitorVideoThread = thread(name = "walkie-serve-see-video", isDaemon = true) {
             var frames = 0
+            var session: SeeCameraSession? = null
             try {
+                // Public path: warm NAT before video so cellular requester can receive
+                if (!com.example.barky.net.PeerEndpoint.isPrivateIp(peer.host)) {
+                    holePunchPeer(peer, rounds = 10)
+                }
                 val tcpOk = openVideoOut(peer)
-                // IMPORTANT: never attach Camera1 to the Activity TextureView for SEE serve.
-                // When Barky is backgrounded (YouTube, etc.) the TextureView surface is destroyed
-                // and kills the stream. Use a dedicated dummy SurfaceTexture (works under camera FGS).
                 Log.i(
                     TAG,
                     "SEE serve video start → ${peer.host}:${peer.port} tcp=$tcpOk " +
                         "vport=${peer.videoPort} bgSafeSurface=true uiTex=${uiPreviewTexture != null}"
                 )
                 val useAvc = peerWantsAvc(peer.host)
-                if (useAvc) {
-                    avcEncoder?.release()
-                    avcEncoder = AvcVideoEncoder(640, 480, 2_000_000).also { it.start() }
-                    if (avcEncoder?.isReady() != true) {
-                        avcEncoder?.release()
-                        avcEncoder = null
-                    } else {
-                        videoDebug("TX video codec=H.264/AVC 640x480")
-                    }
-                } else {
-                    videoDebug("TX video codec=MJPEG")
-                }
-                val enc = avcEncoder
-                val cam = if (enc != null && enc.isReady()) {
-                    CameraFrameSource(
-                        context = appContext,
-                        compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
-                        config = CaptureConfig.Live,
-                        preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
-                        externalSurfaceTexture = { null },
-                        onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
-                        onPreviewReady = { w, h, orient, front ->
-                            mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
-                        },
-                        onError = { msg ->
-                            videoDebug("SEE cam: $msg")
-                            Log.w(TAG, "SEE cam error: $msg")
-                        },
-                        onNv21Frame = { nv21, w, h ->
-                            if (!servingSee.get()) return@CameraFrameSource
-                            val units = enc.encodeNv21(nv21, w, h)
-                            for (au in units) {
-                                val viaTcp = sendVideoFrameTcp(au, avc = true)
-                                val ok = if (viaTcp) true else sendMonitorVideoAvcUdp(au, peer)
-                                if (ok) {
-                                    frames++
-                                    if (frames == 1 || frames % 30 == 0) {
-                                        Log.i(TAG, "SEE AVC_TX n=$frames bytes=${au.size}")
-                                    }
-                                }
-                            }
-                        },
-                        onJpegFrame = { }
-                    )
-                } else {
-                    CameraFrameSource(
-                        context = appContext,
-                        compactForUdp = { synchronized(videoOutLock) { videoOut == null } },
-                        config = CaptureConfig.Live,
-                        preferFrontCamera = BarkyPrefs.isCameraFront(appContext),
-                        externalSurfaceTexture = { null },
-                        onFacingChanged = { front -> BarkyPrefs.setCameraFront(appContext, front) },
-                        onPreviewReady = { w, h, orient, front ->
-                            mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
-                        },
-                        onError = { msg ->
-                            videoDebug("SEE cam: $msg")
-                            Log.w(TAG, "SEE cam error: $msg")
-                        }
-                    ) { jpeg ->
-                        if (!servingSee.get()) return@CameraFrameSource
+                if (useAvc) videoDebug("TX video codec=H.264/AVC 640x480")
+                else videoDebug("TX video codec=MJPEG")
+                val seeSession = SeeCameraSession(
+                    context = appContext,
+                    isActive = { servingSee.get() },
+                    isTcpConnected = { synchronized(videoOutLock) { videoOut != null } },
+                    useAvc = useAvc,
+                    onPreviewReady = { w, h, orient, front ->
+                        mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
+                    },
+                    onError = { msg ->
+                        videoDebug("SEE cam: $msg")
+                        Log.w(TAG, "SEE cam error: $msg")
+                    },
+                    onAvcUnit = { au ->
+                        val viaTcp = sendVideoFrameTcp(au, avc = true)
+                        val ok = viaTcp || sendMonitorVideoAvcUdp(au, peer)
+                        if (ok) frames++
+                    },
+                    onJpegFrame = { jpeg ->
                         val viaTcp = sendVideoFrameTcp(jpeg)
-                        val ok = if (viaTcp) true else sendMonitorVideoUdp(jpeg, peer)
-                        if (ok) {
-                            frames++
-                            if (frames == 1 || frames % 30 == 0) {
-                                Log.i(TAG, "SEE VIDEO_TX n=$frames via=${if (viaTcp) "tcp" else "udp"} bytes=${jpeg.size}")
-                            }
-                        }
+                        val ok = viaTcp || sendMonitorVideoUdp(jpeg, peer)
+                        if (ok) frames++
                     }
-                }
-                cameraSource = cam
-                if (servingSee.get()) cam.start() else cam.stop()
-                // If camera is busy (other app holds it), open fails with 0 frames —
-                // do not spin forever as "already active" (blocks retry when camera free).
+                )
+                session = seeSession
+                seeCameraSession = seeSession
+                seeSession.start()
+                // Mirror CameraFrameSource so HOLD/preview/flip guards see the busy camera
+                cameraSource = seeSession.cameraSource()
                 var waited = 0
                 while (servingSee.get() && running.get()) {
+                    frames = maxOf(frames, seeSession.framesSent())
                     if (frames == 0 && waited >= 2500) {
                         Log.w(TAG, "SEE serve abort: no frames (camera busy or open failed)")
                         postError("Camera busy — close Camera/YouTube video and try SEE again")
@@ -4584,14 +4560,17 @@ class WalkieTalkieEngine(
                     Thread.sleep(200)
                     waited += 200
                 }
-                cam.stop()
-                if (cameraSource === cam) cameraSource = null
-                avcEncoder?.release()
-                avcEncoder = null
                 closeVideoOut()
             } catch (t: Throwable) {
                 Log.w(TAG, "serve see", t)
             } finally {
+                try {
+                    session?.stop()
+                } catch (_: Throwable) {
+                }
+                if (seeCameraSession === session) seeCameraSession = null
+                // Only clear if HOLD is not using cameraSource (SEE owns it while serving)
+                if (!talking.get()) cameraSource = null
                 servingSee.set(false)
                 mainHandler.post { listener.onSeeStateChanged(requestingSee.get(), false) }
                 if (!talking.get()) maybeResumeLocalPreview()

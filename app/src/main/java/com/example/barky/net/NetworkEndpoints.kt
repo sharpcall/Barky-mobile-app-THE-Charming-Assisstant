@@ -104,12 +104,24 @@ object NetworkEndpoints {
     /**
      * Prefer LAN host when both sides report private IPs (optionally same wifi hint).
      * Otherwise use public STUN mapping.
+     *
+     * @param liveLanHello true only when we recently received HELLO from the peer's private IP.
+     *   Without a live HELLO, never stick to a stale LAN address after Wi‑Fi↔cellular moves.
      */
-    fun preferLanPath(self: Snapshot, peerLocalIp: String?, peerWifiHint: String?): Boolean {
+    fun preferLanPath(
+        self: Snapshot,
+        peerLocalIp: String?,
+        peerWifiHint: String?,
+        liveLanHello: Boolean = false
+    ): Boolean {
+        // Cellular / no Wi‑Fi: always public path (STUN)
+        if (!self.onWifi) return false
         val a = self.localIp
         val b = peerLocalIp
         if (a.isNullOrBlank() || b.isNullOrBlank()) return false
         if (!PeerEndpoint.isPrivateIp(a) || !PeerEndpoint.isPrivateIp(b)) return false
+        // Stale Firebase localIp without live HELLO → do not force dead LAN route
+        if (!liveLanHello) return false
         // Same /16 or /24 family on home LAN is a strong hint
         val aParts = a.split(".")
         val bParts = b.split(".")
@@ -117,6 +129,8 @@ object NetworkEndpoints {
             if (aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]) {
                 return true
             }
+            // Same /16 + live HELLO is enough on home routers
+            if (aParts[0] == bParts[0] && aParts[1] == bParts[1]) return true
         }
         if (!self.wifiSsid.isNullOrBlank() && self.wifiSsid == peerWifiHint) return true
         return false

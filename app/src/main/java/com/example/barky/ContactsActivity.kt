@@ -15,6 +15,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.example.barky.net.ContactLabels
 import com.example.barky.net.DeviceIdentity
 import com.example.barky.net.FirebasePeerDirectory
 import com.example.barky.net.NetworkEndpoints
@@ -28,9 +29,10 @@ import java.util.concurrent.TimeUnit
 /**
  * Contacts = one row per Firebase deviceId.
  *
- * - Title is always manufacturer + model from Firebase (never raw LAN/NSD junk).
- * - Host is private LAN IP when on same Wi‑Fi subnet, else public STUN IP.
- * - LAN HELLO only refreshes ports for a known deviceId — never creates nameless rows.
+ * - Title is always a stable device label (Pixel 8 / S20 / S23) — never "Phone 192.168.x.x".
+ * - Subtitle shows path + LAN/public IPs.
+ * - Host is private LAN only when live HELLO + same Wi‑Fi; else public STUN IP.
+ * - LAN HELLO only refreshes ports for a known deviceId — never renames the phone.
  * - Seeds/templates excluded.
  */
 class ContactsActivity : AppCompatActivity() {
@@ -172,43 +174,12 @@ class ContactsActivity : AppCompatActivity() {
             if (selfIp == null || p.host != selfIp) lanByHost[p.host] = p
         }
 
-        fun prettyTitle(ep: PeerEndpoint): String {
-            val model = ep.phoneModel.trim()
-            val mfr = ep.manufacturer.trim()
-            val fromFields = when {
-                model.isNotBlank() && mfr.isNotBlank() -> {
-                    // Avoid "samsung SM-S918W" doubling — prefer model alone if it starts with SM-
-                    if (model.startsWith("SM-", ignoreCase = true) ||
-                        model.startsWith("Pixel", ignoreCase = true)
-                    ) {
-                        if (model.startsWith("Pixel", ignoreCase = true)) model
-                        else "$mfr $model".replace(Regex("(?i)samsung\\s+samsung"), "samsung")
-                    } else {
-                        "$mfr $model"
-                    }
-                }
-                model.isNotBlank() -> model
-                mfr.isNotBlank() -> mfr
-                else -> ep.displayName.trim()
-            }.trim()
-            val cleaned = fromFields
-                .replace(Regex("(?i)^google\\s+"), "")
-                .ifBlank { ep.displayName.ifBlank { ep.deviceId.take(10) } }
-            // Friendly Galaxy labels
-            return when {
-                cleaned.contains("SM-S918", true) -> "Galaxy S23 Ultra"
-                cleaned.contains("SM-G981", true) -> "Galaxy S20"
-                cleaned.contains("Pixel", true) -> cleaned.replace(Regex("(?i)google\\s*"), "").trim()
-                    .ifBlank { "Pixel" }
-                else -> cleaned
-            }
-        }
-
         if (!FirebasePeerDirectory.isConfigured(this)) {
-            // Fallback: LAN only with host titles
+            // Fallback: LAN only — still never title with raw IP
             val lanRows = lanByHost.values.map { p ->
+                val title = ContactLabels.fromPeerName(p.displayName, p.host)
                 ContactRow(
-                    title = "Phone ${p.host}",
+                    title = title,
                     subtitle = getString(R.string.contacts_row_lan, p.host, p.port, p.videoPort),
                     host = p.host,
                     udpPort = p.port,
@@ -226,49 +197,66 @@ class ContactsActivity : AppCompatActivity() {
             val byId = LinkedHashMap<String, ContactRow>()
             for (ep in remote) {
                 if (!isRealContactDevice(ep, selfId, now, selfIp)) continue
-                val preferLan = preferLanStrict(selfNet, ep.localIp)
+                // Live HELLO only on the peer's private LAN address
+                val liveLan = ep.localIp
+                    ?.takeIf { PeerEndpoint.isPrivateIp(it) }
+                    ?.let { lanByHost[it] }
+                val preferLan = NetworkEndpoints.preferLanPath(
+                    selfNet,
+                    ep.localIp,
+                    ep.wifiHint,
+                    liveLanHello = liveLan != null
+                )
                 val host = when {
                     preferLan && !ep.localIp.isNullOrBlank() -> ep.localIp!!
-                    !preferLan && !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
-                    !ep.localIp.isNullOrBlank() -> ep.localIp!!
                     !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
+                    !ep.localIp.isNullOrBlank() -> ep.localIp!!
                     else -> continue
                 }
                 if (selfIp != null && host == selfIp) continue
 
-                // Prefer live HELLO ports when we can reach them on LAN
-                val live = listOfNotNull(ep.localIp, ep.publicIp, host)
+                // Port refresh from live HELLO (LAN or public path)
+                val liveAny = listOfNotNull(ep.localIp, ep.publicIp, host)
                     .firstNotNullOfOrNull { lanByHost[it] }
 
                 val udp = when {
-                    live != null && live.port > 0 -> live.port
+                    preferLan && liveLan != null && liveLan.port > 0 -> liveLan.port
+                    liveAny != null && liveAny.port > 0 && liveAny.host == host -> liveAny.port
                     preferLan && ep.localUdpPort > 0 -> ep.localUdpPort
-                    ep.publicUdpPort > 0 && host == ep.publicIp -> ep.publicUdpPort
+                    ep.publicUdpPort > 0 && !preferLan -> ep.publicUdpPort
                     ep.localUdpPort > 0 -> ep.localUdpPort
                     else -> ep.publicUdpPort
                 }
                 if (udp <= 0) continue
                 val vport = when {
-                    live != null && live.videoPort > 0 -> live.videoPort
+                    preferLan && liveLan != null && liveLan.videoPort > 0 -> liveLan.videoPort
+                    liveAny != null && liveAny.videoPort > 0 && liveAny.host == host -> liveAny.videoPort
+                    preferLan && ep.localVideoPort > 0 -> ep.localVideoPort
                     ep.localVideoPort > 0 -> ep.localVideoPort
                     else -> udp
                 }
-                // Always use LAN host for targeting when live HELLO exists on private IP
+                // Never pin residual private HELLO when preferLan is false (cellular ↔ Wi‑Fi)
                 val targetHost = when {
-                    live != null && PeerEndpoint.isPrivateIp(live.host) -> live.host
+                    preferLan && liveLan != null -> liveLan.host
+                    preferLan && !ep.localIp.isNullOrBlank() -> ep.localIp!!
+                    !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
                     else -> host
                 }
                 val path = if (PeerEndpoint.isPrivateIp(targetHost)) "Wi-Fi" else "Internet"
                 val age = now - ep.updatedAtMs
-                val online = age in 0..TimeUnit.MINUTES.toMillis(5) || live != null
-                val title = prettyTitle(ep)
-                val sub = buildString {
-                    append(path).append(' ').append(targetHost)
-                    append(" · UDP ").append(udp)
-                    append(" · video ").append(vport)
-                    if (online) append(" · online") else append(" · last ").append(age / 60_000L).append("m")
-                    if (ep.appVersion.isNotBlank()) append(" · ").append(ep.appVersion)
-                }
+                val online = age in 0..TimeUnit.MINUTES.toMillis(5) || liveLan != null || liveAny != null
+                val title = ContactLabels.fromEndpoint(ep)
+                val sub = ContactLabels.pathSubtitle(
+                    pathLabel = path,
+                    targetHost = targetHost,
+                    localIp = ep.localIp,
+                    publicIp = ep.publicIp,
+                    udp = udp,
+                    videoPort = vport,
+                    online = online,
+                    ageMs = age,
+                    appVersion = ep.appVersion.takeIf { it.isNotBlank() }
+                )
                 byId[ep.deviceId] = ContactRow(
                     title = title,
                     subtitle = sub,
@@ -279,18 +267,26 @@ class ContactsActivity : AppCompatActivity() {
                 )
             }
 
-            // Optional: LAN-only peers not in Firebase (rare) — label by host only, no mix-up
+            // Optional: LAN-only peers not in Firebase — stable name, never "Phone IP"
             val coveredHosts = byId.values.map { it.host }.toHashSet()
-            // Also cover Firebase local/public IPs so we don't re-add
             for (ep in remote) {
                 ep.localIp?.let { coveredHosts.add(it) }
                 ep.publicIp?.let { coveredHosts.add(it) }
             }
+            // Map remote local IPs → Firebase title for orphan LAN HELLO merge by IP
+            val titleByLanIp = HashMap<String, String>()
+            for (ep in remote) {
+                val t = ContactLabels.fromEndpoint(ep)
+                ep.localIp?.let { titleByLanIp[it] = t }
+                ep.publicIp?.let { titleByLanIp[it] = t }
+            }
             for ((h, p) in lanByHost) {
                 if (h in coveredHosts) continue
                 if (selfIp != null && h == selfIp) continue
+                val title = titleByLanIp[h]
+                    ?: ContactLabels.fromPeerName(p.displayName, p.host)
                 byId["lan:$h"] = ContactRow(
-                    title = "Phone $h",
+                    title = title,
                     subtitle = getString(R.string.contacts_row_lan, h, p.port, p.videoPort),
                     host = h,
                     udpPort = p.port,
@@ -302,22 +298,6 @@ class ContactsActivity : AppCompatActivity() {
             val listRows = byId.values.sortedBy { it.title.lowercase() }
             runOnUiThread { finishUi(listRows, selfNet, null) }
         }
-    }
-
-    private fun preferLanStrict(self: NetworkEndpoints.Snapshot, peerLocalIp: String?): Boolean {
-        val a = self.localIp
-        val b = peerLocalIp
-        if (a.isNullOrBlank() || b.isNullOrBlank()) return false
-        if (!PeerEndpoint.isPrivateIp(a) || !PeerEndpoint.isPrivateIp(b)) return false
-        val aParts = a.split(".")
-        val bParts = b.split(".")
-        if (aParts.size == 4 && bParts.size == 4) {
-            if (aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]) {
-                return true
-            }
-            if (aParts[0] == bParts[0] && aParts[1] == bParts[1]) return true
-        }
-        return self.onWifi
     }
 
     private fun finishUi(

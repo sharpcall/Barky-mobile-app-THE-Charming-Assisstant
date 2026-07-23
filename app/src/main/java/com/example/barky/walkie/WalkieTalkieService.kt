@@ -20,9 +20,11 @@ import com.example.barky.BarkyPrefs
 import com.example.barky.LanApkUpdater
 import com.example.barky.MainActivity
 import com.example.barky.R
+import com.example.barky.net.ContactLabels
 import com.example.barky.net.FirebasePeerDirectory
 import com.example.barky.net.NetworkEndpoints
 import com.example.barky.net.NetworkPathMonitor
+import com.example.barky.net.PeerEndpoint
 import com.example.barky.update.ApkHttpServer
 import com.example.barky.update.ApkSelfUpdate
 import kotlin.concurrent.thread
@@ -560,7 +562,15 @@ class WalkieTalkieService : Service() {
         for (id in ids) {
             FirebasePeerDirectory.lookupByDeviceIdAsync(this, id) { ep ->
                 if (ep == null) return@lookupByDeviceIdAsync
-                val preferLan = NetworkEndpoints.preferLanPath(selfNet, ep.localIp, ep.wifiHint)
+                // Only prefer LAN when HELLO recently arrived on the private IP
+                val liveLan = ep.localIp
+                    ?.takeIf { PeerEndpoint.isPrivateIp(it) }
+                    ?.let { lip ->
+                        eng.getPeers().any { it.host == lip }
+                    } == true
+                val preferLan = NetworkEndpoints.preferLanPath(
+                    selfNet, ep.localIp, ep.wifiHint, liveLanHello = liveLan
+                )
                 val host = ep.preferredHost(preferLan) ?: return@lookupByDeviceIdAsync
                 if (host != selectedHost &&
                     ep.localIp != selectedHost &&
@@ -577,7 +587,7 @@ class WalkieTalkieService : Service() {
                 if (udp <= 0) return@lookupByDeviceIdAsync
                 Log.i(TAG, "active poll adopt deviceId=$id → $host:$udp (selectedHost=$selectedHost)")
                 eng.adoptDirectoryPeer(
-                    displayName = ep.displayName.ifBlank { id.take(10) },
+                    displayName = ContactLabels.fromEndpoint(ep),
                     host = host,
                     udpPort = udp,
                     videoPort = vport,
