@@ -69,6 +69,16 @@ object WalkieProtocol {
     const val TYPE_MONITOR_AUDIO_OPUS: Byte = 0x17
     /** Continuous monitor H.264 (SEE/SCRN). */
     const val TYPE_MONITOR_VIDEO_AVC: Byte = 0x18
+    /** Peer accepted SEE_REQ and is starting camera share. */
+    const val TYPE_SEE_ACK: Byte = 0x19
+    /** Peer received WAKEUP RING (alarm started or quiet smoke). */
+    const val TYPE_RING_ACK: Byte = 0x1A
+    /**
+     * Session failed / unreachable.
+     * Payload: [reasonLen:u8][utf8 reason…]
+     * Both ends should show the message on screen.
+     */
+    const val TYPE_SESSION_FAIL: Byte = 0x1B
 
     /** HELLO[3] capability flags (optional 4th byte). */
     const val CAP_OPUS: Int = 0x01

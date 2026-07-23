@@ -60,6 +60,23 @@ object BarkyPrefs {
         prefs(context).edit().putBoolean(KEY_WIFI_ONLY, wifiOnly).apply()
     }
 
+    private const val KEY_LAST_STUN_IP = "last_stun_public_ip"
+    private const val KEY_LAST_STUN_UDP = "last_stun_public_udp"
+
+    /** Persist walkie-socket STUN so Contacts can filter "self" even mid–NIC change. */
+    fun setLastStunMapping(context: Context, publicIp: String?, publicUdp: Int) {
+        prefs(context).edit()
+            .putString(KEY_LAST_STUN_IP, publicIp.orEmpty())
+            .putInt(KEY_LAST_STUN_UDP, publicUdp)
+            .apply()
+    }
+
+    fun lastStunPublicIp(context: Context): String? =
+        prefs(context).getString(KEY_LAST_STUN_IP, null)?.takeIf { it.isNotBlank() }
+
+    fun lastStunPublicUdp(context: Context): Int =
+        prefs(context).getInt(KEY_LAST_STUN_UDP, 0)
+
     fun isCameraFront(context: Context): Boolean =
         prefs(context).getBoolean(KEY_CAMERA_FRONT, true)
 

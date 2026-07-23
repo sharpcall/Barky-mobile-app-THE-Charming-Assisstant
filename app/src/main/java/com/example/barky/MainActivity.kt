@@ -13,6 +13,7 @@ import android.graphics.SurfaceTexture
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
@@ -295,8 +296,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onError(message: String) {
-            walkieStatus.text = message
-            Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+            runOnUiThread {
+                walkieStatus.text = message
+                // Long toast so cellular path failures are readable
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                Log.e("BarkyVideoUI", "onError: $message")
+            }
         }
 
         override fun onInternetInviteChanged(inviteCode: String?) {

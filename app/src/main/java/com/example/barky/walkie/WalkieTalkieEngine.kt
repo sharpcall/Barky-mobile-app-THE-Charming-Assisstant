@@ -205,6 +205,12 @@ class WalkieTalkieEngine(
     )
     /** Last multi-path targets for LISTEN/SEE/RING stop fan-out. */
     @Volatile private var lastControlTargets: List<WalkiePeer> = emptyList()
+    /** SEE: peer accepted SEE_REQ (TYPE_SEE_ACK). */
+    private val seeAckReceived = AtomicBoolean(false)
+    /** RING: peer accepted WAKEUP (TYPE_RING_ACK). */
+    private val ringAckReceived = AtomicBoolean(false)
+    private var seeWatchdog: Runnable? = null
+    private var ringWatchdog: Runnable? = null
     private var savedMusicVolume = -1
 
     private var cameraSource: CameraFrameSource? = null
@@ -914,6 +920,7 @@ class WalkieTalkieEngine(
         val changed = publicHost != mapped.host || publicUdpPort != mapped.port
         publicHost = mapped.host
         publicUdpPort = mapped.port
+        BarkyPrefs.setLastStunMapping(appContext, mapped.host, mapped.port)
         val code = PeerInviteCodec.encode(mapped.host, mapped.port, localVideoPort)
         myInviteCode = code
         Log.i(
@@ -1460,6 +1467,8 @@ class WalkieTalkieEngine(
         selectPeer(peer)
         userLockedSelection.set(true)
         mainHandler.removeCallbacks(remoteWakeupClear)
+        cancelRingWatchdog()
+        ringAckReceived.set(false)
         mainHandler.post { listener.onRemoteWakeupActive(true) }
         thread(name = "walkie-ring", isDaemon = true) {
             try {
@@ -1478,6 +1487,7 @@ class WalkieTalkieEngine(
                     "RING via ${Ring.FILE_NAME} primary=${targets.primary.host}:${targets.primary.port} " +
                         "n=${targets.all.size} ${targets.reason}"
                 )
+                scheduleRingAckWatchdog(targets.primary)
                 mainHandler.postDelayed(remoteWakeupClear, 12_000L)
             } catch (t: Throwable) {
                 Log.e(TAG, "sendWakeup failed", t)
@@ -1489,6 +1499,7 @@ class WalkieTalkieEngine(
 
     /** Stop local ringing and/or cancel a wakeup we sent to the peer. */
     fun stopWakeupRinging() {
+        cancelRingWatchdog()
         val targets = lastControlTargets.ifEmpty {
             listOfNotNull(currentPeer())
         }
@@ -2777,6 +2788,26 @@ class WalkieTalkieEngine(
                             ring.stopLocalOnly()
                             postStatus("Remote stopped ringing")
                         }
+                        WalkieProtocol.TYPE_SEE_ACK -> {
+                            seeAckReceived.set(true)
+                            Log.i(TAG, "SEE_ACK from=$from port=$fromPort")
+                            postStatus("Peer accepted SEE — waiting for video…")
+                        }
+                        WalkieProtocol.TYPE_RING_ACK -> {
+                            ringAckReceived.set(true)
+                            cancelRingWatchdog()
+                            Log.i(TAG, "RING_ACK from=$from port=$fromPort")
+                            postStatus("Ring delivered to peer")
+                        }
+                        WalkieProtocol.TYPE_SESSION_FAIL -> {
+                            val reason = parseSessionFailReason(snapshot)
+                            Log.w(TAG, "SESSION_FAIL from=$from reason=$reason")
+                            postError(reason.ifBlank { "Peer could not complete the session" })
+                            // Stop local SEE request if we were waiting
+                            if (requestingSee.get()) {
+                                mainHandler.post { stopSeeRemote() }
+                            }
+                        }
                         WalkieProtocol.TYPE_HELLO -> handleHello(snapshot, from, fromPort)
                         WalkieProtocol.TYPE_TALK_START -> {
                             // Optional 2nd byte = speaker vs headset for privacy playback
@@ -3114,6 +3145,16 @@ class WalkieTalkieEngine(
             listener.onWakeupReceived(from)
             Log.i(TAG, "WAKEUP RING from=$from quiet=$quiet file=${Ring.FILE_NAME}")
             ring.onIncoming(from, quiet)
+        }
+        // ACK so sender knows we got the ring (both sides can show errors if missing)
+        thread(name = "walkie-ring-ack", isDaemon = true) {
+            try {
+                val peer = resolvePeerForStream(from, 0)
+                sendSessionControl(peer, WalkieProtocol.TYPE_RING_ACK)
+                Log.i(TAG, "RING_ACK → ${peer.host}:${peer.port}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "RING_ACK send", t)
+            }
         }
     }
 
@@ -3946,6 +3987,9 @@ class WalkieTalkieEngine(
         }
         val reply = localPort
         val seed = peer
+        seeAckReceived.set(false)
+        monitorVideoRxCount = 0
+        cancelSeeWatchdog()
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
                 ensureSelfPublicPath()
@@ -3969,8 +4013,14 @@ class WalkieTalkieEngine(
                         "alts=${targets.all.size} ${targets.reason} replyPort=$reply " +
                         "withAudio=${requestingListen.get()}"
                 )
+                scheduleSeeAckWatchdog(primary)
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
+                failSessionBothSides(
+                    peer = seed,
+                    localMsg = "SEE failed to send: ${t.message}",
+                    remoteMsg = "Peer SEE request failed"
+                )
             }
         }
         mainHandler.post {
@@ -3983,6 +4033,7 @@ class WalkieTalkieEngine(
     }
 
     fun stopSeeRemote() {
+        cancelSeeWatchdog()
         if (!requestingSee.getAndSet(false)) {
             // Still notify UI in case of desync
             mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
@@ -4127,8 +4178,145 @@ class WalkieTalkieEngine(
             "SEE_REQ from $from fromPort=$fromPort payloadPort=$payloadPort " +
                 "usePort=${peer.port} vport=${peer.videoPort} (video-only serve)"
         )
+        // Tell requester we accepted (so they can show "no ack" if this never arrives)
+        thread(name = "walkie-see-ack", isDaemon = true) {
+            try {
+                sendSessionControl(peer, WalkieProtocol.TYPE_SEE_ACK)
+                Log.i(TAG, "SEE_ACK → ${peer.host}:${peer.port}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "SEE_ACK send", t)
+            }
+        }
         // SEE = camera/video only. Mic streams only if peer also sent LISTEN_REQ.
         startServingSee(peer)
+    }
+
+    private fun scheduleSeeAckWatchdog(peer: WalkiePeer) {
+        cancelSeeWatchdog()
+        val r = Runnable {
+            if (!requestingSee.get()) return@Runnable
+            if (!seeAckReceived.get()) {
+                Log.w(TAG, "SEE watchdog: no SEE_ACK from ${peer.host}")
+                failSessionBothSides(
+                    peer = peer,
+                    localMsg = "SEE failed — peer did not acknowledge (check network / contacts)",
+                    remoteMsg = "Peer SEE timed out (no path / not reachable)"
+                )
+                stopSeeRemote()
+                return@Runnable
+            }
+            if (monitorVideoRxCount <= 0) {
+                Log.w(TAG, "SEE watchdog: ACK but no video frames from ${peer.host}")
+                failSessionBothSides(
+                    peer = peer,
+                    localMsg = "SEE failed — no video from peer (path broken)",
+                    remoteMsg = "Peer got no video from your camera share"
+                )
+                stopSeeRemote()
+            } else {
+                Log.i(TAG, "SEE watchdog OK frames=$monitorVideoRxCount")
+            }
+        }
+        seeWatchdog = r
+        // 6s for ACK+first frames (cellular STUN can be slow)
+        mainHandler.postDelayed(r, 6_500L)
+    }
+
+    private fun cancelSeeWatchdog() {
+        seeWatchdog?.let { mainHandler.removeCallbacks(it) }
+        seeWatchdog = null
+    }
+
+    private fun scheduleRingAckWatchdog(peer: WalkiePeer) {
+        cancelRingWatchdog()
+        val r = Runnable {
+            if (ringAckReceived.get()) return@Runnable
+            Log.w(TAG, "RING watchdog: no RING_ACK from ${peer.host}")
+            failSessionBothSides(
+                peer = peer,
+                localMsg = "Ring failed — peer did not acknowledge",
+                remoteMsg = "Peer ring attempt failed (unreachable)"
+            )
+            mainHandler.post { listener.onRemoteWakeupActive(false) }
+        }
+        ringWatchdog = r
+        mainHandler.postDelayed(r, 5_000L)
+    }
+
+    private fun cancelRingWatchdog() {
+        ringWatchdog?.let { mainHandler.removeCallbacks(it) }
+        ringWatchdog = null
+    }
+
+    /** Show error here and notify peer so both screens display a failure. */
+    private fun failSessionBothSides(peer: WalkiePeer?, localMsg: String, remoteMsg: String) {
+        Log.e(TAG, "SESSION_FAIL local=$localMsg remote=$remoteMsg peer=${peer?.host}")
+        postError(localMsg)
+        val targets = lastControlTargets.ifEmpty { listOfNotNull(peer) }
+        thread(name = "walkie-session-fail", isDaemon = true) {
+            for (t in targets) {
+                try {
+                    sendSessionFail(t, remoteMsg)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
+
+    private fun sendSessionControl(peer: WalkiePeer, type: Byte) {
+        if (peer.port <= 0) return
+        val packet = DatagramPacket(
+            byteArrayOf(type),
+            1,
+            InetAddress.getByName(peer.host),
+            peer.port
+        )
+        repeat(4) {
+            try {
+                sendUdp(packet)
+            } catch (_: Throwable) {
+            }
+            try {
+                Thread.sleep(30)
+            } catch (_: InterruptedException) {
+                return
+            }
+        }
+    }
+
+    private fun sendSessionFail(peer: WalkiePeer, reason: String) {
+        if (peer.port <= 0) return
+        val msg = reason.take(180).toByteArray(Charsets.UTF_8)
+        val payload = ByteArray(2 + msg.size)
+        payload[0] = WalkieProtocol.TYPE_SESSION_FAIL
+        payload[1] = msg.size.coerceAtMost(255).toByte()
+        System.arraycopy(msg, 0, payload, 2, msg.size.coerceAtMost(255))
+        val packet = DatagramPacket(
+            payload, payload.size, InetAddress.getByName(peer.host), peer.port
+        )
+        repeat(5) {
+            try {
+                sendUdp(packet)
+            } catch (_: Throwable) {
+            }
+            try {
+                Thread.sleep(40)
+            } catch (_: InterruptedException) {
+                return
+            }
+        }
+        Log.i(TAG, "SESSION_FAIL sent → ${peer.host}:${peer.port} ($reason)")
+    }
+
+    private fun parseSessionFailReason(data: ByteArray): String {
+        if (data.size < 3) return "Session failed"
+        val len = data[1].toInt() and 0xFF
+        if (len <= 0 || 2 + len > data.size) return "Session failed"
+        return try {
+            String(data, 2, len, Charsets.UTF_8)
+        } catch (_: Throwable) {
+            "Session failed"
+        }
     }
 
     /**
@@ -4673,7 +4861,11 @@ class WalkieTalkieEngine(
                     frames = maxOf(frames, seeSession.framesSent())
                     if (frames == 0 && waited >= 2500) {
                         Log.w(TAG, "SEE serve abort: no frames (camera busy or open failed)")
-                        postError("Camera busy — close Camera/YouTube video and try SEE again")
+                        failSessionBothSides(
+                            peer = peer,
+                            localMsg = "Camera busy — close Camera/YouTube and try SEE again",
+                            remoteMsg = "Peer camera failed — no video available"
+                        )
                         break
                     }
                     Thread.sleep(200)

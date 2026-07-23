@@ -56,9 +56,13 @@ object NetworkEndpoints {
         }
     }
 
-    fun findLocalIpv4(): String? {
+    fun findLocalIpv4(): String? = findAllLocalIpv4().firstOrNull()
+
+    /** All non-loopback IPv4s (Wi‑Fi + cellular) — needed to hide self in Contacts. */
+    fun findAllLocalIpv4(): List<String> {
+        val out = LinkedHashSet<String>()
         try {
-            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
             for (ni in ifaces) {
                 if (!ni.isUp || ni.isLoopback) continue
                 val addrs = ni.inetAddresses
@@ -66,28 +70,14 @@ object NetworkEndpoints {
                     val a = addrs.nextElement()
                     if (a is Inet4Address && !a.isLoopbackAddress) {
                         val host = a.hostAddress ?: continue
-                        if (PeerEndpoint.isPrivateIp(host) || host.startsWith("100.")) {
-                            return host
-                        }
-                    }
-                }
-            }
-            // Fallback: any non-loopback v4
-            val ifaces2 = NetworkInterface.getNetworkInterfaces() ?: return null
-            for (ni in ifaces2) {
-                if (!ni.isUp || ni.isLoopback) continue
-                val addrs = ni.inetAddresses
-                while (addrs.hasMoreElements()) {
-                    val a = addrs.nextElement()
-                    if (a is Inet4Address && !a.isLoopbackAddress) {
-                        return a.hostAddress
+                        out.add(host)
                     }
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "findLocalIpv4", t)
+            Log.w(TAG, "findAllLocalIpv4", t)
         }
-        return null
+        return out.toList()
     }
 
     @Suppress("DEPRECATION")
