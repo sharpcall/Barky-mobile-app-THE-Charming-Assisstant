@@ -66,7 +66,13 @@ object FirebasePeerDirectory {
         lon: Double? = null,
         walkieSocket: java.net.DatagramSocket? = null,
         updateHttpPort: Int = 0,
-        versionCode: Int = 0
+        versionCode: Int = 0,
+        /**
+         * Prefer STUN mapping from the walkie engine (same UDP socket as media).
+         * Never invent a publicUdpPort from a temporary socket — that breaks cellular.
+         */
+        knownPublicIp: String? = null,
+        knownPublicUdpPort: Int = 0
     ) {
         if (!isConfigured(context)) {
             if (warned.compareAndSet(false, true)) {
@@ -82,7 +88,7 @@ object FirebasePeerDirectory {
             try {
                 registerBlocking(
                     context, localUdpPort, localVideoPort, appVersion, lat, lon, walkieSocket,
-                    updateHttpPort, versionCode
+                    updateHttpPort, versionCode, knownPublicIp, knownPublicUdpPort
                 )
             } catch (t: Throwable) {
                 Log.w(TAG, "register failed", t)
@@ -326,11 +332,52 @@ object FirebasePeerDirectory {
         lon: Double?,
         walkieSocket: java.net.DatagramSocket?,
         updateHttpPort: Int = 0,
-        versionCode: Int = 0
+        versionCode: Int = 0,
+        knownPublicIp: String? = null,
+        knownPublicUdpPort: Int = 0
     ) {
         val cfg = config(context) ?: return
         val idSnap = DeviceIdentity.snapshot(context, lat, lon)
-        val net = NetworkEndpoints.snapshot(context, walkieSocket)
+        // Prefer engine STUN (walkie socket). Avoid NetworkEndpoints STUN on a temp socket —
+        // that produced publicUdpPort values peers cannot reach (cellular SEE/LISTEN/RING fail).
+        val onWifi = NetworkEndpoints.isWifi(context)
+        val localIp = NetworkEndpoints.findLocalIpv4()
+        val wifiSsid = if (onWifi) {
+            try {
+                @Suppress("DEPRECATION")
+                val wm = context.applicationContext
+                    .getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                wm.connectionInfo?.ssid?.trim('"')?.takeIf { it.isNotBlank() && it != "<unknown ssid>" }
+            } catch (_: Throwable) {
+                null
+            }
+        } else null
+        var pubIp = knownPublicIp?.takeIf { it.isNotBlank() }
+        var pubPort = knownPublicUdpPort
+        if ((pubIp.isNullOrBlank() || pubPort <= 0) && walkieSocket != null && !walkieSocket.isClosed) {
+            try {
+                val mapped = com.example.barky.walkie.StunClient.discoverMappedAddress(
+                    walkieSocket,
+                    quick = onWifi
+                ) ?: if (!onWifi) {
+                    com.example.barky.walkie.StunClient.discoverMappedAddress(walkieSocket, quick = false)
+                } else null
+                if (mapped != null) {
+                    pubIp = mapped.host
+                    pubPort = mapped.port
+                    Log.i(TAG, "register STUN via walkie socket ${mapped.host}:${mapped.port}")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "register STUN on walkie socket", t)
+            }
+        }
+        if (pubIp.isNullOrBlank() || pubPort <= 0) {
+            Log.w(
+                TAG,
+                "register without public STUN (wifi=$onWifi) — peers on other networks " +
+                    "cannot reach us until STUN succeeds"
+            )
+        }
         val phoneModel = idSnap.model
         val manufacturer = idSnap.manufacturer
         val androidVersion = Build.VERSION.RELEASE ?: "?"
@@ -345,13 +392,13 @@ object FirebasePeerDirectory {
                 .put("androidVersion", stringField(androidVersion))
                 .put("androidSdk", intField(androidSdk))
                 .put("androidId", stringField(idSnap.androidId))
-                .put("localIp", stringField(net.localIp ?: ""))
+                .put("localIp", stringField(localIp ?: ""))
                 .put("localUdpPort", intField(localUdpPort))
                 .put("localVideoPort", intField(localVideoPort))
-                .put("publicIp", stringField(net.publicIp ?: ""))
-                .put("publicUdpPort", intField(net.publicUdpPort))
-                .put("wifiSsid", stringField(net.wifiSsid ?: ""))
-                .put("onWifi", boolField(net.onWifi))
+                .put("publicIp", stringField(pubIp ?: ""))
+                .put("publicUdpPort", intField(pubPort.coerceAtLeast(0)))
+                .put("wifiSsid", stringField(wifiSsid ?: ""))
+                .put("onWifi", boolField(onWifi))
                 .put("appVersion", stringField(appVersion))
                 .put("updateHttpPort", intField(updateHttpPort))
                 .put("versionCode", intField(versionCode))
@@ -381,8 +428,8 @@ object FirebasePeerDirectory {
                 .apply()
             Log.i(
                 TAG,
-                "registered db=${cfg.databaseId} id=${idSnap.deviceId} local=${net.localIp}:$localUdpPort " +
-                    "public=${net.publicIp}:${net.publicUdpPort} wifi=${net.onWifi} " +
+                "registered db=${cfg.databaseId} id=${idSnap.deviceId} local=$localIp:$localUdpPort " +
+                    "public=$pubIp:$pubPort wifi=$onWifi " +
                     "model=$manufacturer $phoneModel android=$androidVersion (sdk $androidSdk) " +
                     "appVersion=$appVersion versionCode=$versionCode updateHttpPort=$updateHttpPort"
             )

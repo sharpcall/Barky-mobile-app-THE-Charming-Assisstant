@@ -8,16 +8,102 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * SEE camera capture + optional H.264 encode.
+ * SEE feature — remote live camera (request + capture/encode).
  *
- * Owns [CameraFrameSource] (and temporary AVC encoder) for the remote SEE serve path.
- * Transport (TCP/UDP send) stays in [WalkieTalkieEngine] via the callbacks below so
- * path selection / hole-punch logic is not duplicated here.
+ * **File name:** `See.kt`
+ * **Full path:** `app/src/main/java/com/example/barky/walkie/See.kt`
+ *
+ * Contains:
+ * - [See] — control plane: SEE_REQ / SEE_STOP multi-path bursts (public + LAN)
+ * - [SeeCameraSession] — camera open + H.264/MJPEG encode for the serve path
+ *
+ * Path selection lives in [PeerReach]; UDP/TCP send stays in [WalkieTalkieEngine]
+ * (shared socket with STUN / LISTEN / RING).
+ */
+object See {
+    private const val TAG = "See"
+    const val FILE_NAME = "See.kt"
+
+    /**
+     * Burst SEE_REQ to every target (public first when off Wi‑Fi).
+     */
+    fun sendReqBurst(
+        targets: List<WalkiePeer>,
+        replyPort: Int,
+        stillWanted: () -> Boolean,
+        sendControl: (peer: WalkiePeer, type: Byte, replyPort: Int) -> Unit,
+        holePunch: (peer: WalkiePeer, rounds: Int) -> Unit,
+        sendHello: (peer: WalkiePeer) -> Unit,
+        sendPathUpdate: (peer: WalkiePeer) -> Unit = {}
+    ) {
+        if (targets.isEmpty()) {
+            Log.w(TAG, "sendReqBurst empty targets ($FILE_NAME)")
+            return
+        }
+        Log.i(
+            TAG,
+            "SEE_REQ burst targets=${targets.joinToString { "${it.host}:${it.port}" }} " +
+                "reply=$replyPort file=$FILE_NAME"
+        )
+        for (t in targets) {
+            if (!stillWanted()) return
+            try {
+                sendHello(t)
+                sendPathUpdate(t)
+                val public = !com.example.barky.net.PeerEndpoint.isPrivateIp(t.host)
+                if (public) {
+                    holePunch(t, 18)
+                } else {
+                    Thread.sleep(50)
+                }
+                val ports = linkedSetOf(t.port)
+                for (port in ports.filter { it > 0 }) {
+                    if (!stillWanted()) return
+                    sendControl(t.copy(port = port), WalkieProtocol.TYPE_SEE_REQ, replyPort)
+                    Thread.sleep(35)
+                }
+            } catch (ex: Throwable) {
+                Log.w(TAG, "SEE_REQ target ${t.host}: ${ex.message}")
+            }
+        }
+        Thread.sleep(320)
+        if (!stillWanted()) return
+        for (t in targets) {
+            if (!stillWanted()) return
+            try {
+                sendControl(t, WalkieProtocol.TYPE_SEE_REQ, replyPort)
+                if (!com.example.barky.net.PeerEndpoint.isPrivateIp(t.host)) {
+                    holePunch(t, 8)
+                }
+                Thread.sleep(40)
+            } catch (_: Throwable) {
+            }
+        }
+        Log.i(TAG, "SEE_REQ burst done file=$FILE_NAME")
+    }
+
+    fun sendStop(
+        targets: List<WalkiePeer>,
+        sendControl: (peer: WalkiePeer, type: Byte) -> Unit
+    ) {
+        for (t in targets) {
+            try {
+                sendControl(t, WalkieProtocol.TYPE_SEE_STOP)
+            } catch (_: Throwable) {
+            }
+        }
+        Log.i(TAG, "SEE_STOP sent n=${targets.size} file=$FILE_NAME")
+    }
+}
+
+/**
+ * SEE camera capture + optional H.264 encode (serve side).
+ *
+ * Lives in **`See.kt`** next to the control plane so the whole SEE feature is one module.
  */
 class SeeCameraSession(
     private val context: Context,
     private val isActive: () -> Boolean,
-    /** True when video TCP is connected — used for JPEG compact sizing. */
     private val isTcpConnected: () -> Boolean,
     private val useAvc: Boolean,
     private val onPreviewReady: (w: Int, h: Int, orient: Int, front: Boolean) -> Unit = { _, _, _, _ -> },
@@ -34,7 +120,6 @@ class SeeCameraSession(
 
     fun isRunning(): Boolean = started.get() && camera != null
 
-    /** Underlying Camera1 source (for flip while SEE is serving). */
     fun cameraSource(): CameraFrameSource? = camera
 
     fun switchCamera(): Boolean {
@@ -43,10 +128,6 @@ class SeeCameraSession(
         return true
     }
 
-    /**
-     * Open camera (dummy SurfaceTexture — safe when app is backgrounded).
-     * Returns false if open was skipped because already running.
-     */
     fun start(): Boolean {
         if (!started.compareAndSet(false, true)) {
             Log.i(TAG, "SeeCameraSession already started")
@@ -62,10 +143,10 @@ class SeeCameraSession(
                 enc = null
                 Log.w(TAG, "AVC encoder not ready — falling back to MJPEG")
             } else {
-                Log.i(TAG, "SEE camera codec=H.264/AVC 640x480")
+                Log.i(TAG, "SEE camera codec=H.264/AVC 640x480 file=${See.FILE_NAME}")
             }
         } else {
-            Log.i(TAG, "SEE camera codec=MJPEG")
+            Log.i(TAG, "SEE camera codec=MJPEG file=${See.FILE_NAME}")
         }
         encoder = enc
 
@@ -120,7 +201,7 @@ class SeeCameraSession(
         }
         camera = cam
         if (isActive()) cam.start() else cam.stop()
-        Log.i(TAG, "SeeCameraSession started front=$preferFront avc=${enc != null}")
+        Log.i(TAG, "SeeCameraSession started front=$preferFront avc=${enc != null} file=${See.FILE_NAME}")
         return true
     }
 

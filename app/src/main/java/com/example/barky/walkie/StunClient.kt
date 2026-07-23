@@ -57,8 +57,8 @@ object StunClient {
             1000
         }
         try {
-            // Pass 1: fast servers, short timeout
-            val t1 = if (quick) 900 else 1400
+            // Pass 1: fast servers. Cellular needs longer waits (CGNAT + lossy first UDP).
+            val t1 = if (quick) 1_200 else 1_800
             owned.soTimeout = t1
             for ((host, port) in SERVERS_FAST) {
                 try {
@@ -77,11 +77,11 @@ object StunClient {
             }
             // Pass 2: full list, longer timeout (cellular settle)
             try {
-                Thread.sleep(250)
+                Thread.sleep(400)
             } catch (_: InterruptedException) {
                 return null
             }
-            val t2 = 2200
+            val t2 = 3_500
             owned.soTimeout = t2
             for ((host, port) in SERVERS_FULL) {
                 try {
@@ -123,11 +123,17 @@ object StunClient {
         req.putInt(0x2112A442)
         req.put(txId)
         val packet = DatagramPacket(req.array(), 20, InetAddress.getByName(stunHost), stunPort)
-        sock.send(packet)
-        // Send twice — cellular often drops first UDP
-        try {
-            sock.send(packet)
-        } catch (_: Exception) {
+        // Triple-send — cellular/CGNAT often drops the first UDP
+        repeat(3) {
+            try {
+                sock.send(packet)
+            } catch (_: Exception) {
+            }
+            try {
+                Thread.sleep(15)
+            } catch (_: InterruptedException) {
+                return null
+            }
         }
         val buf = ByteArray(512)
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -136,9 +142,17 @@ object StunClient {
             try {
                 sock.receive(resp)
             } catch (_: java.net.SocketTimeoutException) {
-                return null
+                // Keep waiting until overall deadline (cellular RTT can be high)
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0) return null
+                try {
+                    sock.soTimeout = left.toInt().coerceAtLeast(50).coerceAtMost(timeoutMs)
+                } catch (_: Exception) {
+                }
+                continue
             }
             if (resp.length < 20) continue
+            // Ignore non-STUN packets that may land on the shared walkie socket
             val bb = ByteBuffer.wrap(buf, 0, resp.length)
             val type = bb.short.toInt() and 0xFFFF
             if (type != 0x0101) continue

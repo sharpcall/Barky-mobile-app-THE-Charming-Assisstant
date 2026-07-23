@@ -521,17 +521,39 @@ class WalkieTalkieService : Service() {
         } else {
             0
         }
-        Log.i(TAG, "Firebase register reason=$reason updateHttpPort=$updatePort")
-        FirebasePeerDirectory.registerAsync(
-            this,
-            localUdpPort = engine?.localUdpPort() ?: 0,
-            localVideoPort = engine?.localVideoTcpPort() ?: 0,
-            appVersion = ver,
-            lat = null,
-            lon = null,
-            updateHttpPort = updatePort,
-            versionCode = vc
-        )
+        // STUN must use the walkie UDP socket so publicUdpPort matches media.
+        // Never let Firebase invent a port via a temporary DatagramSocket (breaks cellular).
+        val eng = engine
+        thread(name = "barky-firebase-reg", isDaemon = true) {
+            try {
+                if (eng != null && !BarkyPrefs.isWifiOnly(this@WalkieTalkieService)) {
+                    eng.refreshPublicMappingBlocking()
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "pre-register STUN", t)
+            }
+            val map = eng?.publicStunMapping()
+            val pubIp = map?.first
+            val pubPort = map?.second ?: 0
+            Log.i(
+                TAG,
+                "Firebase register reason=$reason updateHttpPort=$updatePort " +
+                    "stunPublic=$pubIp:$pubPort"
+            )
+            FirebasePeerDirectory.registerAsync(
+                this@WalkieTalkieService,
+                localUdpPort = eng?.localUdpPort() ?: 0,
+                localVideoPort = eng?.localVideoTcpPort() ?: 0,
+                appVersion = ver,
+                lat = null,
+                lon = null,
+                walkieSocket = eng?.walkieUdpSocket(),
+                updateHttpPort = updatePort,
+                versionCode = vc,
+                knownPublicIp = pubIp,
+                knownPublicUdpPort = pubPort
+            )
+        }
     }
 
     private fun startApkHttpServerIfEnabled() {

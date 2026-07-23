@@ -1274,7 +1274,8 @@ class MainActivity : AppCompatActivity() {
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
         )
         walkiePreview.alpha = 1f
-        if (::walkiePipFlip.isInitialized && isSeeing) {
+        // Flip badge always on floating self-view (not only when isSeeing is set late)
+        if (::walkiePipFlip.isInitialized) {
             val dens = resources.displayMetrics.density
             val badge = (40 * dens).toInt()
             val m = (8 * dens).toInt()
@@ -1283,9 +1284,10 @@ class MainActivity : AppCompatActivity() {
                 setMargins(m, m, m, m)
             }
             walkiePipFlip.visibility = View.VISIBLE
+            walkiePipFlip.elevation = 30f
             walkiePipFlip.bringToFront()
-            walkiePipBox.clipChildren = true
-            walkiePipBox.clipToPadding = true
+            walkiePipBox.clipChildren = false
+            walkiePipBox.clipToPadding = false
         }
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }

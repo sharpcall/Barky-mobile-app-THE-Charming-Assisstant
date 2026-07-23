@@ -825,6 +825,22 @@ class WalkieTalkieEngine(
     @Volatile private var lastStunOkMs = 0L
     @Volatile private var stunFailStreak = 0
     @Volatile private var stunRetryScheduled = false
+    private val stunLock = Any()
+
+    /** Walkie UDP socket — STUN + media must share this socket so publicUdpPort is valid. */
+    fun walkieUdpSocket(): DatagramSocket? = socket?.takeIf { !it.isClosed }
+
+    /** Last STUN mapping (host, port) for Firebase registration — never use a temp socket port. */
+    fun publicStunMapping(): Pair<String?, Int> = publicHost to publicUdpPort
+
+    /**
+     * Blocking STUN on the **walkie** socket (call off main).
+     * Serialized + exclusive so the RX thread cannot steal STUN replies.
+     */
+    fun refreshPublicMappingBlocking(): Pair<String?, Int> {
+        refreshInternetInvite()
+        return publicHost to publicUdpPort
+    }
 
     private fun refreshInternetInvite() {
         val sock = socket
@@ -833,19 +849,22 @@ class WalkieTalkieEngine(
             return
         }
         val onWifi = NetworkEndpoints.isWifi(appContext)
-        // Quick first when we already have a mapping or on cellular (fail-fast)
-        val quick = !onWifi || !publicHost.isNullOrBlank()
-        Log.i(TAG, "STUN begin quick=$quick wifi=$onWifi last=$publicHost:$publicUdpPort")
-        stunExclusive = true
-        val mapped = try {
+        // Cellular: never "quick only" — always allow full pass after quick miss
+        val preferQuickFirst = onWifi && !publicHost.isNullOrBlank()
+        Log.i(TAG, "STUN begin quickFirst=$preferQuickFirst wifi=$onWifi last=$publicHost:$publicUdpPort")
+        val mapped = synchronized(stunLock) {
+            stunExclusive = true
             try {
-                Thread.sleep(40)
-            } catch (_: InterruptedException) {
+                // RX uses soTimeout ~250ms; wait so it exits receive before we bind STUN
+                try {
+                    Thread.sleep(320)
+                } catch (_: InterruptedException) {
+                }
+                val first = StunClient.discoverMappedAddress(sock, quick = preferQuickFirst || !onWifi)
+                first ?: StunClient.discoverMappedAddress(sock, quick = false)
+            } finally {
+                stunExclusive = false
             }
-            StunClient.discoverMappedAddress(sock, quick = quick)
-                ?: if (quick) StunClient.discoverMappedAddress(sock, quick = false) else null
-        } finally {
-            stunExclusive = false
         }
         Log.i(TAG, "STUN end mapped=${mapped?.host}:${mapped?.port}")
         if (mapped == null) {
@@ -2698,6 +2717,11 @@ class WalkieTalkieEngine(
         receiveThread = thread(name = "walkie-rx", isDaemon = true) {
             // Larger buffer so multi-chunk video never truncates
             val buf = ByteArray(64 * 1024)
+            // Short timeout so STUN can take exclusive ownership of the walkie socket
+            try {
+                sock.soTimeout = 250
+            } catch (_: Exception) {
+            }
             while (running.get()) {
                 try {
                     if (stunExclusive) {
@@ -2705,7 +2729,11 @@ class WalkieTalkieEngine(
                         continue
                     }
                     val packet = DatagramPacket(buf, buf.size)
-                    sock.receive(packet)
+                    try {
+                        sock.receive(packet)
+                    } catch (_: SocketTimeoutException) {
+                        continue
+                    }
                     if (packet.length < 1) continue
                     // Copy out of the reusable socket buffer immediately
                     val snapshot = packet.data.copyOfRange(
@@ -3903,30 +3931,19 @@ class WalkieTalkieEngine(
                 lastControlTargets = targets.all
                 val primary = applyPrimaryPeer(targets.primary)
                 seeWatchPeer = primary
-                // Fan-out SEE_REQ like LISTEN (public + LAN when known)
-                for (t in targets.all) {
-                    if (!requestingSee.get()) break
-                    sendHelloTo(t)
-                    sendPathUpdateTo(t)
-                    val viaPublic = !PeerEndpoint.isPrivateIp(t.host)
-                    if (viaPublic && !BarkyPrefs.isWifiOnly(appContext)) {
-                        holePunchPeer(t, rounds = 18)
-                    } else {
-                        Thread.sleep(50)
-                    }
-                    sendSeeReqBurst(t, reply)
-                }
-                Thread.sleep(350)
-                if (requestingSee.get()) {
-                    for (t in targets.all) {
-                        if (!requestingSee.get()) break
-                        sendSeeReqBurst(t, reply)
-                        if (!PeerEndpoint.isPrivateIp(t.host)) holePunchPeer(t, rounds = 8)
-                    }
-                }
+                // Full SEE control plane in See.kt
+                See.sendReqBurst(
+                    targets = targets.all,
+                    replyPort = reply,
+                    stillWanted = { requestingSee.get() },
+                    sendControl = { p, type, rport -> sendControlWithPort(p, type, rport) },
+                    holePunch = { p, rounds -> holePunchPeer(p, rounds) },
+                    sendHello = { p -> sendHelloTo(p) },
+                    sendPathUpdate = { p -> sendPathUpdateTo(p) }
+                )
                 Log.i(
                     TAG,
-                    "SEE_REQ → ${primary.host}:${primary.port} name=${primary.displayName} " +
+                    "SEE via ${See.FILE_NAME} → ${primary.host}:${primary.port} name=${primary.displayName} " +
                         "alts=${targets.all.size} ${targets.reason} replyPort=$reply " +
                         "withAudio=${requestingListen.get()}"
                 )
@@ -3943,17 +3960,6 @@ class WalkieTalkieEngine(
         )
     }
 
-    /** Burst SEE_REQ to all known UDP ports for this host. */
-    private fun sendSeeReqBurst(peer: WalkiePeer, replyPort: Int) {
-        val ports = linkedSetOf(peer.port)
-        peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
-        getPeers().forEach { p -> if (p.host == peer.host) ports.add(p.port) }
-        for (port in ports.filter { it > 0 }) {
-            sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_SEE_REQ, replyPort)
-            Thread.sleep(35)
-        }
-    }
-
     fun stopSeeRemote() {
         if (!requestingSee.getAndSet(false)) {
             // Still notify UI in case of desync
@@ -3964,12 +3970,7 @@ class WalkieTalkieEngine(
             listOfNotNull(seeWatchPeer ?: currentPeer() ?: getPeers().firstOrNull())
         }
         seeWatchPeer = null
-        for (p in targets) {
-            try {
-                sendControl(p, WalkieProtocol.TYPE_SEE_STOP)
-            } catch (_: Throwable) {
-            }
-        }
+        See.sendStop(targets) { p, type -> sendControl(p, type) }
         // LISTEN is independent — leave requestingListen / audio alone
         if (!requestingListen.get()) monitorReceiving.set(false)
         mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
@@ -3978,26 +3979,50 @@ class WalkieTalkieEngine(
             maybeResumeLocalPreview()
         }
         postStatus("SEE stopped")
-        Log.i(TAG, "SEE_STOP (LISTEN independent requestingListen=${requestingListen.get()})")
+        Log.i(TAG, "SEE_STOP via ${See.FILE_NAME} requestingListen=${requestingListen.get()}")
     }
 
-    /** Refresh our STUN public mapping (needed so peer can reply on cellular). */
+    /**
+     * Best-effort STUN refresh so peers can return packets to us.
+     * Must not block SEE/LISTEN/RING forever — on cellular STUN often fails (carrier);
+     * outbound to peer's public IP still works without our mapping; reverse uses UDP source.
+     */
     private fun ensureSelfPublicPath() {
         if (BarkyPrefs.isWifiOnly(appContext)) return
         val onWifi = NetworkEndpoints.isWifi(appContext)
-        val stale = publicHost.isNullOrBlank() ||
-            System.currentTimeMillis() - lastStunOkMs > 15_000L
-        if (!onWifi || stale) {
-            try {
-                refreshInternetInvite()
-            } catch (t: Throwable) {
-                Log.w(TAG, "ensureSelfPublicPath", t)
+        val fresh = !publicHost.isNullOrBlank() &&
+            System.currentTimeMillis() - lastStunOkMs < 20_000L
+        if (fresh) return
+        // Cap wait so control bursts still fire on cell even if STUN is dead
+        val maxMs = if (onWifi) 6_000L else 4_000L
+        val start = System.currentTimeMillis()
+        try {
+            val done = java.util.concurrent.atomic.AtomicBoolean(false)
+            val t = thread(name = "walkie-stun-brief", isDaemon = true) {
+                try {
+                    refreshInternetInvite()
+                } catch (ex: Throwable) {
+                    Log.w(TAG, "ensureSelfPublicPath stun", ex)
+                } finally {
+                    done.set(true)
+                }
             }
-            // Notify Firebase so peer directory has our latest public IP
-            try {
-                // Service heartbeat is async; PATH_UPDATE is enough for live peers
-            } catch (_: Throwable) {
+            while (!done.get() && System.currentTimeMillis() - start < maxMs) {
+                try {
+                    Thread.sleep(50)
+                } catch (_: InterruptedException) {
+                    break
+                }
             }
+            if (!done.get()) {
+                Log.w(
+                    TAG,
+                    "ensureSelfPublicPath timed out after ${maxMs}ms " +
+                        "(wifi=$onWifi last=$publicHost:$publicUdpPort) — continuing send"
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "ensureSelfPublicPath", t)
         }
     }
 
