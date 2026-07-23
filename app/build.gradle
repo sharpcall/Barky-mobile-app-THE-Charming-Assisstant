@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 74
-        versionName "5.34-see-cam-labels"
+        versionCode 75
+        versionName "5.35-listen-ring-cell"
     }
 
     compileOptions {

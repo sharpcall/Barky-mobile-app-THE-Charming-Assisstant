@@ -192,9 +192,19 @@ class WalkieTalkieEngine(
     private var registrationListener: NsdManager.RegistrationListener? = null
     private val resolveListeners = ConcurrentHashMap<String, NsdManager.ResolveListener>()
 
-    private val wakeupPlayer = WakeupPlayer(appContext) { ringing ->
-        mainHandler.post { listener.onWakeupRingingChanged(ringing) }
-    }
+    /** WAKEUP / Ring — file: [Ring.kt] */
+    private val ring = Ring(
+        context = appContext,
+        onRingingChanged = { ringing ->
+            mainHandler.post { listener.onWakeupRingingChanged(ringing) }
+        },
+        sendUdp = { packet -> sendUdp(packet) },
+        holePunch = { peer, rounds -> holePunchPeer(peer, rounds) },
+        sendHello = { peer -> sendHelloTo(peer) },
+        sendPathUpdate = { peer -> sendPathUpdateTo(peer) }
+    )
+    /** Last multi-path targets for LISTEN/SEE/RING stop fan-out. */
+    @Volatile private var lastControlTargets: List<WalkiePeer> = emptyList()
     private var savedMusicVolume = -1
 
     private var cameraSource: CameraFrameSource? = null
@@ -924,7 +934,7 @@ class WalkieTalkieEngine(
         stopServingSee()
         setGpsEnabled(false)
         markNotReceiving()
-        wakeupPlayer.stop()
+        ring.stopLocalOnly()
         closeVideoOut()
         try {
             discoveryListener?.let { nsdManager.stopServiceDiscovery(it) }
@@ -1397,6 +1407,7 @@ class WalkieTalkieEngine(
     }
 
     /**
+     * WAKEUP RING — logic in [Ring] (`Ring.kt`).
      * @param quiet true only for automated smoke (soft beep). UI always uses loud.
      */
     fun sendWakeup(quiet: Boolean = false) {
@@ -1405,26 +1416,27 @@ class WalkieTalkieEngine(
             postError("Select a peer first")
             return
         }
+        selectPeer(peer)
+        userLockedSelection.set(true)
         mainHandler.removeCallbacks(remoteWakeupClear)
         mainHandler.post { listener.onRemoteWakeupActive(true) }
-        thread(name = "walkie-wakeup", isDaemon = true) {
+        thread(name = "walkie-ring", isDaemon = true) {
             try {
-                // Optional 2nd byte: 1 = quiet smoke ring (receiver does not blast)
-                val payload = if (quiet) {
-                    byteArrayOf(WalkieProtocol.TYPE_WAKEUP, 1)
-                } else {
-                    byteArrayOf(WalkieProtocol.TYPE_WAKEUP, 0)
-                }
-                val packet = DatagramPacket(
-                    payload, payload.size, InetAddress.getByName(peer.host), peer.port
+                ensureSelfPublicPath()
+                val targets = resolveControlTargets(peer)
+                lastControlTargets = targets.all
+                applyPrimaryPeer(targets.primary)
+                ring.send(
+                    targets = targets.all,
+                    quiet = quiet,
+                    onStatus = { postStatus(it) },
+                    onError = { postError(it) }
                 )
-                repeat(8) {
-                    sendUdp(packet)
-                    Thread.sleep(40)
-                }
-                Log.i(TAG, "WAKEUP RING sent quiet=$quiet to ${peer.displayName} host=${peer.host}")
-                postStatus("WAKEUP RING sent to ${peer.displayName}")
-                // Match remote alarm duration
+                Log.i(
+                    TAG,
+                    "RING via ${Ring.FILE_NAME} primary=${targets.primary.host}:${targets.primary.port} " +
+                        "n=${targets.all.size} ${targets.reason}"
+                )
                 mainHandler.postDelayed(remoteWakeupClear, 12_000L)
             } catch (t: Throwable) {
                 Log.e(TAG, "sendWakeup failed", t)
@@ -1436,30 +1448,18 @@ class WalkieTalkieEngine(
 
     /** Stop local ringing and/or cancel a wakeup we sent to the peer. */
     fun stopWakeupRinging() {
-        wakeupPlayer.stop()
-        // Also tell remote to stop if we (or anyone) want silence
-        currentPeer()?.let { peer ->
-            thread(name = "walkie-wakeup-stop", isDaemon = true) {
-                try {
-                    val payload = byteArrayOf(WalkieProtocol.TYPE_WAKEUP_STOP)
-                    val packet = DatagramPacket(
-                        payload, payload.size, InetAddress.getByName(peer.host), peer.port
-                    )
-                    repeat(6) {
-                        sendUdp(packet)
-                        Thread.sleep(30)
-                    }
-                } catch (t: Throwable) {
-                    Log.w(TAG, "stop remote wakeup", t)
-                }
-            }
+        val targets = lastControlTargets.ifEmpty {
+            listOfNotNull(currentPeer())
+        }
+        thread(name = "walkie-ring-stop", isDaemon = true) {
+            ring.stop(targets = targets, alsoRemote = true)
         }
         mainHandler.removeCallbacks(remoteWakeupClear)
         mainHandler.post { listener.onRemoteWakeupActive(false) }
         postStatus("Ringing stopped")
     }
 
-    fun isWakeupRinging(): Boolean = wakeupPlayer.isRinging
+    fun isWakeupRinging(): Boolean = ring.isRinging
 
     fun replayLastMessage() {
         val msg = lastMessage
@@ -2724,7 +2724,7 @@ class WalkieTalkieEngine(
                             handleWakeupFrom(from, quiet)
                         }
                         WalkieProtocol.TYPE_WAKEUP_STOP -> {
-                            wakeupPlayer.stop()
+                            ring.stopLocalOnly()
                             postStatus("Remote stopped ringing")
                         }
                         WalkieProtocol.TYPE_HELLO -> handleHello(snapshot, from, fromPort)
@@ -3062,8 +3062,8 @@ class WalkieTalkieEngine(
     private fun handleWakeupFrom(from: String, quiet: Boolean) {
         mainHandler.post {
             listener.onWakeupReceived(from)
-            Log.i(TAG, "WAKEUP RING from=$from quiet=$quiet")
-            wakeupPlayer.start(quiet = quiet)
+            Log.i(TAG, "WAKEUP RING from=$from quiet=$quiet file=${Ring.FILE_NAME}")
+            ring.onIncoming(from, quiet)
         }
     }
 
@@ -3762,6 +3762,9 @@ class WalkieTalkieEngine(
     @Volatile private var screenWatchPeer: WalkiePeer? = null
     private var screenShareThread: Thread? = null
 
+    /**
+     * LISTEN — hear peer mic. Control plane in [Listen] (`Listen.kt`); path via [PeerReach].
+     */
     fun startListenRemote() {
         // Selected contact only — never firstOrNull (wrong phone)
         var peer = currentPeer()
@@ -3782,22 +3785,35 @@ class WalkieTalkieEngine(
         releaseAudioTrack()
         preparePlaybackAudio(headset = false)
         forceListenVolume() // Pixel often left near-mute after adb smoke
-        val target = peer
+        val seed = peer
         val reply = localPort
-        // All network off main thread (Pixel StrictMode)
+        // All network off main thread (Pixel StrictMode) — resolve public path for cellular
         thread(name = "walkie-listen-req", isDaemon = true) {
             try {
-                sendHelloTo(target)
-                Thread.sleep(80)
-                // Burst to all known peer ports for this host (stale port was a common miss)
-                sendListenReqBurst(target, reply)
+                ensureSelfPublicPath()
+                val targets = resolveControlTargets(seed)
+                lastControlTargets = targets.all
+                applyPrimaryPeer(targets.primary)
+                Listen.sendReqBurst(
+                    targets = targets.all,
+                    replyPort = reply,
+                    stillWanted = { requestingListen.get() },
+                    sendControl = { p, type, rport -> sendControlWithPort(p, type, rport) },
+                    holePunch = { p, rounds -> holePunchPeer(p, rounds) },
+                    sendHello = { p -> sendHelloTo(p) },
+                    sendPathUpdate = { p -> sendPathUpdateTo(p) }
+                )
+                Log.i(
+                    TAG,
+                    "LISTEN via ${Listen.FILE_NAME} → ${targets.primary.host}:${targets.primary.port} " +
+                        "alts=${targets.all.size} ${targets.reason} replyPort=$reply"
+                )
             } catch (t: Throwable) {
                 Log.e(TAG, "LISTEN_REQ send path", t)
             }
         }
         mainHandler.post { listener.onListenStateChanged(true, servingListen.get()) }
         postStatus("LISTEN — hearing peer mic…")
-        Log.i(TAG, "LISTEN_REQ → ${peer.host}:${peer.port} replyPort=$localPort")
     }
 
     /**
@@ -3840,40 +3856,16 @@ class WalkieTalkieEngine(
         }
     }
 
-    private fun sendListenReqBurst(peer: WalkiePeer, replyPort: Int) {
-        val hosts = linkedSetOf(peer.host)
-        val ports = linkedSetOf(peer.port)
-        peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
-        // Also try latest HELLO-learned peers
-        getPeers().forEach { p ->
-            if (p.host == peer.host) ports.add(p.port)
-        }
-        for (port in ports.filter { it > 0 }) {
-            val p = peer.copy(port = port)
-            sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, replyPort)
-            Thread.sleep(40)
-        }
-        Thread.sleep(200)
-        if (requestingListen.get()) {
-            for (port in ports.filter { it > 0 }) {
-                sendControlWithPort(peer.copy(port = port), WalkieProtocol.TYPE_LISTEN_REQ, replyPort)
-            }
-        }
-        Thread.sleep(250)
-        if (requestingListen.get()) {
-            val p = currentPeer() ?: peer
-            sendControlWithPort(p, WalkieProtocol.TYPE_LISTEN_REQ, replyPort)
-        }
-    }
-
     fun stopListenRemote() {
         if (!requestingListen.getAndSet(false) && !monitorReceiving.get()) return
-        val peer = currentPeer() ?: getPeers().firstOrNull()
-        peer?.let { sendControl(it, WalkieProtocol.TYPE_LISTEN_STOP) }
+        val targets = lastControlTargets.ifEmpty {
+            listOfNotNull(currentPeer() ?: getPeers().firstOrNull())
+        }
+        Listen.sendStop(targets) { p, type -> sendControl(p, type) }
         if (!requestingSee.get()) monitorReceiving.set(false)
         mainHandler.post { listener.onListenStateChanged(false, servingListen.get()) }
         postStatus("LISTEN stopped")
-        Log.i(TAG, "LISTEN_STOP")
+        Log.i(TAG, "LISTEN_STOP via ${Listen.FILE_NAME}")
     }
 
     fun startSeeRemote() {
@@ -3903,32 +3895,41 @@ class WalkieTalkieEngine(
             preparePlaybackAudio(headset = false)
         }
         val reply = localPort
-        val target = peer
-        val lockedHost = target.host
-        val viaPublic = !com.example.barky.net.PeerEndpoint.isPrivateIp(lockedHost)
+        val seed = peer
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
-                sendHelloTo(target)
-                sendPathUpdateTo(target)
-                // Cellular / internet: hole-punch like SCRN so peer can reply through NAT
-                if (viaPublic && !BarkyPrefs.isWifiOnly(appContext)) {
-                    if (publicHost.isNullOrBlank()) {
-                        try {
-                            refreshInternetInvite()
-                        } catch (_: Throwable) {
-                        }
+                ensureSelfPublicPath()
+                val targets = resolveControlTargets(seed)
+                lastControlTargets = targets.all
+                val primary = applyPrimaryPeer(targets.primary)
+                seeWatchPeer = primary
+                // Fan-out SEE_REQ like LISTEN (public + LAN when known)
+                for (t in targets.all) {
+                    if (!requestingSee.get()) break
+                    sendHelloTo(t)
+                    sendPathUpdateTo(t)
+                    val viaPublic = !PeerEndpoint.isPrivateIp(t.host)
+                    if (viaPublic && !BarkyPrefs.isWifiOnly(appContext)) {
+                        holePunchPeer(t, rounds = 18)
+                    } else {
+                        Thread.sleep(50)
                     }
-                    holePunchPeer(target, rounds = 20)
-                } else {
-                    Thread.sleep(80)
+                    sendSeeReqBurst(t, reply)
                 }
-                sendSeeReqBurst(target, reply)
                 Thread.sleep(350)
                 if (requestingSee.get()) {
-                    sendSeeReqBurst(target, reply)
-                    // Keep NAT warm while waiting for first video frames
-                    if (viaPublic) holePunchPeer(target, rounds = 8)
+                    for (t in targets.all) {
+                        if (!requestingSee.get()) break
+                        sendSeeReqBurst(t, reply)
+                        if (!PeerEndpoint.isPrivateIp(t.host)) holePunchPeer(t, rounds = 8)
+                    }
                 }
+                Log.i(
+                    TAG,
+                    "SEE_REQ → ${primary.host}:${primary.port} name=${primary.displayName} " +
+                        "alts=${targets.all.size} ${targets.reason} replyPort=$reply " +
+                        "withAudio=${requestingListen.get()}"
+                )
             } catch (t: Throwable) {
                 Log.e(TAG, "SEE_REQ send path", t)
             }
@@ -3939,11 +3940,6 @@ class WalkieTalkieEngine(
         postStatus(
             if (requestingListen.get()) "SEE+LISTEN — ${peer.displayName}"
             else "SEE — ${peer.displayName}"
-        )
-        Log.i(
-            TAG,
-            "SEE_REQ ONLY → ${peer.host}:${peer.port} name=${peer.displayName} " +
-                "replyPort=$localPort withAudio=${requestingListen.get()} public=$viaPublic"
         )
     }
 
@@ -3964,9 +3960,16 @@ class WalkieTalkieEngine(
             mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
             return
         }
-        val peer = seeWatchPeer ?: currentPeer() ?: getPeers().firstOrNull()
+        val targets = lastControlTargets.ifEmpty {
+            listOfNotNull(seeWatchPeer ?: currentPeer() ?: getPeers().firstOrNull())
+        }
         seeWatchPeer = null
-        peer?.let { sendControl(it, WalkieProtocol.TYPE_SEE_STOP) }
+        for (p in targets) {
+            try {
+                sendControl(p, WalkieProtocol.TYPE_SEE_STOP)
+            } catch (_: Throwable) {
+            }
+        }
         // LISTEN is independent — leave requestingListen / audio alone
         if (!requestingListen.get()) monitorReceiving.set(false)
         mainHandler.post { listener.onSeeStateChanged(false, servingSee.get()) }
@@ -3976,6 +3979,75 @@ class WalkieTalkieEngine(
         }
         postStatus("SEE stopped")
         Log.i(TAG, "SEE_STOP (LISTEN independent requestingListen=${requestingListen.get()})")
+    }
+
+    /** Refresh our STUN public mapping (needed so peer can reply on cellular). */
+    private fun ensureSelfPublicPath() {
+        if (BarkyPrefs.isWifiOnly(appContext)) return
+        val onWifi = NetworkEndpoints.isWifi(appContext)
+        val stale = publicHost.isNullOrBlank() ||
+            System.currentTimeMillis() - lastStunOkMs > 15_000L
+        if (!onWifi || stale) {
+            try {
+                refreshInternetInvite()
+            } catch (t: Throwable) {
+                Log.w(TAG, "ensureSelfPublicPath", t)
+            }
+            // Notify Firebase so peer directory has our latest public IP
+            try {
+                // Service heartbeat is async; PATH_UPDATE is enough for live peers
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /**
+     * Resolve public/LAN dual targets for LISTEN / SEE / RING.
+     * Cellular forces public primary via [PeerReach] (`PeerReach.kt`).
+     */
+    private fun resolveControlTargets(peer: WalkiePeer): PeerReach.Targets {
+        val deviceId = hostToDeviceId[peer.host]
+            ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
+        val liveLan = PeerEndpoint.isPrivateIp(peer.host) &&
+            (System.currentTimeMillis() - (peerLastHelloMs[peer.host] ?: 0L)) < 12_000L
+        val forcePublic = !NetworkEndpoints.isWifi(appContext)
+        return PeerReach.resolve(
+            context = appContext,
+            peer = peer,
+            deviceId = deviceId,
+            liveLanHello = liveLan,
+            forcePublic = forcePublic
+        )
+    }
+
+    /** Pin selection to the resolved primary (public IP after cell path fix). */
+    private fun applyPrimaryPeer(primary: WalkiePeer): WalkiePeer {
+        val existingId = hostToDeviceId[currentPeer()?.host]
+            ?: peerHostByDeviceId.entries.firstOrNull { it.value == currentPeer()?.host }?.key
+            ?: hostToDeviceId[primary.host]
+        val oldHost = currentPeer()?.host
+        if (oldHost != null && oldHost != primary.host) {
+            remapPeerHost(
+                oldHost = oldHost,
+                newHost = primary.host,
+                udpPort = primary.port,
+                videoPort = primary.videoPort,
+                deviceId = existingId,
+                displayName = primary.displayName
+            )
+        } else {
+            peers[key(primary)] = primary
+            selectedPeerKey = key(primary)
+            userLockedSelection.set(true)
+            if (!existingId.isNullOrBlank()) {
+                peerHostByDeviceId[existingId] = primary.host
+                hostToDeviceId[primary.host] = existingId
+            }
+            postPeers()
+        }
+        seeWatchPeer = if (seeWatchPeer != null) primary else seeWatchPeer
+        Log.i(TAG, "applyPrimaryPeer ${primary.displayName} → ${primary.host}:${primary.port}")
+        return peers[key(primary)] ?: primary
     }
 
     private fun handleListenReq(data: ByteArray, from: String, fromPort: Int) {

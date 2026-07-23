@@ -1,6 +1,7 @@
 package com.example.barky.net
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.example.barky.BarkyPrefs
 import org.json.JSONObject
@@ -13,14 +14,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Free-tier Firebase **Firestore REST** directory (no media relay).
+ * Free-tier Firebase **Firestore REST** phone book only.
+ *
+ * Stores who is online and how to reach them (LAN IP + public STUN IP/ports).
+ * **Never** carries audio, video, or call media — those stay pure peer-to-peer
+ * (UDP/TCP phone→phone). Firebase is not a relay or media server.
  *
  * Requires [com.example.barky.R.string.firebase_project_id] + API key in resources,
  * filled from your Firebase project (see docs/FIREBASE_SETUP.md).
  * If not configured, all calls no-op and log once.
- *
- * Uses REST so the app builds **without** `google-services.json` until you add it.
- * When you add the JSON, you can later switch to the official SDK; the document shape stays the same.
  */
 object FirebasePeerDirectory {
     private const val TAG = "FirebasePeerDirectory"
@@ -28,14 +30,27 @@ object FirebasePeerDirectory {
     private val io = Executors.newSingleThreadExecutor()
     private val warned = AtomicBoolean(false)
 
-    data class Config(val projectId: String, val apiKey: String)
+    data class Config(
+        val projectId: String,
+        val apiKey: String,
+        /** Firestore database id, e.g. barkydefault or (default). */
+        val databaseId: String = "barkydefault"
+    )
 
     fun isConfigured(context: Context): Boolean {
         val c = config(context) ?: return false
         return c.projectId.isNotBlank() &&
             !c.projectId.startsWith("YOUR_") &&
             c.apiKey.isNotBlank() &&
-            !c.apiKey.startsWith("YOUR_")
+            !c.apiKey.startsWith("YOUR_") &&
+            c.databaseId.isNotBlank()
+    }
+
+    /** REST base: …/projects/{id}/databases/{db}/documents */
+    private fun documentsBase(cfg: Config): String {
+        val db = java.net.URLEncoder.encode(cfg.databaseId, "UTF-8")
+            .replace("+", "%20")
+        return "https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/$db/documents"
     }
 
     /**
@@ -49,7 +64,9 @@ object FirebasePeerDirectory {
         appVersion: String,
         lat: Double? = null,
         lon: Double? = null,
-        walkieSocket: java.net.DatagramSocket? = null
+        walkieSocket: java.net.DatagramSocket? = null,
+        updateHttpPort: Int = 0,
+        versionCode: Int = 0
     ) {
         if (!isConfigured(context)) {
             if (warned.compareAndSet(false, true)) {
@@ -63,10 +80,67 @@ object FirebasePeerDirectory {
         }
         io.execute {
             try {
-                registerBlocking(context, localUdpPort, localVideoPort, appVersion, lat, lon, walkieSocket)
+                registerBlocking(
+                    context, localUdpPort, localVideoPort, appVersion, lat, lon, walkieSocket,
+                    updateHttpPort, versionCode
+                )
             } catch (t: Throwable) {
                 Log.w(TAG, "register failed", t)
             }
+        }
+    }
+
+    /** Blocking list for update discovery (call off main). */
+    fun listAllBlocking(context: Context): List<PeerEndpoint> {
+        if (!isConfigured(context)) return emptyList()
+        return try {
+            listAll(context)
+        } catch (t: Throwable) {
+            Log.w(TAG, "listAllBlocking", t)
+            emptyList()
+        }
+    }
+
+    data class UpdateCatalog(
+        val apkUrl: String,
+        val minVersionCode: Int,
+        val versionName: String
+    )
+
+    /** Read `_meta/app_update` for a public HTTP(S) APK URL (cellular-friendly). */
+    fun fetchUpdateCatalogBlocking(context: Context): UpdateCatalog? {
+        val cfg = config(context) ?: return null
+        val url = "${documentsBase(cfg)}/_meta/app_update?key=${cfg.apiKey}"
+        return try {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 12_000
+                readTimeout = 12_000
+            }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.use { BufferedReader(InputStreamReader(it)).readText() }
+                .orEmpty()
+            conn.disconnect()
+            if (code !in 200..299) {
+                Log.i(TAG, "app_update catalog HTTP $code")
+                return null
+            }
+            val fields = JSONObject(text).optJSONObject("fields") ?: return null
+            fun s(name: String): String =
+                fields.optJSONObject(name)?.optString("stringValue").orEmpty()
+            fun i(name: String): Int =
+                fields.optJSONObject(name)?.optString("integerValue")?.toIntOrNull() ?: 0
+            val apkUrl = s("apkUrl")
+            if (apkUrl.isBlank()) return null
+            UpdateCatalog(
+                apkUrl = apkUrl,
+                minVersionCode = i("versionCode"),
+                versionName = s("versionName")
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "fetchUpdateCatalog", t)
+            null
         }
     }
 
@@ -82,6 +156,17 @@ object FirebasePeerDirectory {
                 Log.w(TAG, "lookup $deviceId", t)
                 cb(null)
             }
+        }
+    }
+
+    /** Blocking device lookup (call off main — LISTEN/SEE/RING path refresh). */
+    fun lookupByDeviceIdBlocking(context: Context, deviceId: String): PeerEndpoint? {
+        if (!isConfigured(context) || deviceId.isBlank()) return null
+        return try {
+            lookupByDeviceId(context, deviceId)
+        } catch (t: Throwable) {
+            Log.w(TAG, "lookupByDeviceIdBlocking $deviceId", t)
+            null
         }
     }
 
@@ -122,13 +207,18 @@ object FirebasePeerDirectory {
 
     private fun listAll(context: Context): List<PeerEndpoint> {
         val cfg = config(context) ?: return emptyList()
-        // Page through collection (pageSize max 300 on REST)
+        // Prefer runQuery: some Firestore rule sets allow get/query but deny raw collection list (403).
+        val queried = listAllViaRunQuery(cfg)
+        if (queried != null) {
+            Log.i(TAG, "listAll count=${queried.size} (runQuery)")
+            return queried
+        }
+        // Fallback: REST list collection
         val out = ArrayList<PeerEndpoint>()
         var pageToken: String? = null
         do {
             val base =
-                "https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/" +
-                    "$COLLECTION?pageSize=100&key=${cfg.apiKey}"
+                "${documentsBase(cfg)}/$COLLECTION?pageSize=100&key=${cfg.apiKey}"
             val url = if (pageToken.isNullOrBlank()) base
             else base + "&pageToken=" + java.net.URLEncoder.encode(pageToken, "UTF-8")
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -155,8 +245,53 @@ object FirebasePeerDirectory {
             }
             pageToken = root.optString("nextPageToken").takeIf { it.isNotBlank() }
         } while (!pageToken.isNullOrBlank())
-        Log.i(TAG, "listAll count=${out.size}")
+        Log.i(TAG, "listAll count=${out.size} (list)")
         return out
+    }
+
+    /**
+     * Structured query over [COLLECTION]. Returns null only on transport/HTTP failure
+     * (empty list is a valid success).
+     */
+    private fun listAllViaRunQuery(cfg: Config): List<PeerEndpoint>? {
+        val query = JSONObject()
+            .put(
+                "structuredQuery",
+                JSONObject()
+                    .put("from", org.json.JSONArray().put(JSONObject().put("collectionId", COLLECTION)))
+                    .put("limit", 100)
+            )
+        val url = "${documentsBase(cfg)}:runQuery?key=${cfg.apiKey}"
+        return try {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                connectTimeout = 15_000
+                readTimeout = 15_000
+            }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(query.toString()) }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.use { BufferedReader(InputStreamReader(it)).readText() }
+                .orEmpty()
+            conn.disconnect()
+            if (code !in 200..299) {
+                Log.w(TAG, "listAll runQuery HTTP $code $text")
+                return null
+            }
+            val out = ArrayList<PeerEndpoint>()
+            val arr = org.json.JSONArray(text)
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val doc = o.optJSONObject("document") ?: continue
+                parseDocument(doc)?.let { out.add(it) }
+            }
+            out
+        } catch (t: Throwable) {
+            Log.w(TAG, "listAll runQuery", t)
+            null
+        }
     }
 
     private fun config(context: Context): Config? {
@@ -166,7 +301,17 @@ object FirebasePeerDirectory {
             val pid = res.getIdentifier("firebase_project_id", "string", pkg)
             val key = res.getIdentifier("firebase_api_key", "string", pkg)
             if (pid == 0 || key == 0) return null
-            Config(res.getString(pid).trim(), res.getString(key).trim())
+            val dbId = res.getIdentifier("firebase_database_id", "string", pkg)
+            val databaseId = if (dbId != 0) {
+                res.getString(dbId).trim().ifBlank { "barkydefault" }
+            } else {
+                "barkydefault"
+            }
+            Config(
+                projectId = res.getString(pid).trim(),
+                apiKey = res.getString(key).trim(),
+                databaseId = databaseId
+            )
         } catch (_: Throwable) {
             null
         }
@@ -179,16 +324,26 @@ object FirebasePeerDirectory {
         appVersion: String,
         lat: Double?,
         lon: Double?,
-        walkieSocket: java.net.DatagramSocket?
+        walkieSocket: java.net.DatagramSocket?,
+        updateHttpPort: Int = 0,
+        versionCode: Int = 0
     ) {
         val cfg = config(context) ?: return
         val idSnap = DeviceIdentity.snapshot(context, lat, lon)
         val net = NetworkEndpoints.snapshot(context, walkieSocket)
+        val phoneModel = idSnap.model
+        val manufacturer = idSnap.manufacturer
+        val androidVersion = Build.VERSION.RELEASE ?: "?"
+        val androidSdk = Build.VERSION.SDK_INT
         val body = JSONObject()
             .put("fields", JSONObject()
                 .put("deviceId", stringField(idSnap.deviceId))
                 .put("phoneNumber", stringField(idSnap.phoneNumber))
-                .put("displayName", stringField("${idSnap.manufacturer} ${idSnap.model}"))
+                .put("displayName", stringField("$manufacturer $phoneModel"))
+                .put("phoneModel", stringField(phoneModel))
+                .put("manufacturer", stringField(manufacturer))
+                .put("androidVersion", stringField(androidVersion))
+                .put("androidSdk", intField(androidSdk))
                 .put("androidId", stringField(idSnap.androidId))
                 .put("localIp", stringField(net.localIp ?: ""))
                 .put("localUdpPort", intField(localUdpPort))
@@ -198,6 +353,8 @@ object FirebasePeerDirectory {
                 .put("wifiSsid", stringField(net.wifiSsid ?: ""))
                 .put("onWifi", boolField(net.onWifi))
                 .put("appVersion", stringField(appVersion))
+                .put("updateHttpPort", intField(updateHttpPort))
+                .put("versionCode", intField(versionCode))
                 .put("updatedAtMs", intField(System.currentTimeMillis()))
                 .apply {
                     if (lat != null) put("lat", doubleField(lat))
@@ -205,8 +362,7 @@ object FirebasePeerDirectory {
                 }
             )
         val url =
-            "https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/" +
-                "$COLLECTION/${idSnap.deviceId}?key=${cfg.apiKey}"
+            "${documentsBase(cfg)}/$COLLECTION/${idSnap.deviceId}?key=${cfg.apiKey}"
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "PATCH"
             doOutput = true
@@ -225,8 +381,10 @@ object FirebasePeerDirectory {
                 .apply()
             Log.i(
                 TAG,
-                "registered id=${idSnap.deviceId} local=${net.localIp}:$localUdpPort " +
-                    "public=${net.publicIp}:${net.publicUdpPort} wifi=${net.onWifi}"
+                "registered db=${cfg.databaseId} id=${idSnap.deviceId} local=${net.localIp}:$localUdpPort " +
+                    "public=${net.publicIp}:${net.publicUdpPort} wifi=${net.onWifi} " +
+                    "model=$manufacturer $phoneModel android=$androidVersion (sdk $androidSdk) " +
+                    "appVersion=$appVersion versionCode=$versionCode updateHttpPort=$updateHttpPort"
             )
         } else {
             Log.w(TAG, "register HTTP $code $resp")
@@ -237,8 +395,7 @@ object FirebasePeerDirectory {
     private fun lookupByDeviceId(context: Context, deviceId: String): PeerEndpoint? {
         val cfg = config(context) ?: return null
         val url =
-            "https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/" +
-                "$COLLECTION/$deviceId?key=${cfg.apiKey}"
+            "${documentsBase(cfg)}/$COLLECTION/$deviceId?key=${cfg.apiKey}"
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 12_000
@@ -279,7 +436,7 @@ object FirebasePeerDirectory {
                     .put("limit", 10)
             )
         val url =
-            "https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents:runQuery?key=${cfg.apiKey}"
+            "${documentsBase(cfg)}:runQuery?key=${cfg.apiKey}"
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
@@ -322,10 +479,19 @@ object FirebasePeerDirectory {
         fun d(name: String): Double? =
             fields.optJSONObject(name)?.optDouble("doubleValue")?.takeIf { !it.isNaN() }
         val id = s("deviceId").ifBlank { return null }
+        val model = s("phoneModel")
+        val mfr = s("manufacturer")
+        val display = s("displayName").ifBlank {
+            listOf(mfr, model).filter { it.isNotBlank() }.joinToString(" ")
+        }
         return PeerEndpoint(
             deviceId = id,
             phoneNumber = s("phoneNumber").ifBlank { "NoPhoneNumber" },
-            displayName = s("displayName"),
+            displayName = display,
+            phoneModel = model,
+            manufacturer = mfr,
+            androidVersion = s("androidVersion"),
+            androidSdk = i("androidSdk").toInt(),
             localIp = s("localIp").ifBlank { null },
             localUdpPort = i("localUdpPort").toInt(),
             localVideoPort = i("localVideoPort").toInt(),
@@ -335,7 +501,9 @@ object FirebasePeerDirectory {
             lat = d("lat"),
             lon = d("lon"),
             updatedAtMs = i("updatedAtMs"),
-            appVersion = s("appVersion")
+            appVersion = s("appVersion"),
+            updateHttpPort = i("updateHttpPort").toInt(),
+            versionCode = i("versionCode").toInt()
         )
     }
 

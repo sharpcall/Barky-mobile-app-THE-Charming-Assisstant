@@ -1187,8 +1187,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        // Room for face + small on-picture flip badge
-        val baseW = ((if (pipEnlarged) 220f else 176f) * density).toInt()
+        // Larger self-view; flip badge sits ON this box (not outside)
+        val baseW = ((if (pipEnlarged) 280f else 228f) * density).toInt()
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1209,8 +1209,8 @@ class MainActivity : AppCompatActivity() {
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val maxW = (parentW * (if (pipEnlarged) 0.52f else 0.46f)).toInt().coerceAtLeast(baseW)
-        val maxH = (parentH * (if (pipEnlarged) 0.58f else 0.48f)).toInt().coerceAtLeast(baseW)
+        val maxW = (parentW * (if (pipEnlarged) 0.58f else 0.50f)).toInt().coerceAtLeast(baseW)
+        val maxH = (parentH * (if (pipEnlarged) 0.62f else 0.52f)).toInt().coerceAtLeast(baseW)
         if (pipW > maxW) {
             val s = maxW.toFloat() / pipW
             pipW = maxW
@@ -1268,7 +1268,7 @@ class MainActivity : AppCompatActivity() {
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         lp.setMargins(left, top, 0, 0)
         walkiePipBox.layoutParams = lp
-        // Preview fills the box; flip is laid out as overlay (top|end) inside same box
+        // Preview fills the box; flip is a badge ON the self-picture (bottom-end)
         walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -1276,14 +1276,16 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.alpha = 1f
         if (::walkiePipFlip.isInitialized && isSeeing) {
             val dens = resources.displayMetrics.density
-            val badge = (28 * dens).toInt()
-            val m = (4 * dens).toInt()
+            val badge = (40 * dens).toInt()
+            val m = (8 * dens).toInt()
             walkiePipFlip.layoutParams = android.widget.FrameLayout.LayoutParams(badge, badge).apply {
-                gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
                 setMargins(m, m, m, m)
             }
             walkiePipFlip.visibility = View.VISIBLE
             walkiePipFlip.bringToFront()
+            walkiePipBox.clipChildren = true
+            walkiePipBox.clipToPadding = true
         }
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }

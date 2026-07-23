@@ -201,7 +201,8 @@ class ContactsActivity : AppCompatActivity() {
                 val liveLan = ep.localIp
                     ?.takeIf { PeerEndpoint.isPrivateIp(it) }
                     ?.let { lanByHost[it] }
-                val preferLan = NetworkEndpoints.preferLanPath(
+                // Cellular self: never pin private LAN (use public STUN path)
+                val preferLan = selfNet.onWifi && NetworkEndpoints.preferLanPath(
                     selfNet,
                     ep.localIp,
                     ep.wifiHint,
