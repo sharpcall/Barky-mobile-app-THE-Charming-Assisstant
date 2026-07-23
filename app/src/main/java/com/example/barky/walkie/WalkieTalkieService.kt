@@ -130,6 +130,8 @@ class WalkieTalkieService : Service() {
     ): Boolean = engine?.adoptDirectoryPeer(displayName, host, udpPort, videoPort, deviceId) == true
     fun localUdpPort(): Int = engine?.localUdpPort() ?: 0
     fun localVideoTcpPort(): Int = engine?.localVideoTcpPort() ?: 0
+    /** Walkie-socket STUN mapping for Contacts (never a temp socket). */
+    fun publicStunMapping(): Pair<String?, Int> = engine?.publicStunMapping() ?: (null to 0)
     fun startTalking(playbackMode: Byte = WalkieProtocol.AUDIO_MODE_SPEAKER) =
         engine?.startTalking(playbackMode)
     fun stopTalking() = engine?.stopTalking()

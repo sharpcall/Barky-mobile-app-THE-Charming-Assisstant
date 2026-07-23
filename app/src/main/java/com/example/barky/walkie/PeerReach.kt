@@ -151,18 +151,33 @@ object PeerReach {
             ordered.add(safePrimary)
         }
 
-        val usedPublic = !PeerEndpoint.isPrivateIp(safePrimary.host)
+        // Drop self LAN targets (same-NAT hairpin → own camera/SCRN)
+        val selfLocal = NetworkEndpoints.findLocalIpv4()
+        val cleaned = ordered.filter { p ->
+            if (!selfLocal.isNullOrBlank() && p.host == selfLocal) {
+                Log.w(TAG, "drop self LAN target ${p.host}:${p.port}")
+                false
+            } else {
+                true
+            }
+        }
+        val primaryOut = when {
+            cleaned.any { it.host == safePrimary.host && it.port == safePrimary.port } -> safePrimary
+            cleaned.isNotEmpty() -> cleaned.first()
+            else -> safePrimary
+        }
+        val usedPublic = !PeerEndpoint.isPrivateIp(primaryOut.host)
         val reason = buildString {
             append(if (mustPublic) "forcePublic" else if (preferLan) "preferLan" else "preferPublic")
             append(" selfWifi=").append(selfOnWifi)
             append(" liveLan=").append(liveLanHello)
-            append(" primary=").append(safePrimary.host).append(':').append(safePrimary.port)
-            append(" alts=").append(ordered.size)
+            append(" primary=").append(primaryOut.host).append(':').append(primaryOut.port)
+            append(" alts=").append(cleaned.size)
         }
         Log.i(TAG, "resolve $reason")
         return Targets(
-            primary = safePrimary,
-            all = ordered.toList(),
+            primary = primaryOut,
+            all = cleaned.ifEmpty { listOf(primaryOut) },
             usedPublic = usedPublic,
             reason = reason
         )

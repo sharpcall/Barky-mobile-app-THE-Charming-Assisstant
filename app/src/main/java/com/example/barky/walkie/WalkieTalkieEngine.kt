@@ -293,6 +293,28 @@ class WalkieTalkieEngine(
             postError("Invalid contact address")
             return false
         }
+        // Never select ourselves — same public IP hairpin was showing S20 camera as "Pixel"
+        val selfLocal = NetworkEndpoints.findLocalIpv4()
+        if (!selfLocal.isNullOrBlank() && host == selfLocal) {
+            postError("Contact address is this phone (LAN) — pick the other device")
+            Log.w(TAG, "adopt REJECT self LAN $host:$udpPort")
+            return false
+        }
+        if (!publicHost.isNullOrBlank() && host == publicHost &&
+            (publicUdpPort <= 0 || udpPort == publicUdpPort)
+        ) {
+            postError("Contact address is this phone (public) — pick the other device")
+            Log.w(TAG, "adopt REJECT self public $host:$udpPort (mine=$publicUdpPort)")
+            return false
+        }
+        try {
+            val myId = DeviceIdentity.deviceId(appContext)
+            if (!deviceId.isNullOrBlank() && deviceId == myId) {
+                postError("Cannot select this phone as contact")
+                return false
+            }
+        } catch (_: Throwable) {
+        }
         val cleanName = friendlyDisplayName(displayName, host)
         val peer = WalkiePeer(
             serviceName = "Barky-$cleanName",

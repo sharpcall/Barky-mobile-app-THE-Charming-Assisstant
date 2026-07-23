@@ -166,12 +166,26 @@ class ContactsActivity : AppCompatActivity() {
     private fun loadContacts() {
         status.setText(R.string.contacts_loading)
         val selfId = DeviceIdentity.deviceId(this)
-        val selfNet = NetworkEndpoints.snapshot(this)
+        // Prefer engine STUN (walkie socket); avoid temp-socket public ports in contacts
+        val engMap = service?.publicStunMapping()
+        val selfNet = NetworkEndpoints.Snapshot(
+            localIp = NetworkEndpoints.findLocalIpv4(),
+            publicIp = engMap?.first ?: run {
+                // Lightweight: no STUN here (was inventing wrong public ports)
+                null
+            },
+            publicUdpPort = engMap?.second ?: 0,
+            onWifi = NetworkEndpoints.isWifi(this),
+            wifiSsid = null
+        )
         val selfIp = selfNet.localIp
-        // Live LAN peers keyed by host for port refresh only
+        val selfPublicIp = selfNet.publicIp
+        val selfPublicUdp = selfNet.publicUdpPort
+        // Live LAN peers keyed by host for port refresh only — never include self
         val lanByHost = HashMap<String, WalkiePeer>()
         service?.peers?.forEach { p ->
-            if (selfIp == null || p.host != selfIp) lanByHost[p.host] = p
+            if (isSelfHost(p.host, p.port, selfIp, selfPublicIp, selfPublicUdp)) return@forEach
+            lanByHost[p.host] = p
         }
 
         if (!FirebasePeerDirectory.isConfigured(this)) {
@@ -196,59 +210,60 @@ class ContactsActivity : AppCompatActivity() {
             val now = System.currentTimeMillis()
             val byId = LinkedHashMap<String, ContactRow>()
             for (ep in remote) {
-                if (!isRealContactDevice(ep, selfId, now, selfIp)) continue
+                if (!isRealContactDevice(ep, selfId, now, selfIp, selfPublicIp, selfPublicUdp)) continue
                 // Live HELLO only on the peer's private LAN address
                 val liveLan = ep.localIp
                     ?.takeIf { PeerEndpoint.isPrivateIp(it) }
                     ?.let { lanByHost[it] }
-                // Cellular self: never pin private LAN (use public STUN path)
+                // Same house NAT: both phones often share one public IP (e.g. 142.x).
+                // Never target that IP with OUR stun port — that hairpins SEE/SCRN to self.
+                val samePublicNat = !selfPublicIp.isNullOrBlank() &&
+                    ep.publicIp == selfPublicIp &&
+                    ep.publicUdpPort > 0
+                val peerOnCellLocal = !ep.localIp.isNullOrBlank() &&
+                    !PeerEndpoint.isPrivateIp(ep.localIp!!) &&
+                    ep.localIp != selfIp
+                // Prefer LAN when live HELLO; when same public NAT without live LAN, still use
+                // peer's public *port* (hairpin) only if port != ours.
                 val preferLan = selfNet.onWifi && NetworkEndpoints.preferLanPath(
                     selfNet,
                     ep.localIp,
                     ep.wifiHint,
                     liveLanHello = liveLan != null
                 )
-                val host = when {
-                    preferLan && !ep.localIp.isNullOrBlank() -> ep.localIp!!
-                    !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
-                    !ep.localIp.isNullOrBlank() -> ep.localIp!!
-                    else -> continue
-                }
-                if (selfIp != null && host == selfIp) continue
 
-                // Port refresh from live HELLO (LAN or public path)
-                val liveAny = listOfNotNull(ep.localIp, ep.publicIp, host)
-                    .firstNotNullOfOrNull { lanByHost[it] }
+                val path = pickContactPath(
+                    ep = ep,
+                    preferLan = preferLan,
+                    liveLan = liveLan,
+                    samePublicNat = samePublicNat,
+                    selfIp = selfIp,
+                    selfPublicIp = selfPublicIp,
+                    selfPublicUdp = selfPublicUdp
+                )
+                if (path == null) {
+                    Log.w(
+                        TAG,
+                        "skip ${ep.deviceId.take(12)}: no safe path " +
+                            "lan=${ep.localIp} pub=${ep.publicIp}:${ep.publicUdpPort} " +
+                            "selfPub=$selfPublicIp:$selfPublicUdp cellLocal=$peerOnCellLocal"
+                    )
+                    continue
+                }
+                val targetHost = path.host
+                val udp = path.udp
+                val vport = path.video
+                val pathLabel = path.label
+                if (isSelfHost(targetHost, udp, selfIp, selfPublicIp, selfPublicUdp)) {
+                    Log.w(TAG, "skip self host $targetHost:$udp id=${ep.deviceId.take(12)}")
+                    continue
+                }
 
-                val udp = when {
-                    preferLan && liveLan != null && liveLan.port > 0 -> liveLan.port
-                    liveAny != null && liveAny.port > 0 && liveAny.host == host -> liveAny.port
-                    preferLan && ep.localUdpPort > 0 -> ep.localUdpPort
-                    ep.publicUdpPort > 0 && !preferLan -> ep.publicUdpPort
-                    ep.localUdpPort > 0 -> ep.localUdpPort
-                    else -> ep.publicUdpPort
-                }
-                if (udp <= 0) continue
-                val vport = when {
-                    preferLan && liveLan != null && liveLan.videoPort > 0 -> liveLan.videoPort
-                    liveAny != null && liveAny.videoPort > 0 && liveAny.host == host -> liveAny.videoPort
-                    preferLan && ep.localVideoPort > 0 -> ep.localVideoPort
-                    ep.localVideoPort > 0 -> ep.localVideoPort
-                    else -> udp
-                }
-                // Never pin residual private HELLO when preferLan is false (cellular ↔ Wi‑Fi)
-                val targetHost = when {
-                    preferLan && liveLan != null -> liveLan.host
-                    preferLan && !ep.localIp.isNullOrBlank() -> ep.localIp!!
-                    !ep.publicIp.isNullOrBlank() -> ep.publicIp!!
-                    else -> host
-                }
-                val path = if (PeerEndpoint.isPrivateIp(targetHost)) "Wi-Fi" else "Internet"
                 val age = now - ep.updatedAtMs
-                val online = age in 0..TimeUnit.MINUTES.toMillis(5) || liveLan != null || liveAny != null
+                val online = age in 0..TimeUnit.MINUTES.toMillis(5) || liveLan != null
                 val title = ContactLabels.fromEndpoint(ep)
                 val sub = ContactLabels.pathSubtitle(
-                    pathLabel = path,
+                    pathLabel = pathLabel,
                     targetHost = targetHost,
                     localIp = ep.localIp,
                     publicIp = ep.publicIp,
@@ -326,11 +341,91 @@ class ContactsActivity : AppCompatActivity() {
         Log.i(TAG, "contacts_ready count=${rows.size} self=${selfNet.localIp}")
     }
 
+    private data class PickedPath(
+        val host: String,
+        val udp: Int,
+        val video: Int,
+        val label: String
+    )
+
+    /**
+     * Choose a host/port that is never our own socket.
+     * Same-house NAT (shared public IP) is the main SEE/SCRN self-loop cause.
+     */
+    private fun pickContactPath(
+        ep: PeerEndpoint,
+        preferLan: Boolean,
+        liveLan: WalkiePeer?,
+        samePublicNat: Boolean,
+        selfIp: String?,
+        selfPublicIp: String?,
+        selfPublicUdp: Int
+    ): PickedPath? {
+        if (preferLan && liveLan != null &&
+            !isSelfHost(liveLan.host, liveLan.port, selfIp, selfPublicIp, selfPublicUdp)
+        ) {
+            return PickedPath(
+                liveLan.host,
+                liveLan.port,
+                if (liveLan.videoPort > 0) liveLan.videoPort else liveLan.port,
+                "Wi-Fi"
+            )
+        }
+        if (preferLan && !ep.localIp.isNullOrBlank() && PeerEndpoint.isPrivateIp(ep.localIp!!) &&
+            ep.localUdpPort > 0 && ep.localIp != selfIp
+        ) {
+            return PickedPath(
+                ep.localIp!!,
+                ep.localUdpPort,
+                if (ep.localVideoPort > 0) ep.localVideoPort else ep.localUdpPort,
+                "Wi-Fi"
+            )
+        }
+        // Public path: require peer STUN port and never our public port
+        if (!ep.publicIp.isNullOrBlank() && ep.publicUdpPort > 0) {
+            if (ep.publicIp == selfPublicIp && ep.publicUdpPort == selfPublicUdp) return null
+            return PickedPath(
+                ep.publicIp!!,
+                ep.publicUdpPort,
+                if (ep.localVideoPort > 0) ep.localVideoPort else ep.publicUdpPort,
+                if (samePublicNat) "Same-NAT" else "Internet"
+            )
+        }
+        if (!ep.localIp.isNullOrBlank() && ep.localUdpPort > 0 && ep.localIp != selfIp) {
+            return PickedPath(
+                ep.localIp!!,
+                ep.localUdpPort,
+                if (ep.localVideoPort > 0) ep.localVideoPort else ep.localUdpPort,
+                "LAN?"
+            )
+        }
+        return null
+    }
+
+    /** True if host:udp is this phone (local NIC or our STUN mapping). */
+    private fun isSelfHost(
+        host: String,
+        udp: Int,
+        selfIp: String?,
+        selfPublicIp: String?,
+        selfPublicUdp: Int
+    ): Boolean {
+        if (host.isBlank()) return true
+        if (!selfIp.isNullOrBlank() && host == selfIp) return true
+        if (!selfPublicIp.isNullOrBlank() && host == selfPublicIp) {
+            // Same public IP as us: only "self" if port is ours (or unknown 0)
+            if (selfPublicUdp <= 0 || udp <= 0 || udp == selfPublicUdp) return true
+        }
+        return false
+    }
+
     private fun isRealContactDevice(
         ep: PeerEndpoint,
         selfId: String?,
         now: Long,
-        selfIp: String?
+        selfIp: String?,
+        selfPublicIp: String?,
+        selfPublicUdp: Int
     ): Boolean {
         if (!selfId.isNullOrBlank() && ep.deviceId == selfId) return false
         val id = ep.deviceId
@@ -347,6 +442,12 @@ class ContactsActivity : AppCompatActivity() {
         if (ep.appVersion.equals("seed", true)) return false
         if (ep.localIp.isNullOrBlank() && ep.publicIp.isNullOrBlank()) return false
         if (selfIp != null && ep.localIp == selfIp) return false
+        // Exact self public endpoint
+        if (!selfPublicIp.isNullOrBlank() && ep.publicIp == selfPublicIp &&
+            selfPublicUdp > 0 && ep.publicUdpPort == selfPublicUdp
+        ) {
+            return false
+        }
         if (ep.updatedAtMs > 0L && now - ep.updatedAtMs > TimeUnit.HOURS.toMillis(2)) return false
         return true
     }
