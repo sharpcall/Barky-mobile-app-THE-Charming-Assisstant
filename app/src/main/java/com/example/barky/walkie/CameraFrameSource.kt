@@ -43,6 +43,13 @@ data class CaptureConfig(
             jpegQuality = 70,
             maxBytesTcp = 80_000
         )
+        /** SEE remote camera: ~30 fps, modest size — prioritise low latency over still quality. */
+        val SeeLive = CaptureConfig(
+            minIntervalMs = WalkieProtocol.SEE_VIDEO_MIN_INTERVAL_MS,
+            maxEdge = WalkieProtocol.SEE_VIDEO_MAX_EDGE,
+            jpegQuality = WalkieProtocol.SEE_VIDEO_JPEG_QUALITY,
+            maxBytesTcp = 120_000
+        )
         /** Local record-only path: denser frames, sharper JPEGs (no network pressure while capturing). */
         val BestRecord = CaptureConfig(
             minIntervalMs = WalkieProtocol.BEST_VIDEO_MIN_INTERVAL_MS,

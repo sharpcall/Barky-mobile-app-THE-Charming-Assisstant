@@ -106,6 +106,8 @@ class SeeCameraSession(
     private val isActive: () -> Boolean,
     private val isTcpConnected: () -> Boolean,
     private val useAvc: Boolean,
+    /** Optional UI TextureView surface so local self-PiP shows while serving SEE. */
+    private val externalSurfaceTexture: () -> android.graphics.SurfaceTexture? = { null },
     private val onPreviewReady: (w: Int, h: Int, orient: Int, front: Boolean) -> Unit = { _, _, _, _ -> },
     private val onError: (String) -> Unit = {},
     private val onAvcUnit: (ByteArray) -> Unit = {},
@@ -158,16 +160,11 @@ class SeeCameraSession(
         }
         encoder = enc
 
-        // AVC uses full Live capture; JPEG-only UDP fallback uses tighter edge/quality
+        // AVC uses full Live capture; JPEG SEE path optimised for low latency (~30 fps)
         val captureConfig = if (enc != null && enc.isReady()) {
             CaptureConfig.Live
         } else {
-            CaptureConfig(
-                minIntervalMs = CaptureConfig.Live.minIntervalMs,
-                maxEdge = 480,
-                jpegQuality = 70,
-                maxBytesTcp = CaptureConfig.Live.maxBytesTcp
-            )
+            CaptureConfig.SeeLive
         }
         val cam = if (enc != null && enc.isReady()) {
             val readyEnc = enc
@@ -176,7 +173,7 @@ class SeeCameraSession(
                 compactForUdp = { !isTcpConnected() },
                 config = captureConfig,
                 preferFrontCamera = preferFront,
-                externalSurfaceTexture = { null },
+                externalSurfaceTexture = externalSurfaceTexture,
                 onFacingChanged = { front -> BarkyPrefs.setCameraFront(context, front) },
                 onPreviewReady = onPreviewReady,
                 onError = { msg ->
@@ -202,7 +199,7 @@ class SeeCameraSession(
                 compactForUdp = { !isTcpConnected() },
                 config = captureConfig,
                 preferFrontCamera = preferFront,
-                externalSurfaceTexture = { null },
+                externalSurfaceTexture = externalSurfaceTexture,
                 onFacingChanged = { front -> BarkyPrefs.setCameraFront(context, front) },
                 onPreviewReady = onPreviewReady,
                 onError = { msg ->

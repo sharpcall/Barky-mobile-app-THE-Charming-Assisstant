@@ -106,12 +106,17 @@ object WalkieProtocol {
      * Target ~20–25 fps when encode keeps up.
      * LAN TCP MJPEG: sharp stills via platform JPEG (no 3rd-party codec).
      */
-    /** Slightly steadier pace for live encode→display (less flash than over-encoding). */
+    /** Live HOLD path: ~20 fps (encode + store). SEE uses faster [SEE_VIDEO_MIN_INTERVAL_MS]. */
     const val VIDEO_MIN_INTERVAL_MS = 50L
+    /** SEE live: aim ~30 fps for near real-time feel on LAN TCP. */
+    const val SEE_VIDEO_MIN_INTERVAL_MS = 33L
     const val VIDEO_WIDTH = 1280
     const val VIDEO_HEIGHT = 720
     /** Longer edge of upright frame sent over TCP (clear on phone screens). */
     const val VIDEO_OUT_MAX_EDGE = 1280
+    /** SEE MJPEG: smaller + slightly softer = faster encode and less wire delay. */
+    const val SEE_VIDEO_MAX_EDGE = 480
+    const val SEE_VIDEO_JPEG_QUALITY = 62
     const val VIDEO_JPEG_QUALITY_START = 90
     const val VIDEO_JPEG_MAX_BYTES_TCP = 280_000
     // Single UDP datagram JPEG payload (plus VIDEO_HEADER ≤ VIDEO_CHUNK).

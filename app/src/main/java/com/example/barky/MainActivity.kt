@@ -222,8 +222,8 @@ class MainActivity : AppCompatActivity() {
             showMap = false
             val watching = isSeeing || (walkieService?.isRequestingScreen() == true)
             if (watching && live && !isTalking) {
-                // Always re-assert small PiP — never leave full-bleed self covering remote
-                applySeeSplitLayout(true)
+                // Only first remote frame re-asserts PiP (every-frame layout added lag)
+                if (!pipLayoutActive) applySeeSplitLayout(true)
                 walkieVideo.elevation = 0f
                 // Pixel: replace drawable carefully — recycling the previous bitmap while
                 // ImageView still holds it caused black flashes / flicker.

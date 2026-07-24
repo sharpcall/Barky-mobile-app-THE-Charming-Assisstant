@@ -1929,8 +1929,13 @@ class WalkieTalkieEngine(
                 val s = Socket()
                 s.tcpNoDelay = true
                 s.keepAlive = true
+                // Small send buffer so each frame leaves promptly (with flush per frame)
+                try {
+                    s.sendBufferSize = 32 * 1024
+                } catch (_: Throwable) {
+                }
                 s.connect(InetSocketAddress(peer.host, vport), 2500)
-                val out = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 64 * 1024))
+                val out = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 8 * 1024))
                 synchronized(videoOutLock) {
                     videoOutSocket = s
                     videoOut = out
@@ -2660,8 +2665,16 @@ class WalkieTalkieEngine(
                 }
                 val payload = ByteArray(len)
                 input.readFully(payload)
-                // H.264: first byte TCP_CODEC_AVC
+                // H.264: first byte TCP_CODEC_AVC — skipped while MJPEG mode is forced
+                // (Samsung AVC→Bitmap still paints grey/green stripes).
                 if (payload.isNotEmpty() && payload[0] == WalkieProtocol.TCP_CODEC_AVC) {
+                    if (!peerWantsAvc(from)) {
+                        if (frames == 0 || frames % 60 == 0) {
+                            Log.w(TAG, "Ignoring AVC TCP (MJPEG mode) from=$from bytes=${payload.size}")
+                        }
+                        frames++
+                        continue
+                    }
                     val au = payload.copyOfRange(1, payload.size)
                     frames++
                     videoRxOk++
@@ -3469,6 +3482,13 @@ class WalkieTalkieEngine(
     }
 
     private fun emitAvcAccessUnit(au: ByteArray, from: String, storeClip: Boolean) {
+        // MJPEG mode: never paint AVC→Bitmap (Samsung stripes / green). Wait for JPEG.
+        if (!peerWantsAvc(from)) {
+            if (monitorVideoRxCount % 60 == 0) {
+                Log.w(TAG, "Drop AVC AU (MJPEG mode) from=$from bytes=${au.size}")
+            }
+            return
+        }
         // Match SEE camera encode 480x640 (portrait upright); format-change adapts if needed
         if (!avcDecoder.isReady()) avcDecoder.start(480, 640)
         // Count assembled AUs for SEE watchdog even if decode fails this frame
@@ -3907,13 +3927,13 @@ class WalkieTalkieEngine(
                 // SEE/SCRN remote: all OEMs paint slower to cut flicker (encode rate unchanged)
                 val watchingScreen = requestingScreen.get()
                 val watchingRemote = requestingSee.get() || watchingScreen
-                // SCRN: paint ~30fps. SEE camera: slightly slower to cut flicker.
+                // SEE: match encode pace (~30 fps) for near real-time; SCRN same.
+                // Local idle preview stays slower (TextureView is the live self view).
                 val minGap = when {
                     localPreview && pixelOem -> 160L
                     localPreview -> 120L
-                    watchingScreen -> 32L // smooth screen share UI
-                    watchingRemote && pixelOem -> 66L
-                    watchingRemote -> 50L
+                    watchingScreen -> 33L
+                    watchingRemote -> 33L // all OEMs — do not throttle SEE to 15 fps
                     pixelOem -> 80L
                     else -> 50L
                 }
@@ -3922,17 +3942,10 @@ class WalkieTalkieEngine(
                 lastUiEmitAt = now
             }
             val opts = BitmapFactory.Options().apply {
-                // ARGB_8888 on Pixel reduces RGB_565 dither flicker; RGB_565 elsewhere for GC
-                val pixelOem = android.os.Build.MANUFACTURER.equals("Google", ignoreCase = true) ||
-                    android.os.Build.BRAND.equals("google", ignoreCase = true)
-                inPreferredConfig = if (pixelOem && !localPreview) {
-                    Bitmap.Config.ARGB_8888
-                } else {
-                    Bitmap.Config.RGB_565
-                }
+                // RGB_565 is much faster to decode/paint; fine for live SEE motion
+                inPreferredConfig = Bitmap.Config.RGB_565
                 // Local preview: half-res decode (flip still clear, much less GC flash)
                 if (localPreview) inSampleSize = 2
-                if (pixelOem && !localPreview) inSampleSize = 1
             }
             val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
             if (bmp == null) {
@@ -5367,6 +5380,8 @@ class WalkieTalkieEngine(
                     isActive = { servingSee.get() },
                     isTcpConnected = { synchronized(videoOutLock) { videoOut != null } },
                     useAvc = useAvc,
+                    // Self PiP while serving: same TextureView as idle preview
+                    externalSurfaceTexture = { uiPreviewTexture },
                     onPreviewReady = { w, h, orient, front ->
                         mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
                     },

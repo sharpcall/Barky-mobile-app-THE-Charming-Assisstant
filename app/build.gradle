@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 85
-        versionName "5.45-jpeg-small-pip"
+        versionCode 86
+        versionName "5.46-see-lowlat"
     }
 
     compileOptions {
