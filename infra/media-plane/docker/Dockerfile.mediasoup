@@ -1,0 +1,50 @@
+# Barky media-plane — mediasoup backend
+#
+# Build from infra/media-plane (recommended):
+#   cd infra/media-plane
+#   docker build -f docker/Dockerfile.mediasoup -t barky-mediasoup:latest .
+#
+# Multi-arch (Oracle Ampere A1 = linux/arm64):
+#   docker buildx build --platform linux/arm64,linux/amd64 \
+#     -f docker/Dockerfile.mediasoup -t barky-mediasoup:latest --push .
+#
+# mediasoup compiles native code — build tools must match the target arch.
+
+FROM node:20-bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY backends/mediasoup/package.json ./
+RUN npm install --omit=dev
+
+FROM node:20-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layout mirrors repo so server.js relative require to shared/health.js works:
+#   /app/backends/mediasoup/src/server.js
+#   /app/shared/health.js
+WORKDIR /app
+COPY --from=build /build/node_modules /app/backends/mediasoup/node_modules
+COPY backends/mediasoup/package.json /app/backends/mediasoup/package.json
+COPY backends/mediasoup/src /app/backends/mediasoup/src
+COPY shared /app/shared
+
+ENV HOST=0.0.0.0 \
+    PORT=3000 \
+    MEDIASOUP_MIN_PORT=40000 \
+    MEDIASOUP_MAX_PORT=40100 \
+    NODE_ENV=production
+
+EXPOSE 3000
+# Host must publish/map UDP 40000-40100 (or use --network host on Linux)
+EXPOSE 40000-40100/udp
+
+WORKDIR /app/backends/mediasoup
+USER node
+CMD ["node", "src/server.js"]

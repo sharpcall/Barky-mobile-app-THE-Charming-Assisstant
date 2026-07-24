@@ -1,0 +1,22 @@
+{
+  "name": "@barky/media-plane-mediasoup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Barky media-plane backend: mediasoup SFU (1:1 rooms, contract-compatible signaling)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "mediasoup": "^3.15.2",
+    "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "mediasoup@3.22.0": true
+  }
+}

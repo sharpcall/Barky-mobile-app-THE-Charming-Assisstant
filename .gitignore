@@ -28,6 +28,21 @@ local.properties
 .github_push.env
 *.token
 secrets/
+**/oci.env
+*.pem
+# Firebase: keep real google-services + SA keys local (example file is OK to commit)
+app/google-services.json
+**/firebase-service-account*.json
+**/serviceAccount*.json
+
+# Oracle coturn / Terraform local state and generated vars
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/terraform.tfvars
+**/.terraform/
+**/.terraform.lock.hcl
+**/crash.log
+**/turn-ice.generated.env
 
 # Per-machine wireless adb endpoints (copy from devices-wifi.example.json)
 scripts/devices-wifi.json
@@ -65,3 +80,8 @@ build-outputs/*.apk
 # Optional local tooling
 *.hprof
 .cxx/
+
+# media-plane (Node SFU backends)
+infra/media-plane/**/node_modules/
+infra/media-plane/**/.env
+!infra/media-plane/**/.env.example
