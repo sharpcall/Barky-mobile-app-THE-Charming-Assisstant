@@ -398,52 +398,15 @@ class AvcVideoDecoder {
     }
 
     /**
-     * Robust YUV_420_888 → NV21 → Bitmap.
-     * Samsung (S23) often uses pixelStride=2 UV planes; a naive copy produces striped "lines".
+     * MediaCodec Image (YUV_420_888) → Bitmap.
+     * Samsung S20 green/stripes: use the standard plane-to-NV21 pack (Android camera samples),
+     * then platform JPEG decode — avoids hand-rolled YUV math that mis-reads stride=2 chroma.
      */
     private fun imageToBitmap(image: Image): Bitmap? {
         return try {
-            val w = image.width
-            val h = image.height
-            if (w <= 0 || h <= 0) return null
-            val yPlane = image.planes[0]
-            val uPlane = image.planes[1]
-            val vPlane = image.planes[2]
-            val yBuf = yPlane.buffer.duplicate()
-            val uBuf = uPlane.buffer.duplicate()
-            val vBuf = vPlane.buffer.duplicate()
-            yBuf.rewind(); uBuf.rewind(); vBuf.rewind()
-            val yRow = yPlane.rowStride
-            val yPix = yPlane.pixelStride
-            val uRow = uPlane.rowStride
-            val uPix = uPlane.pixelStride
-            val vRow = vPlane.rowStride
-            val vPix = vPlane.pixelStride
-            val ySize = w * h
-            val nv21 = ByteArray(ySize + ySize / 2)
-            // Y plane (always stride-aware)
-            var out = 0
-            for (row in 0 until h) {
-                val rowStart = row * yRow
-                for (col in 0 until w) {
-                    nv21[out++] = yBuf.get(rowStart + col * yPix)
-                }
-            }
-            // NV21 = VU interleaved. When U/V are semi-planar with pixelStride 2 they often
-            // share one buffer (V at even bytes, U at odd) — copy carefully per OEM.
-            var uv = ySize
-            for (row in 0 until h / 2) {
-                val vRowStart = row * vRow
-                val uRowStart = row * uRow
-                for (col in 0 until w / 2) {
-                    val vi = vRowStart + col * vPix
-                    val ui = uRowStart + col * uPix
-                    if (vi < vBuf.capacity() && ui < uBuf.capacity() && uv + 1 < nv21.size) {
-                        nv21[uv++] = vBuf.get(vi)
-                        nv21[uv++] = uBuf.get(ui)
-                    }
-                }
-            }
+            val nv21 = yuv420888ToNv21(image) ?: return null
+            val w = image.cropRect.width().coerceAtLeast(1)
+            val h = image.cropRect.height().coerceAtLeast(1)
             val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
             val baos = ByteArrayOutputStream(w * h / 2)
             if (!yuv.compressToJpeg(Rect(0, 0, w, h), 92, baos)) return null
@@ -453,6 +416,75 @@ class AvcVideoDecoder {
             Log.w(TAG, "imageToBitmap", t)
             null
         }
+    }
+
+    /**
+     * Pack YUV_420_888 → NV21 (Y + interleaved VU), crop + row/pixel stride aware.
+     * Same algorithm used by Android camera / ML Kit paths that work on Samsung.
+     */
+    private fun yuv420888ToNv21(image: Image): ByteArray? {
+        val crop = image.cropRect
+        val width = crop.width()
+        val height = crop.height()
+        if (width <= 0 || height <= 0) return null
+        val planes = image.planes
+        if (planes.size < 3) return null
+        val out = ByteArray(width * height * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8)
+        val rowData = ByteArray(planes[0].rowStride.coerceAtLeast(width))
+        var channelOffset = 0
+        var outputStride = 1
+        for (i in 0 until 3) {
+            when (i) {
+                0 -> {
+                    channelOffset = 0
+                    outputStride = 1
+                }
+                1 -> {
+                    // NV21: VU — U at odd indices after Y
+                    channelOffset = width * height + 1
+                    outputStride = 2
+                }
+                2 -> {
+                    // V at even indices after Y
+                    channelOffset = width * height
+                    outputStride = 2
+                }
+            }
+            val buffer = planes[i].buffer.duplicate()
+            val rowStride = planes[i].rowStride
+            val pixelStride = planes[i].pixelStride
+            val shift = if (i == 0) 0 else 1
+            val w = width shr shift
+            val h = height shr shift
+            buffer.position(0)
+            // Align to crop
+            val rowStart = (crop.top shr shift) * rowStride + (crop.left shr shift) * pixelStride
+            var outputOffset = channelOffset
+            for (row in 0 until h) {
+                val length: Int
+                if (pixelStride == 1 && outputStride == 1) {
+                    length = w
+                    val pos = rowStart + row * rowStride
+                    if (pos + length > buffer.capacity()) continue
+                    buffer.position(pos)
+                    buffer.get(out, outputOffset, length)
+                    outputOffset += length
+                } else {
+                    length = (w - 1) * pixelStride + 1
+                    val pos = rowStart + row * rowStride
+                    if (pos + length > buffer.capacity()) continue
+                    buffer.position(pos)
+                    buffer.get(rowData, 0, length)
+                    var col = 0
+                    while (col < w) {
+                        out[outputOffset] = rowData[col * pixelStride]
+                        outputOffset += outputStride
+                        col++
+                    }
+                }
+            }
+        }
+        return out
     }
 
     fun release() {

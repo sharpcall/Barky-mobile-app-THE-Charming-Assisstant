@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 78
-        versionName "5.38-session-fail-ui"
+        versionCode 80
+        versionName "5.40-s20-avc-picture"
     }
 
     compileOptions {
