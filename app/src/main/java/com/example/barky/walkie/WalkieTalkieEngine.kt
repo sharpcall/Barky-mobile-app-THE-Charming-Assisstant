@@ -3151,6 +3151,17 @@ class WalkieTalkieEngine(
     private fun emitAvcAccessUnit(au: ByteArray, from: String, storeClip: Boolean) {
         // Screen is 720x1280; camera SEE often smaller — decoder rescales
         if (!avcDecoder.isReady()) avcDecoder.start(720, 1280)
+        // Count assembled AUs for SEE watchdog even if decode fails this frame
+        // (cellular relay delivers H.264 TYPE_MONITOR_VIDEO_AVC, not JPEG).
+        if (!storeClip && (requestingSee.get() || requestingScreen.get())) {
+            monitorVideoRxCount++
+            if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
+                Log.i(
+                    TAG,
+                    "MONITOR_VIDEO_AVC_RX n=$monitorVideoRxCount bytes=${au.size} from=$from"
+                )
+            }
+        }
         val bmp = avcDecoder.decodeToBitmap(au) ?: return
         if (storeClip) {
             beginIncomingIfNeeded(from)
