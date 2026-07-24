@@ -4969,23 +4969,34 @@ class WalkieTalkieEngine(
             var frames = 0
             var session: SeeCameraSession? = null
             try {
-                // Public path: warm NAT before video so cellular requester can receive
-                if (!com.example.barky.net.PeerEndpoint.isPrivateIp(peer.host)) {
-                    holePunchPeer(peer, rounds = 10)
+                val publicPeer = !PeerEndpoint.isPrivateIp(peer.host)
+                // Public/cellular: never open TCP video (CGNAT); use hub UDP relay + compact JPEG.
+                // Multi-chunk H.264 over relay loses parts → zero complete frames on cell.
+                if (publicPeer) {
+                    holePunchPeer(peer, rounds = 6)
                 }
-                val tcpOk = openVideoOut(peer)
+                val tcpOk = if (publicPeer) false else openVideoOut(peer)
+                // Force MJPEG single-packet UDP on public path (relay-friendly).
+                val useAvc = !publicPeer && peerWantsAvc(peer.host)
                 Log.i(
                     TAG,
-                    "SEE serve video start → ${peer.host}:${peer.port} tcp=$tcpOk " +
-                        "vport=${peer.videoPort} bgSafeSurface=true uiTex=${uiPreviewTexture != null}"
+                    "SEE serve video start → ${peer.host}:${peer.port} public=$publicPeer " +
+                        "tcp=$tcpOk avc=$useAvc vport=${peer.videoPort} " +
+                        "uiTex=${uiPreviewTexture != null}"
                 )
-                val useAvc = peerWantsAvc(peer.host)
                 if (useAvc) videoDebug("TX video codec=H.264/AVC 640x480")
-                else videoDebug("TX video codec=MJPEG")
+                else videoDebug(
+                    if (publicPeer) "TX video codec=MJPEG compact UDP/relay (cellular)"
+                    else "TX video codec=MJPEG"
+                )
                 val seeSession = SeeCameraSession(
                     context = appContext,
                     isActive = { servingSee.get() },
-                    isTcpConnected = { synchronized(videoOutLock) { videoOut != null } },
+                    // Public path: always compact JPEG for UDP/relay (≤ VIDEO_JPEG_MAX_BYTES_UDP)
+                    isTcpConnected = {
+                        if (publicPeer) false
+                        else synchronized(videoOutLock) { videoOut != null }
+                    },
                     useAvc = useAvc,
                     onPreviewReady = { w, h, orient, front ->
                         mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
@@ -4995,14 +5006,24 @@ class WalkieTalkieEngine(
                         Log.w(TAG, "SEE cam error: $msg")
                     },
                     onAvcUnit = { au ->
+                        if (publicPeer) return@SeeCameraSession
                         val viaTcp = sendVideoFrameTcp(au, avc = true)
                         val ok = viaTcp || sendMonitorVideoAvcUdp(au, peer)
                         if (ok) frames++
                     },
                     onJpegFrame = { jpeg ->
-                        val viaTcp = sendVideoFrameTcp(jpeg)
+                        val viaTcp = if (publicPeer) false else sendVideoFrameTcp(jpeg)
                         val ok = viaTcp || sendMonitorVideoUdp(jpeg, peer)
-                        if (ok) frames++
+                        if (ok) {
+                            frames++
+                            if (frames == 1 || frames % 30 == 0) {
+                                Log.i(
+                                    TAG,
+                                    "SEE_TX_JPEG n=$frames bytes=${jpeg.size} " +
+                                        "public=$publicPeer → ${peer.host}:${peer.port}"
+                                )
+                            }
+                        }
                     }
                 )
                 session = seeSession
