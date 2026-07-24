@@ -315,7 +315,9 @@ class AvcVideoEncoder(
 }
 
 /**
- * Decode H.264 access units to [Bitmap] for UI (via Image → NV21 → JPEG → Bitmap, or Image plane copy).
+ * Decode H.264 access units to [Bitmap] for UI.
+ * Samsung hardware decoders often emit awkward YUV_420_888 plane layouts that look like
+ * grey/green TV static when converted poorly — prefer Google software decoder on Samsung.
  */
 class AvcVideoDecoder {
     private var codec: MediaCodec? = null
@@ -323,6 +325,7 @@ class AvcVideoDecoder {
     private var width = 640
     private var height = 480
     private var ptsUs = 0L
+    private var loggedPlanes = false
 
     fun start(w: Int = 640, h: Int = 480): Boolean {
         if (ready.get()) return true
@@ -331,14 +334,23 @@ class AvcVideoDecoder {
         return try {
             val mime = MediaFormat.MIMETYPE_VIDEO_AVC
             val fmt = MediaFormat.createVideoFormat(mime, width, height).apply {
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height * 2)
+                // Prefer flexible YUV so getOutputImage is supported on all OEMs
+                try {
+                    setInteger(
+                        MediaFormat.KEY_COLOR_FORMAT,
+                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+                    )
+                } catch (_: Throwable) {
+                }
             }
-            val c = MediaCodec.createDecoderByType(mime)
+            val c = createPreferredDecoder(mime)
             c.configure(fmt, null, null, 0)
             c.start()
             codec = c
             ready.set(true)
-            Log.i(TAG, "AVC decoder ${width}x$height")
+            loggedPlanes = false
+            Log.i(TAG, "AVC decoder ${width}x$height name=${c.name}")
             true
         } catch (t: Throwable) {
             Log.w(TAG, "AVC decoder start", t)
@@ -357,6 +369,10 @@ class AvcVideoDecoder {
             if (inIx < 0) return null
             val inBuf = c.getInputBuffer(inIx) ?: return null
             inBuf.clear()
+            if (accessUnit.size > inBuf.remaining()) {
+                Log.w(TAG, "AU too large ${accessUnit.size} > ${inBuf.remaining()}")
+                return null
+            }
             inBuf.put(accessUnit)
             c.queueInputBuffer(inIx, 0, accessUnit.size, ptsUs, 0)
             ptsUs += 1_000_000L / 20
@@ -370,118 +386,172 @@ class AvcVideoDecoder {
     private fun drainToBitmap(): Bitmap? {
         val c = codec ?: return null
         val info = MediaCodec.BufferInfo()
-        val outIx = c.dequeueOutputBuffer(info, 5_000)
-        if (outIx == MediaCodec.INFO_TRY_AGAIN_LATER) return null
-        if (outIx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-            val f = c.outputFormat
-            width = f.getInteger(MediaFormat.KEY_WIDTH)
-            height = f.getInteger(MediaFormat.KEY_HEIGHT)
-            return drainToBitmap()
-        }
-        if (outIx < 0) return null
-        return try {
-            val image = c.getOutputImage(outIx)
-            val bmp = if (image != null) {
-                imageToBitmap(image).also { image.close() }
-            } else {
-                null
+        // Drain a few times — first buffers may be format change / codec config
+        repeat(4) {
+            val outIx = c.dequeueOutputBuffer(info, 8_000)
+            when {
+                outIx == MediaCodec.INFO_TRY_AGAIN_LATER -> return null
+                outIx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    val f = c.outputFormat
+                    width = f.getInteger(MediaFormat.KEY_WIDTH)
+                    height = f.getInteger(MediaFormat.KEY_HEIGHT)
+                    Log.i(TAG, "decoder format $f")
+                }
+                outIx == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> { /* legacy */ }
+                outIx >= 0 -> {
+                    return try {
+                        if (info.size <= 0 || (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                            c.releaseOutputBuffer(outIx, false)
+                            null
+                        } else {
+                            val image = c.getOutputImage(outIx)
+                            val bmp = if (image != null) {
+                                imageToBitmap(image).also { image.close() }
+                            } else {
+                                null
+                            }
+                            c.releaseOutputBuffer(outIx, false)
+                            bmp
+                        }
+                    } catch (t: Throwable) {
+                        try {
+                            c.releaseOutputBuffer(outIx, false)
+                        } catch (_: Throwable) {
+                        }
+                        Log.w(TAG, "drain image", t)
+                        null
+                    }
+                }
+                else -> return null
             }
-            c.releaseOutputBuffer(outIx, false)
-            bmp
-        } catch (t: Throwable) {
-            try {
-                c.releaseOutputBuffer(outIx, false)
-            } catch (_: Throwable) {
-            }
-            null
         }
+        return null
     }
 
-    /**
-     * MediaCodec Image (YUV_420_888) → Bitmap.
-     * Samsung S20 green/stripes: use the standard plane-to-NV21 pack (Android camera samples),
-     * then platform JPEG decode — avoids hand-rolled YUV math that mis-reads stride=2 chroma.
-     */
     private fun imageToBitmap(image: Image): Bitmap? {
         return try {
-            val nv21 = yuv420888ToNv21(image) ?: return null
-            val w = image.cropRect.width().coerceAtLeast(1)
-            val h = image.cropRect.height().coerceAtLeast(1)
-            val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
-            val baos = ByteArrayOutputStream(w * h / 2)
-            if (!yuv.compressToJpeg(Rect(0, 0, w, h), 92, baos)) return null
-            val bytes = baos.toByteArray()
-            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (!loggedPlanes) {
+                loggedPlanes = true
+                val p = image.planes
+                Log.i(
+                    TAG,
+                    "YUV planes crop=${image.cropRect} size=${image.width}x${image.height} " +
+                        "yStride=${p[0].rowStride}/${p[0].pixelStride} " +
+                        "uStride=${p[1].rowStride}/${p[1].pixelStride} " +
+                        "vStride=${p[2].rowStride}/${p[2].pixelStride}"
+                )
+            }
+            // Prefer absolute-index ARGB (most reliable on Samsung when NV21 pack fails)
+            yuv420ToArgbBitmap(image)
+                ?: run {
+                    val nv21 = yuv420888ToNv21(image) ?: return null
+                    val w = image.cropRect.width().coerceAtLeast(1)
+                    val h = image.cropRect.height().coerceAtLeast(1)
+                    val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
+                    val baos = ByteArrayOutputStream(w * h / 2)
+                    if (!yuv.compressToJpeg(Rect(0, 0, w, h), 90, baos)) return null
+                    android.graphics.BitmapFactory.decodeByteArray(baos.toByteArray(), 0, baos.size())
+                }
         } catch (t: Throwable) {
             Log.w(TAG, "imageToBitmap", t)
             null
         }
     }
 
-    /**
-     * Pack YUV_420_888 → NV21 (Y + interleaved VU), crop + row/pixel stride aware.
-     * Same algorithm used by Android camera / ML Kit paths that work on Samsung.
-     */
+    /** Absolute-index YUV_420_888 → ARGB_8888 (no ByteBuffer position side-effects). */
+    private fun yuv420ToArgbBitmap(image: Image): Bitmap? {
+        val crop = image.cropRect
+        val w = crop.width()
+        val h = crop.height()
+        if (w <= 0 || h <= 0) return null
+        val yP = image.planes[0]
+        val uP = image.planes[1]
+        val vP = image.planes[2]
+        val yBuf = yP.buffer
+        val uBuf = uP.buffer
+        val vBuf = vP.buffer
+        val yRow = yP.rowStride
+        val yPix = yP.pixelStride.coerceAtLeast(1)
+        val uRow = uP.rowStride
+        val uPix = uP.pixelStride.coerceAtLeast(1)
+        val vRow = vP.rowStride
+        val vPix = vP.pixelStride.coerceAtLeast(1)
+        // Plane buffers may start at non-zero position
+        val yBase = yBuf.position()
+        val uBase = uBuf.position()
+        val vBase = vBuf.position()
+        val argb = IntArray(w * h)
+        var i = 0
+        for (row in 0 until h) {
+            val yRowStart = yBase + (crop.top + row) * yRow + crop.left * yPix
+            val uvRow = (crop.top + row) shr 1
+            val uRowStart = uBase + uvRow * uRow
+            val vRowStart = vBase + uvRow * vRow
+            for (col in 0 until w) {
+                val yi = yRowStart + col * yPix
+                if (yi < 0 || yi >= yBuf.limit()) {
+                    argb[i++] = 0xff000000.toInt()
+                    continue
+                }
+                val y = (yBuf.get(yi).toInt() and 0xff)
+                val uvCol = (crop.left + col) shr 1
+                val ui = uRowStart + uvCol * uPix
+                val vi = vRowStart + uvCol * vPix
+                val u = if (ui in 0 until uBuf.limit()) (uBuf.get(ui).toInt() and 0xff) - 128 else 0
+                val v = if (vi in 0 until vBuf.limit()) (vBuf.get(vi).toInt() and 0xff) - 128 else 0
+                // BT.601 limited-range-ish fast convert
+                var r = y + ((v * 1436) shr 10)
+                var g = y - ((u * 352 + v * 731) shr 10)
+                var b = y + ((u * 1815) shr 10)
+                if (r < 0) r = 0 else if (r > 255) r = 255
+                if (g < 0) g = 0 else if (g > 255) g = 255
+                if (b < 0) b = 0 else if (b > 255) b = 255
+                argb[i++] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return Bitmap.createBitmap(argb, w, h, Bitmap.Config.ARGB_8888)
+    }
+
     private fun yuv420888ToNv21(image: Image): ByteArray? {
         val crop = image.cropRect
         val width = crop.width()
         val height = crop.height()
         if (width <= 0 || height <= 0) return null
-        val planes = image.planes
-        if (planes.size < 3) return null
-        val out = ByteArray(width * height * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8)
-        val rowData = ByteArray(planes[0].rowStride.coerceAtLeast(width))
-        var channelOffset = 0
-        var outputStride = 1
-        for (i in 0 until 3) {
-            when (i) {
-                0 -> {
-                    channelOffset = 0
-                    outputStride = 1
-                }
-                1 -> {
-                    // NV21: VU — U at odd indices after Y
-                    channelOffset = width * height + 1
-                    outputStride = 2
-                }
-                2 -> {
-                    // V at even indices after Y
-                    channelOffset = width * height
-                    outputStride = 2
-                }
+        val yP = image.planes[0]
+        val uP = image.planes[1]
+        val vP = image.planes[2]
+        val yBuf = yP.buffer
+        val uBuf = uP.buffer
+        val vBuf = vP.buffer
+        val yRow = yP.rowStride
+        val yPix = yP.pixelStride.coerceAtLeast(1)
+        val uRow = uP.rowStride
+        val uPix = uP.pixelStride.coerceAtLeast(1)
+        val vRow = vP.rowStride
+        val vPix = vP.pixelStride.coerceAtLeast(1)
+        val yBase = yBuf.position()
+        val uBase = uBuf.position()
+        val vBase = vBuf.position()
+        val ySize = width * height
+        val out = ByteArray(ySize + ySize / 2)
+        var o = 0
+        for (row in 0 until height) {
+            val rowStart = yBase + (crop.top + row) * yRow + crop.left * yPix
+            for (col in 0 until width) {
+                val idx = rowStart + col * yPix
+                out[o++] = if (idx in 0 until yBuf.limit()) yBuf.get(idx) else 0
             }
-            val buffer = planes[i].buffer.duplicate()
-            val rowStride = planes[i].rowStride
-            val pixelStride = planes[i].pixelStride
-            val shift = if (i == 0) 0 else 1
-            val w = width shr shift
-            val h = height shr shift
-            buffer.position(0)
-            // Align to crop
-            val rowStart = (crop.top shr shift) * rowStride + (crop.left shr shift) * pixelStride
-            var outputOffset = channelOffset
-            for (row in 0 until h) {
-                val length: Int
-                if (pixelStride == 1 && outputStride == 1) {
-                    length = w
-                    val pos = rowStart + row * rowStride
-                    if (pos + length > buffer.capacity()) continue
-                    buffer.position(pos)
-                    buffer.get(out, outputOffset, length)
-                    outputOffset += length
-                } else {
-                    length = (w - 1) * pixelStride + 1
-                    val pos = rowStart + row * rowStride
-                    if (pos + length > buffer.capacity()) continue
-                    buffer.position(pos)
-                    buffer.get(rowData, 0, length)
-                    var col = 0
-                    while (col < w) {
-                        out[outputOffset] = rowData[col * pixelStride]
-                        outputOffset += outputStride
-                        col++
-                    }
-                }
+        }
+        // NV21 = VU interleaved
+        o = ySize
+        for (row in 0 until height / 2) {
+            val uRowStart = uBase + ((crop.top shr 1) + row) * uRow + (crop.left shr 1) * uPix
+            val vRowStart = vBase + ((crop.top shr 1) + row) * vRow + (crop.left shr 1) * vPix
+            for (col in 0 until width / 2) {
+                val vi = vRowStart + col * vPix
+                val ui = uRowStart + col * uPix
+                out[o++] = if (vi in 0 until vBuf.limit()) vBuf.get(vi) else 0
+                out[o++] = if (ui in 0 until uBuf.limit()) uBuf.get(ui) else 0
             }
         }
         return out
@@ -498,10 +568,12 @@ class AvcVideoDecoder {
         } catch (_: Throwable) {
         }
         codec = null
+        loggedPlanes = false
     }
 
     companion object {
         private const val TAG = "AvcVideoDecoder"
+
         fun isAvailable(): Boolean {
             return try {
                 MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.any { info ->
@@ -511,6 +583,44 @@ class AvcVideoDecoder {
             } catch (_: Throwable) {
                 false
             }
+        }
+
+        /**
+         * Samsung OEM decoders often produce plane layouts that break naive YUV→RGB.
+         * Prefer Google software decoder on Samsung; fall back to default type.
+         */
+        private fun createPreferredDecoder(mime: String): MediaCodec {
+            val samsung = android.os.Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+            if (samsung) {
+                val prefer = listOf(
+                    "c2.android.avc.decoder",
+                    "OMX.google.h264.decoder"
+                )
+                for (name in prefer) {
+                    try {
+                        val c = MediaCodec.createByCodecName(name)
+                        Log.i(TAG, "using software decoder $name")
+                        return c
+                    } catch (_: Throwable) {
+                    }
+                }
+                // Any google/android software decoder that supports AVC
+                try {
+                    val list = MediaCodecList(MediaCodecList.ALL_CODECS)
+                    for (info in list.codecInfos) {
+                        if (info.isEncoder) continue
+                        val n = info.name.lowercase()
+                        if ((n.contains("google") || n.contains("android") || n.contains("c2.android")) &&
+                            info.supportedTypes.any { it.equals(mime, true) }
+                        ) {
+                            Log.i(TAG, "using decoder ${info.name}")
+                            return MediaCodec.createByCodecName(info.name)
+                        }
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+            return MediaCodec.createDecoderByType(mime)
         }
     }
 }
