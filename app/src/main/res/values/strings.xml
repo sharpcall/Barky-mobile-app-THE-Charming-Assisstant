@@ -111,6 +111,7 @@
     <string name="walkie_peers_searching">Looking for the other Barky phone…</string>
     <string name="walkie_peer_linked">Linked with %1$s</string>
     <string name="walkie_best_quality">BEST Quality video / slow send speed</string>
+    <string name="walkie_best_quality_short">BEST</string>
     <string name="walkie_ptt">HOLD to send video</string>
     <string name="walkie_speaker">Speaker</string>
     <string name="walkie_headset">Private</string>
@@ -137,6 +138,7 @@
     <string name="pip_enlarged">Self-view larger — drag to move</string>
     <string name="pip_normal">Self-view smaller — drag to move</string>
     <string name="walkie_gps">GPS map</string>
+    <string name="walkie_gps_short">GPS</string>
     <string name="walkie_gps_need_perm">Location permission is required for GPS tracking</string>
     <string name="walkie_scrn">SCRN</string>
     <string name="walkie_scrn_need_contact">Select a contact first (Contacts → Select), then SCRN views their screen</string>
@@ -153,6 +155,7 @@
     <string name="screen_share_prepare_prompt">Accept the next prompt to allow automatic screen share to contacts</string>
     <string name="screen_share_prepared">Auto screen share ready — contacts can SCRN without another prompt</string>
     <string name="walkie_wakeup">WAKEUP RING</string>
+    <string name="walkie_wakeup_short">RING</string>
     <string name="walkie_stop_ringing">Stop Ringing</string>
     <string name="walkie_receiving">Receiving video message…</string>
     <string name="walkie_replay">Replay</string>

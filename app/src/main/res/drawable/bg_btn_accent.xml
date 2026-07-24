@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LISTEN / SEE accent (magenta→violet), readable on camera. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="135"
+        android:endColor="#EC4899"
+        android:startColor="#A855F7"
+        android:type="linear" />
+    <corners android:radius="14dp" />
+</shape>

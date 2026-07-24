@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Full-bleed camera shell: stage is edge-to-edge; chrome (toolbar + buttons) overlays the picture. -->
+<!-- Mockup 3 (LISTEN chrome): full-bleed camera + HUD overlays.
+     Top icons are SOLID (not glass). Footer buttons may be glass over camera. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_layout"
@@ -8,7 +9,7 @@
     android:background="#FF0A0614"
     android:fitsSystemWindows="true">
 
-    <!-- Full-screen camera / video / map stage (no inset card) -->
+    <!-- Full-screen camera / video / map stage (edge-to-edge shell) -->
     <FrameLayout
         android:id="@+id/walkie_stage_card"
         android:layout_width="match_parent"
@@ -76,18 +77,18 @@
             android:textColor="@color/barky_on_surface_muted"
             android:textSize="14sp" />
 
-        <!-- Status chips over camera (below toolbar band) -->
+        <!-- Status chips over camera (below top HUD band) -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="top|start"
             android:layout_marginStart="12dp"
-            android:layout_marginTop="64dp"
+            android:layout_marginTop="72dp"
             android:background="@drawable/bg_status_chip"
+            android:elevation="8dp"
             android:orientation="vertical"
             android:paddingHorizontal="12dp"
-            android:paddingVertical="8dp"
-            android:elevation="8dp">
+            android:paddingVertical="8dp">
 
             <TextView
                 android:id="@+id/walkie_status"
@@ -119,7 +120,7 @@
             android:layout_width="48dp"
             android:layout_height="48dp"
             android:layout_gravity="top|end"
-            android:layout_marginTop="64dp"
+            android:layout_marginTop="72dp"
             android:layout_marginEnd="12dp"
             android:background="@drawable/bg_flip_camera_circle"
             android:contentDescription="@string/walkie_flip_camera"
@@ -133,7 +134,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="bottom|center_horizontal"
-            android:layout_marginBottom="200dp"
+            android:layout_marginBottom="220dp"
             android:background="@drawable/bg_status_chip"
             android:paddingHorizontal="12dp"
             android:paddingVertical="6dp"
@@ -141,14 +142,269 @@
             android:textColor="@color/barky_on_surface_muted"
             android:textSize="11sp"
             android:visibility="gone" />
+    </FrameLayout>
 
-        <!-- Mic drag over camera — transparent stage -->
+    <!-- Top HUD: wordmark + SOLID icon buttons (Mockup 3; not transparent). -->
+    <LinearLayout
+        android:id="@+id/top_hud"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:elevation="16dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="8dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/toolbar_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:letterSpacing="0.01"
+                android:shadowColor="#73000000"
+                android:shadowDx="0"
+                android:shadowDy="1"
+                android:shadowRadius="3"
+                android:text="@string/app_name"
+                android:textColor="#FFF0ABFC"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/toolbar_subtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:shadowColor="#99000000"
+                android:shadowDx="0"
+                android:shadowDy="1"
+                android:shadowRadius="2"
+                android:textColor="@color/barky_on_surface_muted"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/btn_contacts"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_top_icon_button"
+            android:contentDescription="@string/contacts_title"
+            android:padding="8dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_contacts" />
+
+        <ImageButton
+            android:id="@+id/btn_settings"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_top_icon_button"
+            android:contentDescription="@string/settings"
+            android:padding="8dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_settings" />
+
+        <ImageButton
+            android:id="@+id/btn_more"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_top_icon_button"
+            android:contentDescription="@string/action_lan_update"
+            android:padding="8dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_more_vert" />
+    </LinearLayout>
+
+    <!-- Hidden toolbar kept for AppCompat title plumbing if needed; not shown. -->
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        app:title="@string/app_name" />
+
+    <!-- Footer: buttons only on camera — glass/transparent OK (Mockup 3). -->
+    <LinearLayout
+        android:id="@+id/footer_actions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@android:color/transparent"
+        android:elevation="16dp"
+        android:orientation="vertical"
+        android:paddingHorizontal="10dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="10dp">
+
+        <!-- Toggle row: BEST · GPS (Private is mic-drag mode, not a footer control) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.checkbox.MaterialCheckBox
+                android:id="@+id/walkie_best_quality"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="@color/barky_secondary"
+                android:minHeight="36dp"
+                android:text="@string/walkie_best_quality_short"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="11sp" />
+
+            <com.google.android.material.checkbox.MaterialCheckBox
+                android:id="@+id/walkie_gps"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:buttonTint="@color/barky_accent"
+                android:minHeight="36dp"
+                android:text="@string/walkie_gps_short"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Row 1: LISTEN · SEE · SCRN -->
+        <LinearLayout
+            android:id="@+id/listen_see_frame"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_listen"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/walkie_listen"
+                android:textAllCaps="true"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/barky_secondary"
+                app:cornerRadius="14dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_see"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/walkie_see"
+                android:textAllCaps="true"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/barky_primary"
+                app:cornerRadius="14dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_scrn"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/walkie_scrn"
+                android:textAllCaps="true"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/barky_glass_btn"
+                app:cornerRadius="14dp" />
+        </LinearLayout>
+
+        <!-- Row 2: RING · REPLAY · GPS (glass row on camera — bottom OK) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_wakeup"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/walkie_wakeup_short"
+                android:textAllCaps="true"
+                android:textColor="@color/barky_on_primary"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/walkie_wakeup"
+                app:cornerRadius="14dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_replay"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/walkie_replay"
+                android:textAllCaps="true"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/barky_glass_btn"
+                app:cornerRadius="14dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/walkie_gps_btn"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/walkie_gps_short"
+                android:textAllCaps="true"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:backgroundTint="@color/barky_glass_btn"
+                app:cornerRadius="14dp" />
+        </LinearLayout>
+
+        <!-- HOLD: mic stage (drag lock / private / speaker) — primary control -->
         <FrameLayout
             android:id="@+id/walkie_mic_stage"
             android:layout_width="match_parent"
-            android:layout_height="140dp"
-            android:layout_gravity="bottom"
-            android:layout_marginBottom="148dp"
+            android:layout_height="118dp"
+            android:layout_marginTop="4dp"
             android:background="@android:color/transparent"
             android:clipChildren="false"
             android:clipToPadding="false"
@@ -159,7 +415,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="top|center_horizontal"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
                 android:alpha="0.45"
                 android:text="@string/mic_drag_lock"
                 android:textColor="@color/barky_on_primary"
@@ -199,7 +455,7 @@
                 android:layout_height="wrap_content"
                 android:layout_gravity="bottom|center_horizontal"
                 android:gravity="center"
-                android:paddingBottom="4dp"
+                android:paddingBottom="2dp"
                 android:text="@string/walkie_mic_hint"
                 android:textColor="#CCF5F3FF"
                 android:textSize="11sp" />
@@ -209,7 +465,7 @@
                 android:layout_width="76dp"
                 android:layout_height="76dp"
                 android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="22dp"
+                android:layout_marginBottom="18dp"
                 android:background="@drawable/bg_mic_circle"
                 android:contentDescription="@string/walkie_mic_desc"
                 android:elevation="12dp"
@@ -219,165 +475,6 @@
                 android:src="@android:drawable/ic_btn_speak_now"
                 android:tint="@color/barky_on_primary" />
         </FrameLayout>
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/walkie_replay"
-            style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:elevation="12dp"
-            android:enabled="false"
-            android:minWidth="132dp"
-            android:minHeight="48dp"
-            android:text="@string/walkie_replay"
-            android:textAllCaps="false"
-            android:textColor="@color/barky_on_primary"
-            app:backgroundTint="@color/barky_primary"
-            app:cornerRadius="24dp"
-            app:icon="@android:drawable/ic_media_play"
-            app:iconGravity="textStart"
-            app:iconTint="@color/barky_on_primary" />
-    </FrameLayout>
-
-    <!-- App name + version on the camera (HUD) -->
-    <com.google.android.material.appbar.MaterialToolbar
-        android:id="@+id/toolbar"
-        android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize"
-        android:layout_gravity="top"
-        android:background="@android:color/transparent"
-        android:elevation="16dp"
-        app:subtitleCentered="false"
-        app:subtitleTextAppearance="@style/TextAppearance.Barky.Toolbar.Subtitle"
-        app:subtitleTextColor="@color/barky_on_surface_muted"
-        app:title="@string/app_name"
-        app:titleTextAppearance="@style/TextAppearance.Barky.Toolbar.Title"
-        app:titleTextColor="@color/barky_on_surface" />
-
-    <!-- Footer actions: buttons only — no solid panel behind them -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:background="@android:color/transparent"
-        android:elevation="16dp"
-        android:orientation="vertical"
-        android:paddingHorizontal="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="12dp">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <com.google.android.material.checkbox.MaterialCheckBox
-                android:id="@+id/walkie_best_quality"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:buttonTint="@color/barky_secondary"
-                android:minHeight="36dp"
-                android:text="@string/walkie_best_quality"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="11sp" />
-
-            <com.google.android.material.checkbox.MaterialCheckBox
-                android:id="@+id/walkie_gps"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginEnd="8dp"
-                android:buttonTint="@color/barky_accent"
-                android:minHeight="36dp"
-                android:text="@string/walkie_gps"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="11sp" />
-
-            <com.google.android.material.checkbox.MaterialCheckBox
-                android:id="@+id/walkie_scrn"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:buttonTint="@color/barky_primary_light"
-                android:minHeight="36dp"
-                android:text="@string/walkie_scrn"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="11sp" />
-        </LinearLayout>
-
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/listen_see_frame"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            app:cardBackgroundColor="@android:color/transparent"
-            app:cardCornerRadius="22dp"
-            app:cardElevation="0dp"
-            app:strokeWidth="0dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:orientation="horizontal"
-                android:padding="4dp">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/walkie_listen"
-                    style="@style/Widget.MaterialComponents.Button"
-                    android:layout_width="0dp"
-                    android:layout_height="52dp"
-                    android:layout_marginEnd="8dp"
-                    android:layout_weight="1"
-                    android:enabled="false"
-                    android:text="@string/walkie_listen"
-                    android:textAllCaps="false"
-                    android:textColor="@color/barky_on_primary"
-                    android:textSize="15sp"
-                    android:textStyle="bold"
-                    app:backgroundTint="@color/barky_secondary"
-                    app:cornerRadius="20dp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/walkie_see"
-                    style="@style/Widget.MaterialComponents.Button"
-                    android:layout_width="0dp"
-                    android:layout_height="52dp"
-                    android:layout_weight="1"
-                    android:enabled="false"
-                    android:text="@string/walkie_see"
-                    android:textAllCaps="false"
-                    android:textColor="@color/barky_on_primary"
-                    android:textSize="15sp"
-                    android:textStyle="bold"
-                    app:backgroundTint="@color/barky_primary"
-                    app:cornerRadius="20dp" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/walkie_wakeup"
-                style="@style/Widget.MaterialComponents.Button"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_weight="1"
-                android:enabled="false"
-                android:text="@string/walkie_wakeup"
-                android:textAllCaps="false"
-                android:textColor="@color/barky_on_primary"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                app:backgroundTint="@color/walkie_wakeup"
-                app:cornerRadius="20dp" />
-        </LinearLayout>
     </LinearLayout>
 
     <!-- Blocks the whole app until every required permission is granted -->

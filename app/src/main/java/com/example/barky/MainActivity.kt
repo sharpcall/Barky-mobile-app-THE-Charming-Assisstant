@@ -222,8 +222,8 @@ class MainActivity : AppCompatActivity() {
             showMap = false
             val watching = isSeeing || (walkieService?.isRequestingScreen() == true)
             if (watching && live && !isTalking) {
-                // Remote video fills stage; PiP self-view stays a small natural rectangle on top
-                if (!pipLayoutActive) applySeeSplitLayout(true)
+                // Always re-assert small PiP — never leave full-bleed self covering remote
+                applySeeSplitLayout(true)
                 walkieVideo.elevation = 0f
                 // Pixel: replace drawable carefully — recycling the previous bitmap while
                 // ImageView still holds it caused black flashes / flicker.
@@ -1249,14 +1249,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Natural PiP size from camera buffer + display orientation (no stretch).
-     * Small corner bubble (WhatsApp-like) — full-bleed stage made 50% width feel huge; keep tight caps.
-     * Flip is a small overlay *inside* this box (not beside it).
+     * Compact WhatsApp-style self PiP. Absolute dp caps only — never % of full-bleed stage
+     * (that made self look “very big” on phones). Texture is clipped to the box.
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        // Compact self-view (was 228dp ≈ half screen on full-bleed)
-        val baseW = ((if (pipEnlarged) 148f else 108f) * density).toInt()
+        // Tiny corner bubble: ~88×118dp normal, ~120×160dp when user taps to enlarge
+        val baseW = ((if (pipEnlarged) 120f else 88f) * density).toInt()
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1268,24 +1267,15 @@ class MainActivity : AppCompatActivity() {
                 uprightW = previewBufH.toFloat()
                 uprightH = previewBufW.toFloat()
             }
-            (uprightH / uprightW).coerceIn(1.2f, 1.9f)
+            (uprightH / uprightW).coerceIn(1.25f, 1.85f)
         } else {
             4f / 3f
         }
         var pipW = baseW
         var pipH = (baseW * uprightAspectHOverW).toInt()
-        val parent = walkiePipBox.parent as? android.view.ViewGroup
-        val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
-        val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        // Hard caps: never more than ~30% width / 28% height when not enlarged
-        val maxW = minOf(
-            (parentW * (if (pipEnlarged) 0.38f else 0.28f)).toInt(),
-            ((if (pipEnlarged) 168f else 120f) * density).toInt()
-        ).coerceAtLeast((96 * density).toInt())
-        val maxH = minOf(
-            (parentH * (if (pipEnlarged) 0.40f else 0.28f)).toInt(),
-            ((if (pipEnlarged) 220f else 160f) * density).toInt()
-        ).coerceAtLeast((120 * density).toInt())
+        // Absolute hard caps in px (ignore parent % — full stage is huge)
+        val maxW = ((if (pipEnlarged) 128f else 96f) * density).toInt()
+        val maxH = ((if (pipEnlarged) 172f else 132f) * density).toInt()
         if (pipW > maxW) {
             val s = maxW.toFloat() / pipW
             pipW = maxW
@@ -1295,6 +1285,14 @@ class MainActivity : AppCompatActivity() {
             val s = maxH.toFloat() / pipH
             pipH = maxH
             pipW = (pipW * s).toInt()
+        }
+        // Never exceed ~22% of screen width even on large tablets
+        val screenW = resources.displayMetrics.widthPixels
+        val screenMaxW = (screenW * 0.22f).toInt().coerceAtLeast((72 * density).toInt())
+        if (pipW > screenMaxW) {
+            val s = screenMaxW.toFloat() / pipW
+            pipW = screenMaxW
+            pipH = (pipH * s).toInt()
         }
         return pipW.coerceAtLeast(1) to pipH.coerceAtLeast(1)
     }
@@ -1308,14 +1306,18 @@ class MainActivity : AppCompatActivity() {
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val lp = (walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams)
-            ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
+        // MATCH_PARENT (-1) or full-stage leftovers from idle must never stick during SEE
+        val existing = walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams
+        val wasFullBleed = existing == null ||
+            existing.width <= 0 || existing.height <= 0 ||
+            existing.width >= parentW * 0.5f || existing.height >= parentH * 0.5f
+        val lp = existing ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
         val oldW = lp.width
         val oldH = lp.height
-        // MATCH_PARENT / huge leftover from idle full-bleed must never stick during SEE
-        val sizeOk = lp.width in 1..(parentW * 0.4f).toInt() &&
-            lp.height in 1..(parentH * 0.4f).toInt()
-        val useSaved = preservePosition && pipLastLeft >= 0 && pipLastTop >= 0 && sizeOk
+        val sizeOk = !wasFullBleed &&
+            lp.width in 1..(parentW * 0.3f).toInt() &&
+            lp.height in 1..(parentH * 0.3f).toInt()
+        val useSaved = preservePosition && !wasFullBleed && pipLastLeft >= 0 && pipLastTop >= 0 && sizeOk
         var left = if (useSaved) {
             pipLastLeft
         } else if (preservePosition && sizeOk &&
@@ -1344,6 +1346,10 @@ class MainActivity : AppCompatActivity() {
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         lp.setMargins(left, top, 0, 0)
         walkiePipBox.layoutParams = lp
+        // Clip TextureView to the bubble — without this, transform painted full-stage self
+        walkiePipBox.clipChildren = true
+        walkiePipBox.clipToPadding = true
+        walkiePipBox.elevation = 24f
         // Preview fills the box; flip is a badge ON the self-picture (top-end)
         walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1352,7 +1358,10 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.alpha = 1f
         placeSelfFlipOnPreview()
         walkiePipBox.requestLayout()
-        if (oldW != pipW || oldH != pipH) {
+        walkiePipBox.post {
+            applyNaturalPreviewTransform()
+        }
+        if (oldW != pipW || oldH != pipH || wasFullBleed) {
             walkiePreview.post { applyNaturalPreviewTransform() }
         }
     }
@@ -1469,8 +1478,14 @@ class MainActivity : AppCompatActivity() {
         }
         walkiePipFlip.visibility = View.VISIBLE
         walkiePipFlip.elevation = 30f
-        walkiePipBox.clipChildren = false
-        walkiePipBox.clipToPadding = false
+        // During SEE keep clip so TextureView cannot paint outside the tiny PiP bubble
+        if (isSeeing) {
+            walkiePipBox.clipChildren = true
+            walkiePipBox.clipToPadding = true
+        } else {
+            walkiePipBox.clipChildren = false
+            walkiePipBox.clipToPadding = false
+        }
         walkiePipFlip.bringToFront()
         // Stage flip is for peer during SEE; hide it when self badge is the local control
         if (::walkieFlipCamera.isInitialized) {

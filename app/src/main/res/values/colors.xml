@@ -13,6 +13,9 @@
     <color name="barky_card_stroke">#4C1D95</color>
     <color name="barky_glass">#33FFFFFF</color>
     <color name="barky_glass_strong">#28F0ABFC</color>
+    <!-- Footer glass buttons (semi-opaque so they read on camera) -->
+    <color name="barky_glass_btn">#B31A1030</color>
+    <color name="barky_glass_btn_on">#E62E1065</color>
 
     <color name="barky_on_primary">#FFFFFF</color>
     <color name="barky_on_surface">#F5F3FF</color>

@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Barky — Full-bleed camera shell (HUD overlays)</title>
+  <style>
+    :root {
+      --page-bg: #0c0e12;
+      --page-fg: #eef1f6;
+      --muted: #9aa3b2;
+      --card: #151922;
+      --line: #2a3140;
+      --violet: #a855f7;
+      --pink: #ec4899;
+      --cyan: #67e8f9;
+      --deep: #0f0a1a;
+      --glass: rgba(255, 255, 255, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #2e1065 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #4a044e 0%, transparent 50%),
+        var(--page-bg);
+      color: var(--page-fg);
+      min-height: 100vh;
+    }
+    header {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 28px 24px 8px;
+    }
+    header h1 {
+      margin: 0 0 6px;
+      font-size: 1.65rem;
+      letter-spacing: -0.02em;
+      background: linear-gradient(90deg, #f0abfc, #a78bfa, #67e8f9);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 72ch;
+      line-height: 1.55;
+    }
+    .hint {
+      margin-top: 12px;
+      display: inline-block;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(168, 85, 247, 0.12);
+      border: 1px solid rgba(168, 85, 247, 0.35);
+      color: #e9d5ff;
+      font-size: 0.9rem;
+    }
+    .nav {
+      max-width: 1400px;
+      margin: 18px auto 0;
+      padding: 0 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: linear-gradient(to bottom, rgba(12,14,18,.96), rgba(12,14,18,.8), transparent);
+      padding-top: 10px;
+      padding-bottom: 14px;
+    }
+    .nav a {
+      text-decoration: none;
+      color: #d7deea;
+      background: #1a2130;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-size: 0.85rem;
+      transition: .15s ease;
+    }
+    .nav a:hover,
+    .nav a.active {
+      border-color: #a855f7;
+      color: #fff;
+      background: rgba(168, 85, 247, 0.18);
+    }
+    .grid {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 8px 24px 64px;
+      display: grid;
+      gap: 40px;
+    }
+
+    /* Title / concept explainer */
+    .title-card {
+      background: rgba(21, 25, 34, 0.75);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 28px 28px 24px;
+      scroll-margin-top: 64px;
+    }
+    .title-card .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #e9d5ff;
+      border: 1px solid rgba(168, 85, 247, 0.4);
+      background: rgba(168, 85, 247, 0.12);
+      border-radius: 999px;
+      padding: 4px 10px;
+      margin-bottom: 12px;
+    }
+    .title-card h2 {
+      margin: 0 0 10px;
+      font-size: 1.45rem;
+      letter-spacing: -0.02em;
+    }
+    .title-card .lead {
+      color: #c5cedd;
+      line-height: 1.6;
+      margin: 0 0 18px;
+      max-width: 78ch;
+    }
+    .compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin: 18px 0 8px;
+    }
+    @media (max-width: 720px) {
+      .compare { grid-template-columns: 1fr; }
+    }
+    .compare-box {
+      border-radius: 16px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      background: rgba(0,0,0,.25);
+    }
+    .compare-box.bad { border-color: #4b5563; }
+    .compare-box.good {
+      border-color: rgba(168, 85, 247, 0.5);
+      background: rgba(46, 16, 101, 0.35);
+    }
+    .compare-box h3 {
+      margin: 0 0 6px;
+      font-size: 0.95rem;
+    }
+    .compare-box p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+    .swatches { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 4px; }
+    .swatch {
+      width: 34px; height: 34px; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.18);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.2);
+    }
+    .rules {
+      margin: 16px 0 0;
+      padding-left: 18px;
+      color: #c5cedd;
+      line-height: 1.55;
+    }
+    .rules li { margin: 4px 0; }
+
+    /* Concept section */
+    .concept {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      gap: 28px;
+      align-items: start;
+      background: rgba(21, 25, 34, 0.7);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      scroll-margin-top: 64px;
+    }
+    @media (max-width: 920px) {
+      .concept { grid-template-columns: 1fr; justify-items: center; }
+    }
+    .meta h2 {
+      margin: 0 0 8px;
+      font-size: 1.3rem;
+      letter-spacing: -0.02em;
+    }
+    .meta .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #a9b6cc;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      margin-bottom: 12px;
+    }
+    .meta p {
+      color: var(--muted);
+      line-height: 1.55;
+      margin: 0 0 14px;
+    }
+    .bullets { margin: 0; padding-left: 18px; color: #c5cedd; line-height: 1.55; }
+    .bullets li { margin: 4px 0; }
+
+    /* Phone frame + callouts */
+    .phone-wrap {
+      position: relative;
+      width: 360px;
+      max-width: 100%;
+      padding: 8px 28px 8px 48px;
+    }
+    .phone {
+      width: 300px;
+      height: 620px;
+      border-radius: 36px;
+      padding: 9px;
+      background: #0a0a0c;
+      box-shadow:
+        0 0 0 1px rgba(255,255,255,.08),
+        0 30px 80px rgba(0,0,0,.55),
+        0 8px 24px rgba(0,0,0,.35),
+        0 0 60px rgba(168, 85, 247, 0.12);
+      position: relative;
+      z-index: 2;
+    }
+    .phone-inner {
+      width: 100%;
+      height: 100%;
+      border-radius: 28px;
+      overflow: hidden;
+      position: relative;
+      color: #f5f3ff;
+      background: #0f0a1a;
+    }
+
+    /* Full-bleed camera — the key difference */
+    .cam {
+      position: absolute;
+      inset: 0;
+      background-size: cover;
+      background-position: center;
+      z-index: 0;
+    }
+    .cam::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(180deg, rgba(15,10,26,.55) 0%, rgba(15,10,26,.12) 22%, rgba(15,10,26,.08) 55%, rgba(15,10,26,.72) 100%),
+        radial-gradient(ellipse at 50% 100%, rgba(124,58,237,.25) 0%, transparent 55%);
+      pointer-events: none;
+    }
+    .cam-self {
+      background-image:
+        linear-gradient(160deg, rgba(88,28,135,.15), rgba(15,10,26,.25)),
+        url("https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=900&q=80");
+    }
+    .cam-remote {
+      background-image:
+        linear-gradient(160deg, rgba(88,28,135,.12), rgba(15,10,26,.2)),
+        url("https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=900&q=80");
+    }
+    .cam-room {
+      background-image:
+        linear-gradient(160deg, rgba(88,28,135,.18), rgba(15,10,26,.28)),
+        url("https://images.unsplash.com/photo-1493809842364-78817add7ffb?auto=format&fit=crop&w=900&q=80");
+    }
+
+    .notch {
+      position: absolute;
+      top: 8px; left: 50%; transform: translateX(-50%);
+      width: 92px; height: 22px; border-radius: 20px;
+      background: #050507; z-index: 12;
+    }
+
+    /* HUD layers sit on camera */
+    .hud {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      display: flex;
+      flex-direction: column;
+      pointer-events: none;
+    }
+    .hud > * { pointer-events: auto; }
+
+    .status-bar {
+      height: 34px;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      padding: 0 14px 3px;
+      font-size: 11px;
+      font-weight: 600;
+      opacity: .9;
+      text-shadow: 0 1px 4px rgba(0,0,0,.6);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 6px 12px 8px;
+    }
+    .topbar-left { min-width: 0; }
+    .toolbar-title {
+      font-weight: 700;
+      font-size: 1.12rem;
+      letter-spacing: -0.01em;
+      background: linear-gradient(90deg, #f0abfc, #a78bfa, #67e8f9);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,.45));
+    }
+    .toolbar-sub {
+      font-size: 11px;
+      opacity: .88;
+      margin-top: 2px;
+      color: #e9d5ff;
+      text-shadow: 0 1px 3px rgba(0,0,0,.55);
+    }
+    .icon-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(15, 10, 26, 0.45);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      color: #f5f3ff;
+      display: grid;
+      place-items: center;
+      font-size: 15px;
+      flex-shrink: 0;
+      box-shadow: 0 4px 14px rgba(0,0,0,.25);
+    }
+    .top-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .mid-space {
+      flex: 1;
+      position: relative;
+      min-height: 0;
+    }
+
+    .overlay-chip {
+      position: absolute;
+      left: 12px;
+      top: 8px;
+      padding: 6px 11px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 999px;
+      background: rgba(255,255,255,.12);
+      color: #f5d0fe;
+      border: 1px solid rgba(240,171,252,.4);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0,0,0,.3);
+      letter-spacing: .02em;
+    }
+    .overlay-chip.live::before {
+      content: "";
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #f472b6;
+      margin-right: 6px;
+      box-shadow: 0 0 8px #ec4899;
+      vertical-align: 0;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .4; }
+    }
+    .overlay-chip.mute {
+      top: auto;
+      bottom: 8px;
+      left: 12px;
+      color: #a7f3d0;
+      border-color: rgba(52, 211, 153, .4);
+      background: rgba(6, 78, 59, .35);
+    }
+
+    /* Self picture frame — flip MUST live inside this box, never as a sibling outside */
+    .self-frame {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+    }
+    .pip {
+      position: absolute;
+      right: 12px;
+      top: 8px;
+      width: 78px;
+      height: 104px;
+      border-radius: 16px;
+      border: 2px solid rgba(240, 171, 252, 0.75);
+      background-size: cover;
+      background-position: center;
+      box-shadow: 0 0 20px rgba(240,171,252,.35), 0 8px 24px rgba(0,0,0,.45);
+      overflow: hidden; /* clip flip to self-picture bounds */
+      z-index: 4;
+    }
+    .pip::after {
+      content: "You";
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      padding: 3px 0 4px;
+      text-align: center;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      background: rgba(15,10,26,.65);
+      color: #f5d0fe;
+      pointer-events: none;
+    }
+    .pip-self {
+      background-image: url("https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=70");
+    }
+    /* Flip is a child of .self-frame or .pip only — top-end of THAT frame */
+    .flip-on-self {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.35);
+      background: rgba(15, 10, 26, 0.55);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      color: #f5f3ff;
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.4);
+      z-index: 5;
+    }
+    .pip .flip-on-self {
+      top: 6px;
+      right: 6px;
+      width: 28px;
+      height: 28px;
+      font-size: 12px;
+    }
+
+    /* Footer: NO panel / box — only the buttons floating on camera */
+    .footer {
+      padding: 10px 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      background: transparent;
+      backdrop-filter: none;
+    }
+    .footer-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      padding: 0;
+    }
+    .toggle-row {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      font-size: 10px;
+      color: #ddd6fe;
+      opacity: .9;
+    }
+    .toggle-row span.on { color: #f0abfc; font-weight: 700; }
+    .row { display: flex; gap: 6px; }
+    .btn {
+      flex: 1;
+      border: none;
+      cursor: default;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: .04em;
+      padding: 10px 4px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.08);
+      color: #ede9fe;
+      border: 1px solid rgba(255,255,255,.12);
+      backdrop-filter: blur(8px);
+    }
+    .btn.accent {
+      background: linear-gradient(135deg, #a855f7, #ec4899);
+      border: none;
+      color: #fff;
+    }
+    .btn.warn {
+      background: linear-gradient(135deg, #f97316, #db2777);
+      border: none;
+      color: #fff;
+    }
+    .btn.ghost {
+      background: rgba(255,255,255,.06);
+    }
+    .btn.on {
+      box-shadow: 0 0 0 1px rgba(240,171,252,.5), 0 0 16px rgba(168,85,247,.35);
+    }
+    .hold {
+      width: 100%;
+      border: none;
+      font-weight: 800;
+      letter-spacing: .08em;
+      padding: 14px 12px;
+      font-size: 12px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, #c026d3, #7c3aed 55%, #2563eb);
+      color: #fff;
+      box-shadow: 0 12px 36px rgba(168,85,247,.45);
+    }
+    .peer-line {
+      font-size: 10px;
+      opacity: .8;
+      text-align: center;
+      color: #ddd6fe;
+    }
+
+    /* Annotation callouts */
+    .callout {
+      position: absolute;
+      z-index: 6;
+      font-size: 11px;
+      line-height: 1.3;
+      color: #e9d5ff;
+      max-width: 108px;
+      pointer-events: none;
+    }
+    .callout .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: #a855f7;
+      box-shadow: 0 0 0 3px rgba(168,85,247,.35);
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    .callout .label {
+      display: block;
+      margin-top: 3px;
+      padding: 5px 8px;
+      border-radius: 10px;
+      background: rgba(15,10,26,.88);
+      border: 1px solid rgba(168,85,247,.45);
+      box-shadow: 0 6px 16px rgba(0,0,0,.4);
+    }
+    .callout.left { left: -4px; text-align: left; }
+    .callout.right { right: -8px; text-align: right; }
+    .callout.c-top { top: 78px; }
+    .callout.c-chip { top: 168px; }
+    .callout.c-footer { bottom: 108px; }
+    .callout.c-pip { top: 150px; }
+    .callout.c-hold { bottom: 48px; }
+
+    .wave {
+      position: absolute;
+      left: 50%;
+      top: 42%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      height: 48px;
+      opacity: .9;
+    }
+    .wave i {
+      display: block;
+      width: 5px;
+      border-radius: 4px;
+      background: linear-gradient(180deg, #f0abfc, #67e8f9);
+      animation: bar 1s ease-in-out infinite;
+      box-shadow: 0 0 10px rgba(168,85,247,.5);
+    }
+    .wave i:nth-child(1) { height: 16px; animation-delay: 0s; }
+    .wave i:nth-child(2) { height: 32px; animation-delay: .1s; }
+    .wave i:nth-child(3) { height: 44px; animation-delay: .2s; }
+    .wave i:nth-child(4) { height: 28px; animation-delay: .3s; }
+    .wave i:nth-child(5) { height: 18px; animation-delay: .4s; }
+    @keyframes bar {
+      0%, 100% { transform: scaleY(.55); opacity: .7; }
+      50% { transform: scaleY(1); opacity: 1; }
+    }
+    .listen-badge {
+      position: absolute;
+      left: 50%;
+      top: 54%;
+      transform: translateX(-50%);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      color: #a7f3d0;
+      background: rgba(6, 78, 59, 0.45);
+      border: 1px solid rgba(52, 211, 153, 0.45);
+      backdrop-filter: blur(10px);
+    }
+
+    footer.page-foot {
+      text-align: center;
+      color: var(--muted);
+      padding: 0 24px 48px;
+      font-size: 0.9rem;
+      max-width: 720px;
+      margin: 0 auto;
+      line-height: 1.5;
+    }
+    code {
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.85em;
+      color: #c4b5fd;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Barky — Full-bleed camera shell</h1>
+    <p>
+      Design concept only. Same control set as the app (HOLD, LISTEN, SEE, SCRN, RING, REPLAY, GPS, contacts, flip).
+      Layout change only: the camera fills the entire screen; chrome is a transparent HUD on top — not a stage card floating in a themed window.
+    </p>
+    <div class="hint">HTML/CSS preview · no Android code · open this file in a browser</div>
+  </header>
+
+  <nav class="nav" id="nav">
+    <a href="#concept" class="active">Concept</a>
+    <a href="#m1">1 · Idle self-cam</a>
+    <a href="#m2">2 · SEE dual</a>
+    <a href="#m3">3 · LISTEN chrome</a>
+  </nav>
+
+  <div class="grid">
+
+    <!-- Title / explanation -->
+    <section class="title-card" id="concept">
+      <div class="tag">Layout concept</div>
+      <h2>Full-bleed camera shell — controls as HUD overlays</h2>
+      <p class="lead">
+        Today’s Violet Pulse mock (and similar decks) treated video as an <strong>inset stage card</strong>
+        sitting inside a purple shell, with a solid footer below the card. This concept removes that sandwich:
+        <strong>the whole phone face is the camera image</strong>. App name, settings, status chips, PiP, and
+        action rows float as frosted glass over the live picture — like a walkie “SEE” viewfinder, not a chat app with a video thumbnail.
+      </p>
+
+      <div class="compare">
+        <div class="compare-box bad">
+          <h3>Before (stage card)</h3>
+          <p>Top bar + themed chrome → rounded video card → solid footer panel. Camera is a window inside the UI.</p>
+        </div>
+        <div class="compare-box good">
+          <h3>After (full-bleed HUD)</h3>
+          <p>Camera edge-to-edge. Title/settings on the image. Footer is <em>buttons only</em> (no tray). Flip only on the self-picture frame.</p>
+        </div>
+      </div>
+
+      <div class="swatches" title="Violet Pulse palette">
+        <div class="swatch" style="background:#0f0a1a"></div>
+        <div class="swatch" style="background:#2e1065"></div>
+        <div class="swatch" style="background:#a855f7"></div>
+        <div class="swatch" style="background:#ec4899"></div>
+        <div class="swatch" style="background:#67e8f9"></div>
+        <div class="swatch" style="background:#f0abfc"></div>
+      </div>
+
+      <ul class="rules">
+        <li><strong>Do not</strong> invent new features or rename controls — only re-layout chrome as overlays.</li>
+        <li>Top: gradient wordmark <em>Barky</em> + peer subtitle + settings / contacts icons over camera.</li>
+        <li>Mid: status chip (e.g. “SEE live”); self PiP when dual — <strong>flip lives only inside the self-picture frame</strong>.</li>
+        <li>Bottom: <strong>no frosted tray</strong> — only individual buttons + HOLD floating on the camera.</li>
+        <li>Aesthetic: deep violet, magenta–purple HOLD, glass chips — same energy as Concept E (Violet Pulse).</li>
+      </ul>
+    </section>
+
+    <!-- Mockup 1: Idle full-screen self-cam -->
+    <section class="concept" id="m1">
+      <div class="meta">
+        <div class="tag">Mockup 1</div>
+        <h2>Idle · full-screen self-cam</h2>
+        <p>
+          Ready state: local front camera is the entire background. No inset stage card.
+          Chrome is fully transparent HUD; soft top/bottom scrims keep text readable.
+        </p>
+        <ul class="bullets">
+          <li>Top bar (title + settings) sits <strong>on</strong> the camera</li>
+          <li>Status chip “Ready · self view” on the picture</li>
+          <li>Buttons only — <strong>no dark tray / glass panel</strong> behind the footer</li>
+          <li>Flip is <strong>inside</strong> the full-bleed self frame (top-end of that frame)</li>
+        </ul>
+      </div>
+
+      <div class="phone-wrap">
+        <div class="callout left c-top">
+          <span class="dot"></span>
+          <span class="label">Top bar over camera — title + settings, not a solid app header</span>
+        </div>
+        <div class="callout right c-chip">
+          <span class="dot"></span>
+          <span class="label">Flip on self-picture frame (top-end of the self cam)</span>
+        </div>
+        <div class="callout left c-footer">
+          <span class="dot"></span>
+          <span class="label">Buttons only — transparent footer, no box</span>
+        </div>
+        <div class="callout right c-hold">
+          <span class="dot"></span>
+          <span class="label">HOLD stays primary — same function</span>
+        </div>
+
+        <div class="phone"><div class="phone-inner">
+          <div class="cam cam-self" role="img" aria-label="Self camera sample"></div>
+          <div class="notch"></div>
+          <div class="hud">
+            <div class="status-bar"><span>9:41</span><span>5G · 84%</span></div>
+            <div class="topbar">
+              <div class="topbar-left">
+                <div class="toolbar-title">Barky</div>
+                <div class="toolbar-sub">Ready · linked SM-G981W</div>
+              </div>
+              <div class="top-actions">
+                <div class="icon-btn" title="Contacts">👥</div>
+                <div class="icon-btn" title="Settings">⚙</div>
+              </div>
+            </div>
+            <div class="mid-space">
+              <!-- Full mid area IS the self-picture frame when idle -->
+              <div class="self-frame" title="Self picture frame">
+                <div class="overlay-chip">Ready · self view</div>
+                <div class="flip-on-self" title="Flip camera — on self frame">⟲</div>
+              </div>
+            </div>
+            <div class="footer">
+              <div class="footer-actions">
+                <div class="toggle-row">
+                  <span class="on">● BEST</span>
+                  <span>○ GPS</span>
+                  <span>○ Private</span>
+                </div>
+                <div class="row">
+                  <button class="btn accent">LISTEN</button>
+                  <button class="btn accent">SEE</button>
+                  <button class="btn">SCRN</button>
+                </div>
+                <div class="row">
+                  <button class="btn warn">RING</button>
+                  <button class="btn ghost">REPLAY</button>
+                  <button class="btn ghost">GPS</button>
+                </div>
+                <button class="hold">HOLD TO TALK</button>
+                <div class="peer-line">192.168.4.231 · Wi‑Fi</div>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </div>
+    </section>
+
+    <!-- Mockup 2: SEE dual -->
+    <section class="concept" id="m2">
+      <div class="meta">
+        <div class="tag">Mockup 2</div>
+        <h2>SEE dual · remote full-bleed + self PiP</h2>
+        <p>
+          Active SEE: remote peer fills the screen edge-to-edge. Local self-view is a floating PiP on the remote picture.
+          Same glass chrome and control names — SEE highlighted as active.
+        </p>
+        <ul class="bullets">
+          <li>Remote camera = full-bleed background (not a stage card)</li>
+          <li>Self PiP is the self-picture frame — <strong>flip is inside the PiP</strong>, not beside it</li>
+          <li>“SEE live” chip on the remote image</li>
+          <li>Buttons float with no tray behind them</li>
+        </ul>
+      </div>
+
+      <div class="phone-wrap">
+        <div class="callout left c-top">
+          <span class="dot"></span>
+          <span class="label">Same top HUD — always over whatever the camera shows</span>
+        </div>
+        <div class="callout right c-pip">
+          <span class="dot"></span>
+          <span class="label">Flip is ON the self PiP frame (top-end of PiP)</span>
+        </div>
+        <div class="callout left c-footer">
+          <span class="dot"></span>
+          <span class="label">SEE on · buttons only, no footer box</span>
+        </div>
+
+        <div class="phone"><div class="phone-inner">
+          <div class="cam cam-remote" role="img" aria-label="Remote peer camera sample"></div>
+          <div class="notch"></div>
+          <div class="hud">
+            <div class="status-bar"><span>9:41</span><span>5G · 84%</span></div>
+            <div class="topbar">
+              <div class="topbar-left">
+                <div class="toolbar-title">Barky</div>
+                <div class="toolbar-sub">SEE · Pixel 7 · live</div>
+              </div>
+              <div class="top-actions">
+                <div class="icon-btn" title="Contacts">👥</div>
+                <div class="icon-btn" title="Settings">⚙</div>
+              </div>
+            </div>
+            <div class="mid-space">
+              <div class="overlay-chip live">SEE live</div>
+              <!-- Self picture frame = PiP only; flip is a child of .pip -->
+              <div class="pip pip-self" title="Self picture frame">
+                <div class="flip-on-self" title="Flip camera — on self PiP">⟲</div>
+              </div>
+            </div>
+            <div class="footer">
+              <div class="footer-actions">
+                <div class="toggle-row">
+                  <span class="on">● BEST</span>
+                  <span>○ GPS</span>
+                  <span>○ Private</span>
+                </div>
+                <div class="row">
+                  <button class="btn accent">LISTEN</button>
+                  <button class="btn accent on">SEE</button>
+                  <button class="btn">SCRN</button>
+                </div>
+                <div class="row">
+                  <button class="btn warn">RING</button>
+                  <button class="btn ghost">REPLAY</button>
+                  <button class="btn ghost">GPS</button>
+                </div>
+                <button class="hold">HOLD TO TALK</button>
+                <div class="peer-line">192.168.4.231 · Wi‑Fi · dual video</div>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </div>
+    </section>
+
+    <!-- Mockup 3: LISTEN / SCRN same chrome -->
+    <section class="concept" id="m3">
+      <div class="meta">
+        <div class="tag">Mockup 3</div>
+        <h2>LISTEN · same chrome over camera</h2>
+        <p>
+          LISTEN active: still full-bleed camera (room / last self frame), not a different shell.
+          Only the mid overlay and LISTEN accent change — proves SCRN / audio states reuse the HUD, not a new layout.
+        </p>
+        <ul class="bullets">
+          <li>Identical glass top bar + footer as mockups 1–2</li>
+          <li>LISTEN on; waveform badge over the picture</li>
+          <li>SCRN available in the same row (no redesign of functions)</li>
+          <li>Camera remains the shell — audio is an overlay, not a solid page</li>
+        </ul>
+      </div>
+
+      <div class="phone-wrap">
+        <div class="callout right c-chip">
+          <span class="dot"></span>
+          <span class="label">LISTEN status on camera — not a separate screen chrome</span>
+        </div>
+        <div class="callout left c-footer">
+          <span class="dot"></span>
+          <span class="label">Same control set · LISTEN highlighted</span>
+        </div>
+
+        <div class="phone"><div class="phone-inner">
+          <div class="cam cam-room" role="img" aria-label="Room camera sample"></div>
+          <div class="notch"></div>
+          <div class="hud">
+            <div class="status-bar"><span>9:41</span><span>5G · 84%</span></div>
+            <div class="topbar">
+              <div class="topbar-left">
+                <div class="toolbar-title">Barky</div>
+                <div class="toolbar-sub">LISTEN · peer talking</div>
+              </div>
+              <div class="top-actions">
+                <div class="icon-btn" title="Contacts">👥</div>
+                <div class="icon-btn" title="Settings">⚙</div>
+              </div>
+            </div>
+            <div class="mid-space">
+              <div class="self-frame" title="Self picture frame">
+                <div class="overlay-chip live">LISTEN · live audio</div>
+                <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+                <div class="listen-badge">RX · loudspeaker</div>
+                <div class="flip-on-self" title="Flip camera — on self frame">⟲</div>
+              </div>
+            </div>
+            <div class="footer">
+              <div class="footer-actions">
+                <div class="toggle-row">
+                  <span class="on">● BEST</span>
+                  <span>○ GPS</span>
+                  <span>○ Private</span>
+                </div>
+                <div class="row">
+                  <button class="btn accent on">LISTEN</button>
+                  <button class="btn accent">SEE</button>
+                  <button class="btn">SCRN</button>
+                </div>
+                <div class="row">
+                  <button class="btn warn">RING</button>
+                  <button class="btn ghost">REPLAY</button>
+                  <button class="btn ghost">GPS</button>
+                </div>
+                <button class="hold">HOLD TO TALK</button>
+                <div class="peer-line">192.168.4.231 · Wi‑Fi · half-duplex</div>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </div>
+    </section>
+
+  </div>
+
+  <footer class="page-foot">
+    Open as <code>file:///F:/To%20sort/Delete/barky/docs/design-concepts-fullscreen-camera.html</code>
+    · Design only · Violet Pulse glass · full-bleed camera + HUD · no Android changes.
+  </footer>
+
+  <script>
+    (function () {
+      var links = document.querySelectorAll(".nav a");
+      function setActive() {
+        var y = window.scrollY + 80;
+        var ids = ["concept", "m1", "m2", "m3"];
+        var current = ids[0];
+        for (var i = 0; i < ids.length; i++) {
+          var el = document.getElementById(ids[i]);
+          if (el && el.offsetTop <= y) current = ids[i];
+        }
+        links.forEach(function (a) {
+          a.classList.toggle("active", a.getAttribute("href") === "#" + current);
+        });
+      }
+      window.addEventListener("scroll", setActive, { passive: true });
+      setActive();
+    })();
+  </script>
+</body>
+</html>
