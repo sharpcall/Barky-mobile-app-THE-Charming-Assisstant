@@ -17,6 +17,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.example.barky.BarkyPrefs
+import com.example.barky.net.BarkyHubConfig
+import com.example.barky.net.BarkyUdpRelay
 import com.example.barky.net.ContactLabels
 import com.example.barky.net.DeviceIdentity
 import com.example.barky.net.NetworkEndpoints
@@ -551,6 +553,7 @@ class WalkieTalkieEngine(
                 startReceiver(sock)
                 startVideoAcceptLoop(ss)
                 startHelloBeacon()
+                startHubRelayRegistration()
                 registerNsd(localPort, localVideoPort)
                 startDiscovery()
             } catch (t: Throwable) {
@@ -1194,7 +1197,9 @@ class WalkieTalkieEngine(
                 if (uiPreviewTexture == null) {
                     decodeAndEmit(jpeg, live = true)
                 }
-                val viaTcp = sendVideoFrameTcp(jpeg)
+                // Cellular / public peer: skip TCP video (won't traverse CGNAT); UDP+relay.
+                val lanPeer = PeerEndpoint.isPrivateIp(peer.host)
+                val viaTcp = if (lanPeer) sendVideoFrameTcp(jpeg) else false
                 if (viaTcp) {
                     videoTxOk++
                     if (videoTxOk == 1 || videoTxOk % 15 == 0) {
@@ -1205,7 +1210,10 @@ class WalkieTalkieEngine(
                     if (viaUdp) {
                         videoTxOk++
                         if (videoTxOk == 1 || videoTxOk % 15 == 0) {
-                            videoDebug("TX OK frames=$videoTxOk lastJpeg=${jpeg.size}B via=UDP")
+                            videoDebug(
+                                "TX OK frames=$videoTxOk lastJpeg=${jpeg.size}B via=" +
+                                    if (lanPeer) "UDP" else "UDP/relay"
+                            )
                         }
                     } else {
                         videoTxFail++
@@ -2590,8 +2598,69 @@ class WalkieTalkieEngine(
     }
 
     private fun sendUdp(packet: DatagramPacket) {
+        val destHost = try {
+            packet.address?.hostAddress?.substringBefore('%')
+        } catch (_: Throwable) {
+            null
+        }
+        // Cellular / public path: forward via Oracle UDP relay (CGNAT-safe).
+        // LAN private peers stay direct.
+        val useRelay =
+            BarkyHubConfig.relayEnabled &&
+                !BarkyPrefs.isWifiOnly(appContext) &&
+                !destHost.isNullOrBlank() &&
+                !PeerEndpoint.isPrivateIp(destHost) &&
+                !BarkyHubConfig.isHubAddress(destHost)
+        if (useRelay) {
+            val destId = hostToDeviceId[destHost]
+                ?: peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key
+            if (!destId.isNullOrBlank()) {
+                val sock = socket
+                val ok = BarkyUdpRelay.sendForward(
+                    sock,
+                    destId,
+                    packet.data,
+                    packet.offset,
+                    packet.length
+                )
+                if (ok) return
+                Log.w(TAG, "relay FWD failed — falling back to direct $destHost")
+            } else {
+                Log.w(TAG, "relay skip: no deviceId for $destHost — direct UDP")
+            }
+        }
         synchronized(udpSendLock) {
             socket?.send(packet)
+        }
+    }
+
+    /** Attribute hub-relay packets to the selected peer so RX state matches Contacts. */
+    private fun resolveFromHost(rawHost: String): String {
+        if (!BarkyHubConfig.isHubAddress(rawHost)) return rawHost
+        val peer = currentPeer()
+        if (peer != null && !PeerEndpoint.isPrivateIp(peer.host)) {
+            return peer.host
+        }
+        return rawHost
+    }
+
+    private fun startHubRelayRegistration() {
+        thread(name = "barky-hub-reg", isDaemon = true) {
+            while (running.get()) {
+                try {
+                    if (!BarkyPrefs.isWifiOnly(appContext) && BarkyHubConfig.relayEnabled) {
+                        val id = DeviceIdentity.deviceId(appContext)
+                        BarkyUdpRelay.register(socket, id)
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "hub REG", t)
+                }
+                try {
+                    Thread.sleep(12_000L)
+                } catch (_: InterruptedException) {
+                    return@thread
+                }
+            }
         }
     }
 
@@ -2773,7 +2842,13 @@ class WalkieTalkieEngine(
                         packet.offset,
                         packet.offset + packet.length
                     )
-                    val from = packet.address?.hostAddress ?: "peer"
+                    val rawFrom = packet.address?.hostAddress?.substringBefore('%') ?: "peer"
+                    // Relay ACK (0xF2) — not walkie media
+                    if (snapshot[0] == 0xF2.toByte() && BarkyHubConfig.isHubAddress(rawFrom)) {
+                        BarkyUdpRelay.noteAck()
+                        continue
+                    }
+                    val from = resolveFromHost(rawFrom)
                     val fromPort = packet.port
                     when (snapshot[0]) {
                         WalkieProtocol.TYPE_AUDIO -> handleAudioBytes(snapshot, from)

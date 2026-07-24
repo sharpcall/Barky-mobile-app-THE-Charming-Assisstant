@@ -19,11 +19,14 @@ object StunClient {
 
     private const val TAG = "StunClient"
     private val SERVERS_FAST = listOf(
+        // Barky Oracle hub coturn first (stable mapping for Firebase + hole-punch)
+        "157.151.137.122" to 3478,
         "stun.l.google.com" to 19302,
         "stun1.l.google.com" to 19302,
         "stun.cloudflare.com" to 3478
     )
     private val SERVERS_FULL = listOf(
+        "157.151.137.122" to 3478,
         "stun.l.google.com" to 19302,
         "stun1.l.google.com" to 19302,
         "stun2.l.google.com" to 19302,

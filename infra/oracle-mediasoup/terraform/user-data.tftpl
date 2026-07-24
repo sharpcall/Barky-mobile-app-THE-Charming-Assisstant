@@ -1,0 +1,309 @@
+#cloud-config
+# Barky Phase mediasoup media hub on Ubuntu 22.04 ARM (Ampere A1)
+# One-box free tier: Node 20 + mediasoup host prep + optional coturn.
+# App code is rsynced later by bootstrap from media-plane/ (placeholder server until then).
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - curl
+  - ca-certificates
+  - gnupg
+  - net-tools
+  - build-essential
+  - python3
+  - python3-pip
+  - git
+  - rsync
+%{ if enable_coturn ~}
+  - coturn
+%{ endif ~}
+
+write_files:
+  - path: /etc/sysctl.d/99-barky-media.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      net.ipv4.ip_forward=1
+      net.ipv6.conf.all.forwarding=1
+      net.core.rmem_max=16777216
+      net.core.wmem_max=16777216
+      net.ipv4.udp_rmem_min=8192
+      net.ipv4.udp_wmem_min=8192
+
+  - path: /etc/barky-mediasoup.env
+    owner: root:root
+    permissions: "0640"
+    content: |
+      # Shared by mediasoup Node process and future rustrtc binary (same keys).
+      # ANNOUNCED_IP is rewritten by barky-set-external-ip.sh at boot.
+      MEDIASOUP_LISTEN_IP=0.0.0.0
+      MEDIASOUP_ANNOUNCED_IP=0.0.0.0
+      MEDIASOUP_SIGNALING_PORT=${mediasoup_signaling_port}
+      MEDIASOUP_RTC_MIN_PORT=${mediasoup_rtc_min_port}
+      MEDIASOUP_RTC_MAX_PORT=${mediasoup_rtc_max_port}
+      # Alias names used by rustrtc swap docs
+      SIGNALING_PORT=${mediasoup_signaling_port}
+      RTC_MIN_PORT=${mediasoup_rtc_min_port}
+      RTC_MAX_PORT=${mediasoup_rtc_max_port}
+
+  - path: /opt/barky-mediasoup/package.json
+    owner: root:root
+    permissions: "0644"
+    content: |
+      {
+        "name": "barky-mediasoup-placeholder",
+        "version": "0.0.1",
+        "private": true,
+        "description": "Placeholder until bootstrap rsyncs media-plane",
+        "main": "server.js",
+        "engines": { "node": ">=20" }
+      }
+
+  - path: /opt/barky-mediasoup/server.js
+    owner: root:root
+    permissions: "0644"
+    content: |
+      // Placeholder health server. Replaced when bootstrap rsyncs media-plane.
+      const http = require('http');
+      const port = parseInt(process.env.MEDIASOUP_SIGNALING_PORT || process.env.SIGNALING_PORT || '3000', 10);
+      const server = http.createServer((req, res) => {
+        if (req.url === '/health' || req.url === '/') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            service: 'barky-mediasoup-placeholder',
+            announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || null,
+            rtcPorts: (process.env.MEDIASOUP_RTC_MIN_PORT || '') + '-' + (process.env.MEDIASOUP_RTC_MAX_PORT || ''),
+            note: 'Deploy media-plane via bootstrap rsync to replace this stub'
+          }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+      server.listen(port, '0.0.0.0', () => {
+        console.log('barky-mediasoup placeholder listening on ' + port);
+      });
+
+  - path: /etc/systemd/system/barky-mediasoup.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Barky mediasoup (or rustrtc) media-plane process
+      After=network-online.target
+      Wants=network-online.target
+      Documentation=file:///opt/barky-mediasoup/README.deploy.txt
+
+      [Service]
+      Type=simple
+      User=ubuntu
+      Group=ubuntu
+      WorkingDirectory=/opt/barky-mediasoup
+      EnvironmentFile=-/etc/barky-mediasoup.env
+      # Default: Node placeholder / mediasoup app. Swap ExecStart for rustrtc later
+      # without changing NSG (see docs/SWAP-RUSTRTC.md).
+      ExecStart=/usr/bin/node /opt/barky-mediasoup/server.js
+      Restart=on-failure
+      RestartSec=3
+      LimitNOFILE=65536
+      # Soft real-time friendliness for media
+      Nice=-5
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /opt/barky-mediasoup/README.deploy.txt
+    owner: root:root
+    permissions: "0644"
+    content: |
+      Barky media-plane deploy notes
+      ==============================
+      - cloud-init installs Node 20 + build tools; coturn when enable_coturn=true.
+      - Placeholder server.js answers GET /health on MEDIASOUP_SIGNALING_PORT.
+      - Bootstrap (scripts/bootstrap-oci.ps1) rsyncs repo media-plane/ over this dir
+        when present, then: npm ci (or npm install) && systemctl restart barky-mediasoup.
+      - To swap to rustrtc: replace binary, edit ExecStart in barky-mediasoup.service,
+        keep /etc/barky-mediasoup.env ports unchanged (NSG already open). See SWAP-RUSTRTC.md.
+
+  - path: /usr/local/bin/barky-set-external-ip.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      PUB=""
+      for i in $(seq 1 30); do
+        PUB=$(curl -4 -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)
+        if [ -z "$PUB" ]; then
+          PUB=$(curl -4 -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)
+        fi
+        if echo "$PUB" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+          break
+        fi
+        sleep 2
+      done
+      if [ -z "$PUB" ]; then
+        echo "WARN: could not detect public IP"
+        exit 0
+      fi
+      PRIV=$(hostname -I | awk '{print $1}')
+      if [ -n "$PRIV" ] && [ "$PRIV" != "$PUB" ]; then
+        EXT="$PUB/$PRIV"
+      else
+        EXT="$PUB"
+      fi
+      if [ -f /etc/turnserver.conf ]; then
+        sed -i "s|^external-ip=.*|external-ip=$EXT|" /etc/turnserver.conf
+        echo "coturn external-ip set to $EXT"
+      fi
+      if [ -f /etc/barky-mediasoup.env ]; then
+        sed -i "s|^MEDIASOUP_ANNOUNCED_IP=.*|MEDIASOUP_ANNOUNCED_IP=$PUB|" /etc/barky-mediasoup.env
+        echo "MEDIASOUP_ANNOUNCED_IP set to $PUB"
+      fi
+
+  - path: /usr/local/bin/barky-mediasoup-health.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      PORT="$${MEDIASOUP_SIGNALING_PORT:-${mediasoup_signaling_port}}"
+      if [ -f /etc/barky-mediasoup.env ]; then
+        # shellcheck disable=SC1091
+        set -a
+        . /etc/barky-mediasoup.env
+        set +a
+        PORT="$${MEDIASOUP_SIGNALING_PORT:-$PORT}"
+      fi
+      systemctl is-active --quiet barky-mediasoup || { echo "barky-mediasoup not active"; exit 1; }
+      curl -fsS --max-time 3 "http://127.0.0.1:$${PORT}/health" | grep -q '"ok"' || {
+        echo "health endpoint failed on port $${PORT}"
+        exit 1
+      }
+      echo "ok: barky-mediasoup active, signaling port $${PORT}"
+
+  - path: /usr/local/bin/barky-media-health.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      /usr/local/bin/barky-mediasoup-health.sh
+%{ if enable_coturn ~}
+      if [ -x /usr/local/bin/barky-coturn-health.sh ]; then
+        /usr/local/bin/barky-coturn-health.sh
+      fi
+%{ endif ~}
+      echo "ok: media hub healthy"
+
+%{ if enable_coturn ~}
+  - path: /etc/default/coturn
+    owner: root:root
+    permissions: "0644"
+    content: |
+      TURNSERVER_ENABLED=1
+
+  # owner root:root only — turnserver group does not exist until coturn package installs
+  - path: /etc/turnserver.conf
+    owner: root:root
+    permissions: "0640"
+    content: |
+      realm=${turn_realm}
+      server-name=barky-mediasoup-coturn
+      listening-port=3478
+      tls-listening-port=5349
+      fingerprint
+      lt-cred-mech
+      user=${turn_user}:${turn_password}
+%{ if turn_auth_secret != "" ~}
+      use-auth-secret
+      static-auth-secret=${turn_auth_secret}
+%{ endif ~}
+      external-ip=0.0.0.0
+      min-port=${relay_min}
+      max-port=${relay_max}
+      no-multicast-peers
+      no-cli
+      no-tlsv1
+      no-tlsv1_1
+      no-tls
+      no-dtls
+      verbose
+      log-file=/var/log/turnserver/turn.log
+      simple-log
+      mobility
+      stale-nonce=600
+      no-loopback-peers
+
+  - path: /usr/local/bin/barky-coturn-health.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      ss -ulnp | grep -E ':3478\b' || { echo "coturn UDP 3478 not listening"; exit 1; }
+      systemctl is-active --quiet coturn
+      echo "ok: coturn active, UDP 3478 listening"
+      grep -E '^external-ip=' /etc/turnserver.conf || true
+%{ endif ~}
+
+  - path: /usr/local/bin/barky-install-node20.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      if command -v node >/dev/null 2>&1; then
+        MAJOR=$(node -v | sed 's/^v//' | cut -d. -f1)
+        if [ "$$MAJOR" -ge 20 ]; then
+          echo "node $$(node -v) already installed"
+          exit 0
+        fi
+      fi
+      # NodeSource Node 20 for Ubuntu (ARM64 supported)
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      apt-get install -y nodejs
+      node -v
+      npm -v
+
+runcmd:
+  - sysctl --system
+  # OCI Ubuntu images ship iptables REJECT-all except SSH; open media ports before services.
+  - |
+    iptables -C INPUT -p tcp --dport 3000 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport ${mediasoup_signaling_port} -j ACCEPT
+    iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT
+    iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT
+    iptables -C INPUT -p udp --dport ${mediasoup_rtc_min_port}:${mediasoup_rtc_max_port} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport ${mediasoup_rtc_min_port}:${mediasoup_rtc_max_port} -j ACCEPT
+%{ if enable_coturn ~}
+    iptables -C INPUT -p udp --dport 3478 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport 3478 -j ACCEPT
+    iptables -C INPUT -p tcp --dport 3478 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 3478 -j ACCEPT
+    iptables -C INPUT -p tcp --dport 5349 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 5349 -j ACCEPT
+    iptables -C INPUT -p udp --dport ${relay_min}:${relay_max} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport ${relay_min}:${relay_max} -j ACCEPT
+%{ endif ~}
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent netfilter-persistent || true
+    netfilter-persistent save || true
+  - /usr/local/bin/barky-install-node20.sh
+  - mkdir -p /opt/barky-mediasoup /var/log/barky
+  - chown -R ubuntu:ubuntu /opt/barky-mediasoup
+  - /usr/local/bin/barky-set-external-ip.sh || true
+%{ if enable_coturn ~}
+  - mkdir -p /var/log/turnserver
+  - chown turnserver:turnserver /var/log/turnserver || true
+  - chown root:turnserver /etc/turnserver.conf || chown root:root /etc/turnserver.conf
+  - chmod 640 /etc/turnserver.conf
+  - systemctl daemon-reload
+  - systemctl enable coturn
+  - systemctl restart coturn || systemctl start coturn
+%{ else ~}
+  - systemctl daemon-reload
+%{ endif ~}
+  - systemctl enable barky-mediasoup
+  - systemctl restart barky-mediasoup || systemctl start barky-mediasoup
+  - sleep 2
+  - /usr/local/bin/barky-media-health.sh || true
+  - echo "Barky mediasoup cloud-init finished" | tee /var/log/barky-mediasoup-init.done
+
+final_message: "Barky mediasoup host ready (check systemctl status barky-mediasoup coturn)"
