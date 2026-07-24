@@ -23,6 +23,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.max
@@ -51,7 +52,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkiePeers: TextView
     private lateinit var walkieBestQuality: MaterialCheckBox
     private lateinit var walkieGps: MaterialCheckBox
-    private lateinit var walkieScrn: MaterialCheckBox
+    private lateinit var walkieScrn: MaterialButton
+    private lateinit var walkieGpsBtn: MaterialButton
     private lateinit var walkieMic: ImageButton
     private lateinit var walkieMicStage: android.widget.FrameLayout
     private lateinit var walkieMicMode: TextView
@@ -63,6 +65,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieSee: MaterialButton
     private lateinit var walkieReplay: MaterialButton
     private lateinit var walkieFlipCamera: ImageButton
+    private lateinit var toolbarSubtitle: TextView
+    private lateinit var btnContacts: ImageButton
+    private lateinit var btnSettings: ImageButton
+    private lateinit var btnMore: ImageButton
     private lateinit var walkiePipBox: android.widget.FrameLayout
     private lateinit var walkiePreview: TextureView
     /** Flip button on self PiP — local camera only. */
@@ -157,7 +163,7 @@ class MainActivity : AppCompatActivity() {
                 showMap = false
                 applyStageVisibility()
                 walkieVideoHint.visibility = View.GONE
-                walkieReplay.visibility = View.GONE
+                updateReplayVisibility()
                 showLocalCameraSurface(true)
             } else {
                 pttLocked = false
@@ -180,7 +186,7 @@ class MainActivity : AppCompatActivity() {
             if (receiving) {
                 walkieStatus.text = getString(R.string.walkie_receiving)
                 walkieVideoHint.visibility = View.GONE
-                walkieReplay.visibility = View.GONE
+                updateReplayVisibility()
                 showMap = false
                 showLocalCameraSurface(false)
             } else if (walkieRunning) {
@@ -239,11 +245,7 @@ class MainActivity : AppCompatActivity() {
                 // Not displayed — recycle to free RAM
                 if (!bitmap.isRecycled) bitmap.recycle()
             }
-            if ((isTalking || isReceiving || isSeeing || watching) && live && !isReplaying) {
-                walkieReplay.visibility = View.GONE
-            } else if (!isTalking && !isReceiving && !isReplaying && !isSeeing && !watching) {
-                updateReplayVisibility()
-            }
+            updateReplayVisibility()
         }
 
         override fun onVideoDebug(message: String) {
@@ -437,15 +439,25 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         setSupportActionBar(toolbar)
-        // Title + subtitle so version/date never overflow the top bar
-        supportActionBar?.title = getString(R.string.app_name)
-        supportActionBar?.subtitle = appVersionSubtitle()
+        supportActionBar?.setDisplayShowTitleEnabled(false)
+
+        toolbarSubtitle = findViewById(R.id.toolbar_subtitle)
+        toolbarSubtitle.text = appVersionSubtitle()
+        btnContacts = findViewById(R.id.btn_contacts)
+        btnSettings = findViewById(R.id.btn_settings)
+        btnMore = findViewById(R.id.btn_more)
+        btnContacts.setOnClickListener {
+            startActivity(Intent(this, ContactsActivity::class.java))
+        }
+        btnSettings.setOnClickListener { openSettings() }
+        btnMore.setOnClickListener { showMoreMenu(it) }
 
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
         walkieBestQuality = findViewById(R.id.walkie_best_quality)
         walkieGps = findViewById(R.id.walkie_gps)
         walkieScrn = findViewById(R.id.walkie_scrn)
+        walkieGpsBtn = findViewById(R.id.walkie_gps_btn)
         walkieMic = findViewById(R.id.walkie_mic)
         walkieMicStage = findViewById(R.id.walkie_mic_stage)
         walkieMicMode = findViewById(R.id.walkie_mic_mode)
@@ -517,6 +529,8 @@ class MainActivity : AppCompatActivity() {
         walkieGps.setOnCheckedChangeListener { _, checked ->
             if (checked) {
                 if (!hasLocationPermission()) {
+                    walkieGps.isChecked = false
+                    updateGpsButtonChrome()
                     permissionLauncher.launch(
                         arrayOf(
                             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -529,23 +543,30 @@ class MainActivity : AppCompatActivity() {
             } else {
                 enableGps(false)
             }
+            updateGpsButtonChrome()
         }
 
         // SCRN = view **contact’s** screen (not our own). Peer gets MediaProjection consent.
-        walkieScrn.isChecked = walkieService?.isRequestingScreen() == true
-        walkieScrn.setOnCheckedChangeListener { _, checked ->
-            if (checked) {
+        walkieScrn.setOnClickListener {
+            val on = walkieService?.isRequestingScreen() == true
+            if (on) {
+                walkieService?.stopScreenRemote()
+            } else {
                 if (selectedPeer == null && peers.isEmpty()) {
-                    walkieScrn.isChecked = false
                     Toast.makeText(this, R.string.walkie_scrn_need_contact, Toast.LENGTH_LONG).show()
-                    return@setOnCheckedChangeListener
+                    return@setOnClickListener
                 }
                 walkieService?.startScreenRemote()
                 Toast.makeText(this, R.string.walkie_scrn_requesting, Toast.LENGTH_SHORT).show()
-            } else {
-                walkieService?.stopScreenRemote()
             }
+            updateScrnButton()
         }
+        // GPS button mirrors the GPS checkbox (Mockup 3 second row)
+        walkieGpsBtn.setOnClickListener {
+            walkieGps.isChecked = !walkieGps.isChecked
+        }
+        updateScrnButton()
+        updateGpsButtonChrome()
 
         // Stage flip: while SEE → flip *peer* camera; idle/HOLD → flip own camera
         walkieFlipCamera.setOnClickListener {
@@ -979,8 +1000,41 @@ class MainActivity : AppCompatActivity() {
             if (!showMap) walkieService?.startLocalPreview()
         }
         if (::walkieScrn.isInitialized) {
-            walkieScrn.isChecked = walkieService?.isRequestingScreen() == true
+            updateScrnButton()
         }
+    }
+
+    private fun showMoreMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        popup.menuInflater.inflate(R.menu.menu_main, popup.menu)
+        // Primary actions are solid top buttons; keep overflow for secondary only.
+        popup.menu.findItem(R.id.action_contacts)?.isVisible = false
+        popup.menu.findItem(R.id.action_settings)?.isVisible = false
+        popup.setOnMenuItemClickListener { item -> onOptionsItemSelected(item) }
+        popup.show()
+    }
+
+    private fun updateScrnButton() {
+        if (!::walkieScrn.isInitialized) return
+        val on = walkieService?.isRequestingScreen() == true
+        walkieScrn.isSelected = on
+        walkieScrn.backgroundTintList = ContextCompat.getColorStateList(
+            this,
+            if (on) R.color.barky_glass_btn_on else R.color.barky_glass_btn
+        )
+        val ready = walkieRunning && (selectedPeer != null || peers.isNotEmpty()) &&
+            hasAllRequiredPermissions()
+        walkieScrn.isEnabled = ready || on
+    }
+
+    private fun updateGpsButtonChrome() {
+        if (!::walkieGpsBtn.isInitialized || !::walkieGps.isInitialized) return
+        val on = walkieGps.isChecked
+        walkieGpsBtn.isSelected = on
+        walkieGpsBtn.backgroundTintList = ContextCompat.getColorStateList(
+            this,
+            if (on) R.color.barky_glass_btn_on else R.color.barky_glass_btn
+        )
     }
 
     override fun onStop() {
@@ -1196,12 +1250,13 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Natural PiP size from camera buffer + display orientation (no stretch).
-     * Large self-view; flip is a small overlay *inside* this box (not beside it).
+     * Small corner bubble (WhatsApp-like) — full-bleed stage made 50% width feel huge; keep tight caps.
+     * Flip is a small overlay *inside* this box (not beside it).
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        // Larger self-view; flip badge sits ON this box (not outside)
-        val baseW = ((if (pipEnlarged) 280f else 228f) * density).toInt()
+        // Compact self-view (was 228dp ≈ half screen on full-bleed)
+        val baseW = ((if (pipEnlarged) 148f else 108f) * density).toInt()
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1213,7 +1268,7 @@ class MainActivity : AppCompatActivity() {
                 uprightW = previewBufH.toFloat()
                 uprightH = previewBufW.toFloat()
             }
-            (uprightH / uprightW).coerceIn(1.15f, 2.0f)
+            (uprightH / uprightW).coerceIn(1.2f, 1.9f)
         } else {
             4f / 3f
         }
@@ -1222,8 +1277,15 @@ class MainActivity : AppCompatActivity() {
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        val maxW = (parentW * (if (pipEnlarged) 0.58f else 0.50f)).toInt().coerceAtLeast(baseW)
-        val maxH = (parentH * (if (pipEnlarged) 0.62f else 0.52f)).toInt().coerceAtLeast(baseW)
+        // Hard caps: never more than ~30% width / 28% height when not enlarged
+        val maxW = minOf(
+            (parentW * (if (pipEnlarged) 0.38f else 0.28f)).toInt(),
+            ((if (pipEnlarged) 168f else 120f) * density).toInt()
+        ).coerceAtLeast((96 * density).toInt())
+        val maxH = minOf(
+            (parentH * (if (pipEnlarged) 0.40f else 0.28f)).toInt(),
+            ((if (pipEnlarged) 220f else 160f) * density).toInt()
+        ).coerceAtLeast((120 * density).toInt())
         if (pipW > maxW) {
             val s = maxW.toFloat() / pipW
             pipW = maxW
@@ -1248,15 +1310,16 @@ class MainActivity : AppCompatActivity() {
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
         val lp = (walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams)
             ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
-        // If we previously had match_parent, force down to PiP size
         val oldW = lp.width
         val oldH = lp.height
-        val useSaved = preservePosition && pipLastLeft >= 0 && pipLastTop >= 0
+        // MATCH_PARENT / huge leftover from idle full-bleed must never stick during SEE
+        val sizeOk = lp.width in 1..(parentW * 0.4f).toInt() &&
+            lp.height in 1..(parentH * 0.4f).toInt()
+        val useSaved = preservePosition && pipLastLeft >= 0 && pipLastTop >= 0 && sizeOk
         var left = if (useSaved) {
             pipLastLeft
-        } else if (preservePosition &&
-            lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START) &&
-            lp.width in 1 until parentW
+        } else if (preservePosition && sizeOk &&
+            lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START)
         ) {
             lp.leftMargin
         } else {
@@ -1264,13 +1327,13 @@ class MainActivity : AppCompatActivity() {
         }
         var top = if (useSaved) {
             pipLastTop
-        } else if (preservePosition &&
-            lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START) &&
-            lp.height in 1 until parentH
+        } else if (preservePosition && sizeOk &&
+            lp.gravity == (android.view.Gravity.TOP or android.view.Gravity.START)
         ) {
             lp.topMargin
         } else {
-            parentH - pipH - (150 * density).toInt()
+            // Above footer buttons (transparent HUD)
+            parentH - pipH - (200 * density).toInt()
         }
         left = left.coerceIn(0, (parentW - pipW).coerceAtLeast(0))
         top = top.coerceIn(0, (parentH - pipH).coerceAtLeast(0))
@@ -1288,6 +1351,7 @@ class MainActivity : AppCompatActivity() {
         )
         walkiePreview.alpha = 1f
         placeSelfFlipOnPreview()
+        walkiePipBox.requestLayout()
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }
         }
@@ -1512,6 +1576,8 @@ class MainActivity : AppCompatActivity() {
         updateReplayVisibility()
         updateMicChrome()
         updateListenSeeButtons()
+        updateScrnButton()
+        updateGpsButtonChrome()
     }
 
     private fun updatePttLabels() {
@@ -1555,7 +1621,8 @@ class MainActivity : AppCompatActivity() {
             walkieWakeup.backgroundTintList =
                 ContextCompat.getColorStateList(this, R.color.walkie_ptt_active)
         } else {
-            walkieWakeup.text = getString(R.string.walkie_wakeup)
+            // Mockup 3 short label
+            walkieWakeup.text = getString(R.string.walkie_wakeup_short)
             walkieWakeup.backgroundTintList =
                 ContextCompat.getColorStateList(this, R.color.walkie_wakeup)
             walkieWakeup.isEnabled = walkieRunning && selectedPeer != null
@@ -1575,12 +1642,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateReplayVisibility() {
         if (!::walkieReplay.isInitialized) return
-        val show = hasLastMessage && !isTalking && !isReceiving && !isSeeing
-        walkieReplay.visibility = if (show || isReplaying) View.VISIBLE else View.GONE
-        walkieReplay.isEnabled = (show || isReplaying) && walkieRunning
-        if (show || isReplaying) {
+        // Footer REPLAY stays visible (Mockup 3); enable only when a clip exists.
+        walkieReplay.visibility = View.VISIBLE
+        val canPlay = hasLastMessage && !isTalking && !isReceiving && !isSeeing
+        walkieReplay.isEnabled = (canPlay || isReplaying) && walkieRunning
+        if (canPlay || isReplaying) {
             walkieVideoHint.visibility = View.GONE
-            walkieReplay.bringToFront()
         }
     }
 

@@ -2093,9 +2093,11 @@ class WalkieTalkieEngine(
     }
 
     private fun peerWantsAvc(host: String): Boolean {
-        val caps = peerCaps[host] ?: 0
-        return (localCaps and WalkieProtocol.CAP_AVC) != 0 &&
-            (caps and WalkieProtocol.CAP_AVC) != 0
+        // SEE/monitor: prefer MJPEG for correct colors on all OEMs.
+        // Samsung hardware AVC→Bitmap still shows grey/green stripes even with software
+        // decoder + YUV fixes; JPEG path (Bitmap.rotate) is known-good both ways.
+        // (Re-enable AVC when display is Surface/TextureView, not getOutputImage→Bitmap.)
+        return false
     }
 
     /** Build PATH_UPDATE payload with current local/public endpoints. */
@@ -5489,7 +5491,8 @@ class WalkieTalkieEngine(
                 return
             }
             recorder.startRecording()
-            val useOpus = peerWantsOpus(peer.host) && opusTx.startEncoder()
+            // Always PCM for LISTEN over cellular — Opus mismatch left both ends silent.
+            val useOpus = false
             val frame = ByteArray(WalkieProtocol.BYTES_PER_FRAME)
             val packetBuf = ByteArray(1 + WalkieProtocol.BYTES_PER_FRAME)
             packetBuf[0] = WalkieProtocol.TYPE_MONITOR_AUDIO
@@ -5505,27 +5508,20 @@ class WalkieTalkieEngine(
                 val n = recorder.read(frame, 0, frame.size)
                 if (n <= 0) continue
                 try {
-                    if (useOpus) {
-                        val opus = opusTx.encode(frame, n)
-                        if (opus != null && opus.isNotEmpty()) {
-                            val ob = ByteArray(1 + opus.size)
-                            ob[0] = WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS
-                            System.arraycopy(opus, 0, ob, 1, opus.size)
-                            sendUdp(packetToPeer(dest, ob))
-                            sent++
-                        }
-                    } else {
-                        System.arraycopy(frame, 0, packetBuf, 1, n)
-                        sendUdp(packetToPeer(dest, packetBuf, 1 + n))
-                        sent++
-                    }
+                    System.arraycopy(frame, 0, packetBuf, 1, n)
+                    sendUdp(packetToPeer(dest, packetBuf, 1 + n))
+                    sent++
                     if (sent == 1 || sent % 50 == 0) {
+                        val destId = hostToDeviceId[dest.host]
+                            ?: peerHostByDeviceId.entries.firstOrNull { it.value == dest.host }?.key
                         Log.i(
                             TAG,
-                            "MONITOR_AUDIO_TX frames=$sent opus=$useOpus → ${dest.host}:${dest.port}"
+                            "MONITOR_AUDIO_TX frames=$sent opus=$useOpus → ${dest.host}:${dest.port} " +
+                                "destId=${destId?.take(12)}"
                         )
                     }
-                } catch (_: Exception) {
+                } catch (ex: Exception) {
+                    if (sent < 3) Log.w(TAG, "MONITOR_AUDIO_TX fail ${dest.host}: ${ex.message}")
                 }
             }
             Log.i(TAG, "monitor audio end sent=$sent")
@@ -5550,18 +5546,23 @@ class WalkieTalkieEngine(
         if (data.size < 3) return
         // Audio only when LISTEN is on (SEE is video-only unless LISTEN also pressed)
         if (!requestingListen.get()) {
+            if (monitorAudioRxCount < 3) {
+                Log.w(TAG, "MONITOR_AUDIO dropped (LISTEN not active) len=${data.size}")
+            }
             return
         }
         monitorReceiving.set(true)
         val pcm = data.copyOfRange(1, data.size)
         if (!replaying.get()) {
+            if (monitorAudioRxCount == 0) {
+                // Ensure speaker path even when SEE already owns the stage
+                forceListenVolume()
+                preparePlaybackAudio(headset = false)
+            }
             // Soft mic sources often quiet — same gain path on every device
             playPcm(amplifyPcm16(pcm, MONITOR_GAIN))
             monitorAudioRxCount++
-            if (monitorAudioRxCount == 1) {
-                forceListenVolume()
-            }
-            if (monitorAudioRxCount <= 5 || monitorAudioRxCount % 25 == 0) {
+            if (monitorAudioRxCount == 1 || monitorAudioRxCount % 25 == 0) {
                 Log.i(
                     TAG,
                     "MONITOR_AUDIO_RX n=$monitorAudioRxCount bytes=${pcm.size} " +
@@ -5811,6 +5812,6 @@ class WalkieTalkieEngine(
         private const val GAIN = 3.5f
         private const val GPS_SHARE_INTERVAL_MS = 2_500L
         /** Soft mic streams need gain so Pixel LISTEN is audible. */
-        private const val MONITOR_GAIN = 3.0f
+        private const val MONITOR_GAIN = 4.5f
     }
 }
