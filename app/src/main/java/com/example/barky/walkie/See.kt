@@ -137,32 +137,43 @@ class SeeCameraSession(
         val preferFront = BarkyPrefs.isCameraFront(context)
         var enc: AvcVideoEncoder? = null
         if (useAvc) {
-            enc = AvcVideoEncoder(640, 480, 2_000_000).also { it.start() }
+            // Free platform H.264 (MediaCodec) — best quality/compression available without paid SDKs
+            enc = AvcVideoEncoder(
+                width = 640,
+                height = 480,
+                bitRate = 1_800_000,
+                frameRate = 24,
+                iFrameIntervalSec = 1
+            ).also { it.start() }
             if (enc.isReady() != true) {
                 enc.release()
                 enc = null
                 Log.w(TAG, "AVC encoder not ready — falling back to MJPEG")
             } else {
-                Log.i(TAG, "SEE camera codec=H.264/AVC 640x480 file=${See.FILE_NAME}")
+                Log.i(TAG, "SEE camera codec=H.264/AVC 640x480@24 1.8Mbps file=${See.FILE_NAME}")
             }
         } else {
             Log.i(TAG, "SEE camera codec=MJPEG file=${See.FILE_NAME}")
         }
         encoder = enc
 
-        // Compact UDP path uses smaller edge so single-datagram JPEG is realistic on cellular relay.
-        val udpConfig = CaptureConfig(
-            minIntervalMs = CaptureConfig.Live.minIntervalMs,
-            maxEdge = 320,
-            jpegQuality = 55,
-            maxBytesTcp = CaptureConfig.Live.maxBytesTcp
-        )
+        // AVC uses full Live capture; JPEG-only UDP fallback uses tighter edge/quality
+        val captureConfig = if (enc != null && enc.isReady()) {
+            CaptureConfig.Live
+        } else {
+            CaptureConfig(
+                minIntervalMs = CaptureConfig.Live.minIntervalMs,
+                maxEdge = 480,
+                jpegQuality = 70,
+                maxBytesTcp = CaptureConfig.Live.maxBytesTcp
+            )
+        }
         val cam = if (enc != null && enc.isReady()) {
             val readyEnc = enc
             CameraFrameSource(
                 context = context,
                 compactForUdp = { !isTcpConnected() },
-                config = udpConfig,
+                config = captureConfig,
                 preferFrontCamera = preferFront,
                 externalSurfaceTexture = { null },
                 onFacingChanged = { front -> BarkyPrefs.setCameraFront(context, front) },
@@ -188,7 +199,7 @@ class SeeCameraSession(
             CameraFrameSource(
                 context = context,
                 compactForUdp = { !isTcpConnected() },
-                config = udpConfig,
+                config = captureConfig,
                 preferFrontCamera = preferFront,
                 externalSurfaceTexture = { null },
                 onFacingChanged = { front -> BarkyPrefs.setCameraFront(context, front) },

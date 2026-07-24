@@ -11,6 +11,12 @@ object BarkyHubConfig {
     /** Barky custom UDP relay port (infra/barky-udp-relay). */
     const val RELAY_UDP_PORT: Int = 39000
 
+    /**
+     * Reliable TCP video relay for cellular/public HD (H.264).
+     * Same host as UDP relay; app opens outbound only (works behind CGNAT).
+     */
+    const val VIDEO_TCP_PORT: Int = 39002
+
     /** Coturn STUN (same host). Prefer this before public STUN farms. */
     const val STUN_PORT: Int = 3478
 

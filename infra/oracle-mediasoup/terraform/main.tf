@@ -173,6 +173,23 @@ resource "oci_core_network_security_group_security_rule" "barky_relay_health_tcp
   }
 }
 
+resource "oci_core_network_security_group_security_rule" "barky_video_tcp" {
+  network_security_group_id = oci_core_network_security_group.media.id
+  direction                 = "INGRESS"
+  protocol                  = "6"
+  source                    = "0.0.0.0/0"
+  source_type               = "CIDR_BLOCK"
+  stateless                 = false
+  description               = "Barky HD video TCP relay 39002"
+
+  tcp_options {
+    destination_port_range {
+      min = 39002
+      max = 39002
+    }
+  }
+}
+
 # Optional coturn on same VM: STUN/TURN UDP 3478
 resource "oci_core_network_security_group_security_rule" "turn_udp_3478" {
   count                     = var.enable_coturn ? 1 : 0

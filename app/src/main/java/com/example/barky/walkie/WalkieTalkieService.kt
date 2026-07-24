@@ -886,7 +886,8 @@ class WalkieTalkieService : Service() {
         /** Faster heartbeat on cellular so public STUN maps stay fresh. */
         private const val HEARTBEAT_CELL_MS = 15_000L
         /** While media is active, re-check peer Firebase endpoints for seamless handover. */
-        private const val ACTIVE_PATH_POLL_MS = 4_000L
+        // Backup poll if OS callbacks are late mid-call (Wi‑Fi ↔ cell)
+        private const val ACTIVE_PATH_POLL_MS = 1_500L
         private const val CHANNEL_WAKEUP = "barky_wakeup"
         const val ACTION_STOP = "com.example.barky.walkie.STOP"
         const val ACTION_TEST_TALK_START = "com.example.barky.TEST_TALK_START"
