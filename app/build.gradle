@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 80
-        versionName "5.40-s20-avc-picture"
+        versionCode 81
+        versionName "5.41-fullscreen-cam"
     }
 
     compileOptions {

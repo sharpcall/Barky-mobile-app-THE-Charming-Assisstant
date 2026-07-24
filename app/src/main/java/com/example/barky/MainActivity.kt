@@ -940,7 +940,7 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    /** Compact subtitle under "Barky": "5.29 · 07-19 14:22" */
+    /** Compact subtitle under "Barky": full version tag so user sees the build (e.g. 5.41-fullscreen-cam). */
     private fun appVersionSubtitle(): String {
         return try {
             val pi = if (Build.VERSION.SDK_INT >= 33) {
@@ -953,10 +953,8 @@ class MainActivity : AppCompatActivity() {
                 packageManager.getPackageInfo(packageName, 0)
             }
             val raw = pi.versionName ?: "?"
-            // Keep short version + optional tag start: "5.29-violet-pulse" → "5.29"
-            val shortVer = raw.substringBefore('-').ifBlank { raw }
             val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
-            "$shortVer · ${fmt.format(Date(pi.lastUpdateTime))}"
+            "$raw · ${fmt.format(Date(pi.lastUpdateTime))}"
         } catch (_: Exception) {
             ""
         }
