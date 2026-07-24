@@ -101,6 +101,16 @@ class ContactsActivity : AppCompatActivity() {
         bindService(Intent(this, WalkieTalkieService::class.java), conn, Context.BIND_AUTO_CREATE)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Auto-refresh directory every time Contacts is shown (keep manual Refresh too)
+        BarkyPrefs.setFirebaseRegistryEnabled(this, true)
+        if (bound && service != null) {
+            service?.forceFirebaseRegister()
+            loadContacts()
+        }
+    }
+
     override fun onDestroy() {
         if (bound) {
             try {

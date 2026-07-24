@@ -515,21 +515,66 @@ class WalkieTalkieEngine(
                         return@thread
                     }
                 }
-                // LAN only: re-open TCP video. Public/cellular stays UDP+relay (TCP will hang).
+                // Re-open video TCP for both LAN and hub (cellular HD) — no user restart needed
                 if (servingSee.get() || talking.get() || servingScreen.get()) {
                     val dest = monitorTarget ?: bestLivePeer()
                     if (dest != null) {
                         closeVideoOut()
-                        if (PeerEndpoint.isPrivateIp(dest.host)) {
-                            openVideoOut(dest)
-                            Log.i(TAG, "video TCP reconnected after path change → ${dest.host}")
-                        } else {
-                            Log.i(TAG, "path change public peer — UDP/relay only → ${dest.host}")
+                        val ok = openVideoOut(dest)
+                        Log.i(
+                            TAG,
+                            "video OUT reconnected after path change ok=$ok → ${dest.host} " +
+                                "public=${!PeerEndpoint.isPrivateIp(dest.host)}"
+                        )
+                    }
+                }
+                // Viewer side: re-bind hub TCP IN so HD frames keep landing after Wi‑Fi↔cell
+                if (requestingSee.get() || requestingScreen.get()) {
+                    try {
+                        ensureHubVideoRxLink()
+                        Log.i(TAG, "hub video IN re-bound after path change")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "hub video IN after path change", t)
+                    }
+                    // Re-nudge peer SEE so they reopen hub FWD to our new mapping
+                    val seed = seeWatchPeer ?: currentPeer()
+                    if (seed != null && requestingSee.get()) {
+                        try {
+                            val targets = resolveControlTargets(seed)
+                            applyPrimaryPeer(targets.primary)
+                            for (t in targets.all) {
+                                sendControlWithPort(t, WalkieProtocol.TYPE_SEE_REQ, localPort)
+                            }
+                            Log.i(TAG, "SEE re-REQ after path change → ${targets.primary.host}")
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "SEE re-REQ path change", t)
                         }
                     }
                 }
-                postStatus("Network path updated — re-announced to peers")
-                videoDebug("Path change ($reason): fast re-HELLO + PATH_UPDATE to ${known.size} peers")
+                // LISTEN serve: keep mic stream; request side re-burst so peer serves us again
+                if (requestingListen.get()) {
+                    val seed = currentPeer()
+                    if (seed != null) {
+                        try {
+                            val targets = resolveControlTargets(seed)
+                            applyPrimaryPeer(targets.primary)
+                            Listen.sendReqBurst(
+                                targets = targets.all,
+                                replyPort = localPort,
+                                stillWanted = { requestingListen.get() },
+                                sendControl = { p, type, rport -> sendControlWithPort(p, type, rport) },
+                                holePunch = { p, rounds -> holePunchPeer(p, rounds) },
+                                sendHello = { p -> sendHelloTo(p) },
+                                sendPathUpdate = { p -> sendPathUpdateTo(p) }
+                            )
+                            Log.i(TAG, "LISTEN re-REQ after path change")
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "LISTEN re-REQ path change", t)
+                        }
+                    }
+                }
+                postStatus("Network path updated — session kept alive")
+                videoDebug("Path change ($reason): re-HELLO+media rebind peers=${known.size}")
             } catch (t: Throwable) {
                 Log.w(TAG, "onLocalPathChanged", t)
             }
@@ -2828,12 +2873,14 @@ class WalkieTalkieEngine(
         if (useRelay) {
             val destId = when {
                 BarkyHubConfig.isHubAddress(destHost) ->
-                    // Reply path when we only know hub source — use selected / monitor peer id
-                    hostToDeviceId[currentPeer()?.host ?: ""]
+                    // Hub packet: dest is in hostToDeviceId[hub] (packetToPeer) or selected peer
+                    hostToDeviceId[destHost]
+                        ?: hostToDeviceId[currentPeer()?.host ?: ""]
                         ?: hostToDeviceId[monitorTarget?.host ?: ""]
                         ?: peerHostByDeviceId.entries.firstOrNull {
                             it.value == currentPeer()?.host || it.value == monitorTarget?.host
                         }?.key
+                        ?: peerHostByDeviceId.keys.firstOrNull()
                 else ->
                     hostToDeviceId[destHost]
                         ?: peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key
@@ -2872,19 +2919,75 @@ class WalkieTalkieEngine(
     private fun resolveFromHost(rawHost: String, srcDeviceId: String?): String {
         if (!srcDeviceId.isNullOrBlank()) {
             val mapped = peerHostByDeviceId[srcDeviceId]
-            if (!mapped.isNullOrBlank()) return mapped
-            // Bind deviceId to a synthetic host key so replies can FWD by id
+            // Prefer a real IP (never leave synthetic id: as send target — InetAddress fails)
+            if (!mapped.isNullOrBlank() && !mapped.startsWith("id:") &&
+                !BarkyHubConfig.isHubAddress(mapped)
+            ) {
+                hostToDeviceId[mapped] = srcDeviceId
+                return mapped
+            }
+            // Selected / monitor peer may already be the same contact
+            val selected = currentPeer() ?: monitorTarget ?: seeWatchPeer
+            if (selected != null && !selected.host.startsWith("id:") &&
+                !BarkyHubConfig.isHubAddress(selected.host)
+            ) {
+                val selId = hostToDeviceId[selected.host]
+                if (selId == null || selId == srcDeviceId) {
+                    peerHostByDeviceId[srcDeviceId] = selected.host
+                    hostToDeviceId[selected.host] = srcDeviceId
+                    return selected.host
+                }
+            }
+            // Keep deviceId mapping even without a public IP yet (replies FWD by id)
             val keyHost = "id:$srcDeviceId"
-            peerHostByDeviceId[srcDeviceId] = keyHost
-            hostToDeviceId[keyHost] = srcDeviceId
-            return keyHost
+            if (mapped.isNullOrBlank()) {
+                peerHostByDeviceId[srcDeviceId] = keyHost
+                hostToDeviceId[keyHost] = srcDeviceId
+            }
+            return mapped?.takeIf { it.isNotBlank() } ?: keyHost
         }
         if (!BarkyHubConfig.isHubAddress(rawHost)) return rawHost
         val peer = currentPeer() ?: monitorTarget
-        if (peer != null && !PeerEndpoint.isPrivateIp(peer.host)) {
+        if (peer != null && !PeerEndpoint.isPrivateIp(peer.host) && !peer.host.startsWith("id:")) {
             return peer.host
         }
         return rawHost
+    }
+
+    /**
+     * Build a datagram that always has a resolvable InetAddress.
+     * Synthetic `id:…` hosts (hub DELIVER before we know public IP) are sent via hub FWD only.
+     */
+    private fun packetToPeer(peer: WalkiePeer, payload: ByteArray, length: Int = payload.size): DatagramPacket {
+        val destId = hostToDeviceId[peer.host]
+            ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
+            ?: peer.host.takeIf { it.startsWith("id:") }?.removePrefix("id:")
+        val useHost: String
+        val usePort: Int
+        if (peer.host.startsWith("id:") || BarkyHubConfig.isHubAddress(peer.host)) {
+            // Force hub path; sendUdp FWD uses destId
+            useHost = BarkyHubConfig.HOST
+            usePort = BarkyHubConfig.RELAY_UDP_PORT
+            if (!destId.isNullOrBlank()) {
+                hostToDeviceId[useHost] = destId
+                // Also map synthetic for lookup
+                if (peer.host.startsWith("id:")) {
+                    hostToDeviceId[peer.host] = destId
+                }
+            }
+        } else {
+            useHost = peer.host
+            usePort = peer.port.takeIf { it > 0 } ?: BarkyHubConfig.RELAY_UDP_PORT
+            if (!destId.isNullOrBlank()) {
+                hostToDeviceId[useHost] = destId
+            }
+        }
+        return DatagramPacket(
+            payload,
+            length,
+            InetAddress.getByName(useHost),
+            usePort.coerceIn(1, 65535)
+        )
     }
 
     private fun startHubRelayRegistration() {
@@ -3364,8 +3467,8 @@ class WalkieTalkieEngine(
     }
 
     private fun emitAvcAccessUnit(au: ByteArray, from: String, storeClip: Boolean) {
-        // Screen is 720x1280; camera SEE often smaller — decoder rescales
-        if (!avcDecoder.isReady()) avcDecoder.start(720, 1280)
+        // Match SEE camera encode 480x640 (portrait upright); format-change adapts if needed
+        if (!avcDecoder.isReady()) avcDecoder.start(480, 640)
         // Count assembled AUs for SEE watchdog even if decode fails this frame
         // (cellular relay delivers H.264 TYPE_MONITOR_VIDEO_AVC, not JPEG).
         if (!storeClip && (requestingSee.get() || requestingScreen.get())) {
@@ -4512,16 +4615,44 @@ class WalkieTalkieEngine(
     private fun handleListenReq(data: ByteArray, from: String, fromPort: Int) {
         // Prefer UDP source port (real socket); payload as secondary
         val payloadPort = parseControlPort(data, 0)
+        // Hub DELIVER fromPort is NOT the peer walkie port — use payload or known peer port
         val replyPort = when {
-            fromPort in 1..65535 -> fromPort
+            from.startsWith("id:") || BarkyHubConfig.isHubAddress(from) ->
+                payloadPort.takeIf { it in 1..65535 }
+                    ?: peers.values.firstOrNull { it.host == from }?.port
+                    ?: 0
+            fromPort in 1..65535 && fromPort != BarkyHubConfig.RELAY_UDP_PORT -> fromPort
             payloadPort in 1..65535 -> payloadPort
-            else -> 0
+            else -> peers.values.firstOrNull { it.host == from }?.port ?: 0
         }
-        val peer = resolvePeerForStream(from, replyPort)
+        var peer = resolvePeerForStream(from, replyPort)
+        // Bind deviceId so mic return uses hub FWD (critical on cellular)
+        val destId = hostToDeviceId[from]
+            ?: peerHostByDeviceId.entries.firstOrNull { it.value == from }?.key
+            ?: from.takeIf { it.startsWith("id:") }?.removePrefix("id:")
+        if (!destId.isNullOrBlank()) {
+            hostToDeviceId[peer.host] = destId
+            if (!peer.host.startsWith("id:")) {
+                peerHostByDeviceId[destId] = peer.host
+            }
+        }
+        // Prefer selected contact public host when from is still synthetic
+        if (peer.host.startsWith("id:")) {
+            val sel = currentPeer()
+            if (sel != null && !sel.host.startsWith("id:")) {
+                val idKeep = destId ?: hostToDeviceId[sel.host]
+                if (!idKeep.isNullOrBlank()) {
+                    hostToDeviceId[sel.host] = idKeep
+                    peerHostByDeviceId[idKeep] = sel.host
+                }
+                peer = sel.copy(port = if (replyPort > 0) replyPort else sel.port)
+                peers[key(peer)] = peer
+            }
+        }
         Log.i(
             TAG,
             "LISTEN_REQ from $from fromPort=$fromPort payloadPort=$payloadPort " +
-                "usePort=${peer.port} vport=${peer.videoPort}"
+                "usePort=${peer.port} host=${peer.host} destId=${destId?.take(12)}"
         )
         startServingListen(peer)
     }
@@ -5366,7 +5497,8 @@ class WalkieTalkieEngine(
             // Mic stream is LISTEN-only (SEE is video-only)
             while (running.get() && servingListen.get()) {
                 val dest = monitorTarget ?: peer
-                if (dest.port <= 0) {
+                // port 0 is OK for hub FWD (packetToPeer uses relay port); need host or destId
+                if (dest.host.isBlank()) {
                     Thread.sleep(50)
                     continue
                 }
@@ -5379,18 +5511,12 @@ class WalkieTalkieEngine(
                             val ob = ByteArray(1 + opus.size)
                             ob[0] = WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS
                             System.arraycopy(opus, 0, ob, 1, opus.size)
-                            sendUdp(
-                                DatagramPacket(ob, ob.size, InetAddress.getByName(dest.host), dest.port)
-                            )
+                            sendUdp(packetToPeer(dest, ob))
                             sent++
                         }
                     } else {
                         System.arraycopy(frame, 0, packetBuf, 1, n)
-                        sendUdp(
-                            DatagramPacket(
-                                packetBuf, 1 + n, InetAddress.getByName(dest.host), dest.port
-                            )
-                        )
+                        sendUdp(packetToPeer(dest, packetBuf, 1 + n))
                         sent++
                     }
                     if (sent == 1 || sent % 50 == 0) {
@@ -5588,9 +5714,10 @@ class WalkieTalkieEngine(
                 } else {
                     byteArrayOf(type)
                 }
-                val packet = DatagramPacket(
-                    payload, payload.size, InetAddress.getByName(peer.host), peer.port
-                )
+                if (!destId.isNullOrBlank()) {
+                    hostToDeviceId[peer.host] = destId
+                }
+                val packet = packetToPeer(peer, payload)
                 // Reliable burst for session control — NOT for toggle/flip (use sendControlOnce)
                 val times = if (type == WalkieProtocol.TYPE_CAMERA_FLIP) 1 else 8
                 repeat(times) {

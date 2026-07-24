@@ -397,46 +397,58 @@ class AvcVideoDecoder {
         }
     }
 
+    /**
+     * Robust YUV_420_888 → NV21 → Bitmap.
+     * Samsung (S23) often uses pixelStride=2 UV planes; a naive copy produces striped "lines".
+     */
     private fun imageToBitmap(image: Image): Bitmap? {
         return try {
             val w = image.width
             val h = image.height
+            if (w <= 0 || h <= 0) return null
             val yPlane = image.planes[0]
             val uPlane = image.planes[1]
             val vPlane = image.planes[2]
+            val yBuf = yPlane.buffer.duplicate()
+            val uBuf = uPlane.buffer.duplicate()
+            val vBuf = vPlane.buffer.duplicate()
+            yBuf.rewind(); uBuf.rewind(); vBuf.rewind()
+            val yRow = yPlane.rowStride
+            val yPix = yPlane.pixelStride
+            val uRow = uPlane.rowStride
+            val uPix = uPlane.pixelStride
+            val vRow = vPlane.rowStride
+            val vPix = vPlane.pixelStride
             val ySize = w * h
             val nv21 = ByteArray(ySize + ySize / 2)
-            // Y
-            val yBuf = yPlane.buffer
-            val yRow = yPlane.rowStride
-            var pos = 0
+            // Y plane (always stride-aware)
+            var out = 0
             for (row in 0 until h) {
-                yBuf.position(row * yRow)
-                yBuf.get(nv21, pos, w)
-                pos += w
+                val rowStart = row * yRow
+                for (col in 0 until w) {
+                    nv21[out++] = yBuf.get(rowStart + col * yPix)
+                }
             }
-            // NV21 expects VU; planes layout varies — approximate from V then U interleaved
-            val vBuf = vPlane.buffer
-            val uBuf = uPlane.buffer
-            val vRow = vPlane.rowStride
-            val uRow = uPlane.rowStride
-            val vPix = vPlane.pixelStride
-            val uPix = uPlane.pixelStride
+            // NV21 = VU interleaved. When U/V are semi-planar with pixelStride 2 they often
+            // share one buffer (V at even bytes, U at odd) — copy carefully per OEM.
             var uv = ySize
             for (row in 0 until h / 2) {
+                val vRowStart = row * vRow
+                val uRowStart = row * uRow
                 for (col in 0 until w / 2) {
-                    val vIndex = row * vRow + col * vPix
-                    val uIndex = row * uRow + col * uPix
-                    if (uv + 1 < nv21.size && vIndex < vBuf.capacity() && uIndex < uBuf.capacity()) {
-                        nv21[uv++] = vBuf.get(vIndex)
-                        nv21[uv++] = uBuf.get(uIndex)
+                    val vi = vRowStart + col * vPix
+                    val ui = uRowStart + col * uPix
+                    if (vi < vBuf.capacity() && ui < uBuf.capacity() && uv + 1 < nv21.size) {
+                        nv21[uv++] = vBuf.get(vi)
+                        nv21[uv++] = uBuf.get(ui)
                     }
                 }
             }
             val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
-            val baos = ByteArrayOutputStream()
-            yuv.compressToJpeg(Rect(0, 0, w, h), 90, baos)
-            android.graphics.BitmapFactory.decodeByteArray(baos.toByteArray(), 0, baos.size())
+            val baos = ByteArrayOutputStream(w * h / 2)
+            if (!yuv.compressToJpeg(Rect(0, 0, w, h), 92, baos)) return null
+            val bytes = baos.toByteArray()
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         } catch (t: Throwable) {
             Log.w(TAG, "imageToBitmap", t)
             null
