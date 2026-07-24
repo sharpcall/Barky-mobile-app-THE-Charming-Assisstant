@@ -712,12 +712,36 @@ class WalkieTalkieService : Service() {
                     }
                 }
             }
+            ACTION_ADOPT_PEER -> {
+                val host = intent.getStringExtra(EXTRA_PEER_HOST).orEmpty()
+                val udp = intent.getIntExtra(EXTRA_PEER_UDP, 0)
+                val vport = intent.getIntExtra(EXTRA_PEER_VIDEO, 0)
+                val name = intent.getStringExtra(EXTRA_PEER_NAME) ?: host
+                val deviceId = intent.getStringExtra(EXTRA_PEER_DEVICE_ID)
+                val ok = engine?.adoptDirectoryPeer(
+                    displayName = name,
+                    host = host,
+                    udpPort = udp,
+                    videoPort = if (vport > 0) vport else udp,
+                    deviceId = deviceId
+                ) == true
+                Log.i(
+                    TAG,
+                    "ADOPT_PEER ok=$ok name=$name host=$host udp=$udp video=$vport " +
+                        "id=${deviceId?.take(14)}"
+                )
+            }
             ACTION_TEST_SCRN -> {
                 val host = intent.getStringExtra(EXTRA_SCRN_HOST).orEmpty()
                 val udp = intent.getIntExtra(EXTRA_SCRN_UDP, 0)
                 val vport = intent.getIntExtra(EXTRA_SCRN_VIDEO, 0)
                 val name = intent.getStringExtra(EXTRA_SCRN_NAME) ?: host
-                Log.i(TAG, "TEST_SCRN host=$host udp=$udp video=$vport")
+                val deviceId = intent.getStringExtra(EXTRA_PEER_DEVICE_ID)
+                    ?: intent.getStringExtra(EXTRA_SCRN_DEVICE_ID)
+                Log.i(
+                    TAG,
+                    "TEST_SCRN host=$host udp=$udp video=$vport id=${deviceId?.take(14)}"
+                )
                 if (host.isBlank() || udp <= 0) {
                     Log.w(TAG, "TEST_SCRN missing host/udp")
                 } else {
@@ -728,7 +752,13 @@ class WalkieTalkieService : Service() {
                     }
                     // Small delay so stop settles before start (toggle race)
                     mainHandler.postDelayed({
-                        engine?.adoptDirectoryPeer(name, host, udp, if (vport > 0) vport else udp, null)
+                        engine?.adoptDirectoryPeer(
+                            name,
+                            host,
+                            udp,
+                            if (vport > 0) vport else udp,
+                            deviceId
+                        )
                         engine?.startScreenRemote()
                     }, 120L)
                 }
@@ -736,7 +766,13 @@ class WalkieTalkieService : Service() {
             ACTION_SERVE_SCREEN -> handleServeScreenIntent(intent)
             ACTION_DUMP_PEERS -> {
                 val list = engine?.getPeers().orEmpty()
-                Log.i(TAG, "DUMP_PEERS count=${list.size} selected=${engine?.currentSelectedPeer()?.displayName}")
+                val selected = engine?.currentSelectedPeer()
+                val tracked = engine?.trackedPeerDeviceIds().orEmpty()
+                Log.i(
+                    TAG,
+                    "DUMP_PEERS count=${list.size} selected=${selected?.displayName} " +
+                        "selHost=${selected?.host} trackedIds=${tracked.joinToString { it.take(12) }}"
+                )
                 list.forEach { p ->
                     Log.i(
                         TAG,
@@ -906,6 +942,8 @@ class WalkieTalkieService : Service() {
         const val ACTION_CONNECT_INVITE = "com.example.barky.CONNECT_INVITE"
         const val ACTION_FIREBASE_LIST = "com.example.barky.FIREBASE_LIST"
         const val ACTION_TEST_SCRN = "com.example.barky.TEST_SCRN"
+        /** Adb: adopt public/LAN peer with deviceId for hub FWD (cellular tests). */
+        const val ACTION_ADOPT_PEER = "com.example.barky.ADOPT_PEER"
         /** Consent activity → FGS owns MediaProjection (API 34+ order). */
         const val ACTION_SERVE_SCREEN = "com.example.barky.SERVE_SCREEN"
         const val ACTION_DUMP_PEERS = "com.example.barky.DUMP_PEERS"
@@ -913,6 +951,12 @@ class WalkieTalkieService : Service() {
         const val EXTRA_SCRN_UDP = "scrn_udp"
         const val EXTRA_SCRN_VIDEO = "scrn_video"
         const val EXTRA_SCRN_NAME = "scrn_name"
+        const val EXTRA_SCRN_DEVICE_ID = "scrn_device_id"
+        const val EXTRA_PEER_HOST = "peer_host"
+        const val EXTRA_PEER_UDP = "peer_udp"
+        const val EXTRA_PEER_VIDEO = "peer_video"
+        const val EXTRA_PEER_NAME = "peer_name"
+        const val EXTRA_PEER_DEVICE_ID = "peer_device_id"
         const val EXTRA_PROJ_RESULT_CODE = "proj_result_code"
         const val EXTRA_PROJ_RESULT_DATA = "proj_result_data"
         const val EXTRA_PROJ_PREPARE_ONLY = "proj_prepare_only"

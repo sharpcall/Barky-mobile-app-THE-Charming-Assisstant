@@ -455,7 +455,8 @@ class WalkieTalkieEngine(
 
     fun hasActiveMediaSession(): Boolean =
         talking.get() || receiving.get() || requestingListen.get() || servingListen.get() ||
-            requestingSee.get() || servingSee.get() || channelBusy.get()
+            requestingSee.get() || servingSee.get() || requestingScreen.get() ||
+            servingScreen.get() || channelBusy.get()
 
     /**
      * Called when NIC / Wi‑Fi / cell / local IP changes.
@@ -896,20 +897,46 @@ class WalkieTalkieEngine(
             postError("Internet mode: UDP socket not ready")
             return
         }
+        // Never steal the walkie socket during live sessions — STUN exclusive was
+        // dropping LISTEN_REQ / RING / SEE control on the peer (cellular).
+        if (hasActiveMediaSession() || requestingListen.get() || requestingSee.get() ||
+            requestingScreen.get() || servingListen.get() || servingSee.get() ||
+            servingScreen.get() || talking.get() || ring.isRinging
+        ) {
+            Log.i(
+                TAG,
+                "STUN skip during active session keep last=$publicHost:$publicUdpPort"
+            )
+            return
+        }
         val onWifi = NetworkEndpoints.isWifi(appContext)
-        // Cellular: never "quick only" — always allow full pass after quick miss
-        val preferQuickFirst = onWifi && !publicHost.isNullOrBlank()
+        val now0 = System.currentTimeMillis()
+        // Fresh mapping: do not re-STUN (exclusive STUN drops hub DELIVER for seconds).
+        val mapAge = if (lastStunOkMs > 0L) now0 - lastStunOkMs else Long.MAX_VALUE
+        val haveMap = !publicHost.isNullOrBlank() && publicUdpPort > 0
+        val freshMs = if (onWifi) 45_000L else 30_000L
+        if (haveMap && mapAge < freshMs) {
+            Log.i(
+                TAG,
+                "STUN skip fresh map age=${mapAge}ms keep last=$publicHost:$publicUdpPort wifi=$onWifi"
+            )
+            return
+        }
+        // Prefer quick-only when we already have a map (refresh). Full multi-server only cold start.
+        val preferQuickFirst = haveMap || onWifi
         Log.i(TAG, "STUN begin quickFirst=$preferQuickFirst wifi=$onWifi last=$publicHost:$publicUdpPort")
         val mapped = synchronized(stunLock) {
             stunExclusive = true
             try {
                 // RX uses soTimeout ~250ms; wait so it exits receive before we bind STUN
                 try {
-                    Thread.sleep(320)
+                    Thread.sleep(80)
                 } catch (_: InterruptedException) {
                 }
-                val first = StunClient.discoverMappedAddress(sock, quick = preferQuickFirst || !onWifi)
-                first ?: StunClient.discoverMappedAddress(sock, quick = false)
+                val first = StunClient.discoverMappedAddress(sock, quick = true)
+                if (first != null) first
+                else if (!preferQuickFirst) StunClient.discoverMappedAddress(sock, quick = false)
+                else null
             } finally {
                 stunExclusive = false
             }
@@ -5539,6 +5566,19 @@ class WalkieTalkieEngine(
     private fun sendControlWithPort(peer: WalkiePeer, type: Byte, replyUdpPort: Int) {
         thread(name = "walkie-ctrl-$type", isDaemon = true) {
             try {
+                // Ensure public peer has deviceId for hub FWD (LISTEN/RING/SEE control)
+                var destHost = peer.host
+                var destId = hostToDeviceId[destHost]
+                    ?: peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key
+                if (destId.isNullOrBlank() && !PeerEndpoint.isPrivateIp(destHost)) {
+                    // Recover id from any mapping to same contact
+                    destId = peerHostByDeviceId.keys.firstOrNull()
+                    destId?.let { peerHostByDeviceId[it] = destHost; hostToDeviceId[destHost] = it }
+                }
+                try {
+                    BarkyUdpRelay.register(socket, DeviceIdentity.deviceId(appContext))
+                } catch (_: Throwable) {
+                }
                 val payload = if (replyUdpPort > 0) {
                     byteArrayOf(
                         type,
@@ -5552,12 +5592,17 @@ class WalkieTalkieEngine(
                     payload, payload.size, InetAddress.getByName(peer.host), peer.port
                 )
                 // Reliable burst for session control — NOT for toggle/flip (use sendControlOnce)
-                val times = if (type == WalkieProtocol.TYPE_CAMERA_FLIP) 1 else 5
+                val times = if (type == WalkieProtocol.TYPE_CAMERA_FLIP) 1 else 8
                 repeat(times) {
                     sendUdp(packet)
-                    if (times > 1) Thread.sleep(25)
+                    if (times > 1) Thread.sleep(30)
                 }
-                Log.i(TAG, "CTRL sent type=$type to ${peer.host}:${peer.port} replyPort=$replyUdpPort n=$times")
+                Log.i(
+                    TAG,
+                    "CTRL sent type=0x${(type.toInt() and 0xFF).toString(16)} " +
+                        "to ${peer.host}:${peer.port} replyPort=$replyUdpPort n=$times " +
+                        "destId=${destId?.take(12)} public=${!PeerEndpoint.isPrivateIp(peer.host)}"
+                )
             } catch (t: Throwable) {
                 Log.w(TAG, "sendControl $type", t)
             }

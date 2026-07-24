@@ -60,12 +60,12 @@
                         android:layout_width="match_parent"
                         android:layout_height="match_parent" />
 
-                    <!-- Flip sits ON the self-picture (not outside the PiP box). -->
+                    <!-- Flip sits ON the self-picture (top-end of this frame). -->
                     <ImageButton
                         android:id="@+id/walkie_pip_flip"
                         android:layout_width="40dp"
                         android:layout_height="40dp"
-                        android:layout_gravity="bottom|end"
+                        android:layout_gravity="top|end"
                         android:layout_margin="8dp"
                         android:background="@drawable/bg_flip_camera_circle"
                         android:clickable="true"
@@ -75,7 +75,7 @@
                         android:padding="8dp"
                         android:scaleType="centerInside"
                         android:src="@drawable/ic_flip_camera"
-                        android:visibility="gone" />
+                        android:visibility="visible" />
                 </FrameLayout>
 
                 <ImageView

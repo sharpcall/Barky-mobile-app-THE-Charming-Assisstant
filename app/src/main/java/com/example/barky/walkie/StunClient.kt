@@ -60,10 +60,12 @@ object StunClient {
             1000
         }
         try {
-            // Pass 1: fast servers. Cellular needs longer waits (CGNAT + lossy first UDP).
-            val t1 = if (quick) 1_200 else 1_800
+            // Keep exclusive socket windows short — STUN steals walkie RX packets.
+            // Pass 1: hub + Google only, short timeouts.
+            val t1 = if (quick) 700 else 1_200
             owned.soTimeout = t1
-            for ((host, port) in SERVERS_FAST) {
+            val fastList = if (quick) SERVERS_FAST.take(2) else SERVERS_FAST
+            for ((host, port) in fastList) {
                 try {
                     val result = bindingRequest(owned, host, port, t1)
                     if (result != null) {
@@ -78,15 +80,15 @@ object StunClient {
                 Log.w(TAG, "STUN quick pass failed")
                 return null
             }
-            // Pass 2: full list, longer timeout (cellular settle)
+            // Pass 2: short full list only (never 7× multi-second blocks on walkie socket)
             try {
-                Thread.sleep(400)
+                Thread.sleep(200)
             } catch (_: InterruptedException) {
                 return null
             }
-            val t2 = 3_500
+            val t2 = 1_800
             owned.soTimeout = t2
-            for ((host, port) in SERVERS_FULL) {
+            for ((host, port) in SERVERS_FULL.take(4)) {
                 try {
                     val result = bindingRequest(owned, host, port, t2)
                     if (result != null) {

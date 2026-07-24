@@ -460,6 +460,7 @@ class MainActivity : AppCompatActivity() {
         walkiePipBox = findViewById(R.id.walkie_pip_box)
         walkiePreview = findViewById(R.id.walkie_preview)
         walkiePipFlip = findViewById(R.id.walkie_pip_flip)
+        placeSelfFlipOnPreview()
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
         walkieMap = findViewById(R.id.walkie_map)
@@ -1090,11 +1091,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateFlipCameraLabel() {
-        if (!::walkieFlipCamera.isInitialized) return
         val front = BarkyPrefs.isCameraFront(this)
-        walkieFlipCamera.contentDescription = getString(
+        val desc = getString(
             if (front) R.string.walkie_camera_front else R.string.walkie_camera_back
         )
+        if (::walkieFlipCamera.isInitialized) {
+            walkieFlipCamera.contentDescription = desc
+        }
+        if (::walkiePipFlip.isInitialized) {
+            walkiePipFlip.contentDescription = desc
+        }
+        // Self-frame badge stays on the local preview whenever we show it
+        if (::walkiePipBox.isInitialized && walkiePipBox.visibility == View.VISIBLE) {
+            placeSelfFlipOnPreview()
+        }
     }
 
     /** Swap remote frame without recycling the bitmap ImageView still displays (Pixel flash). */
@@ -1133,10 +1143,12 @@ class MainActivity : AppCompatActivity() {
             walkieVideo.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
             applyNaturalPreviewTransform()
+            placeSelfFlipOnPreview()
         } else {
             walkiePreview.visibility = View.GONE
             walkieVideo.visibility = View.VISIBLE
             walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
+            if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
         }
     }
 
@@ -1167,22 +1179,20 @@ class MainActivity : AppCompatActivity() {
             walkiePipBox.bringToFront()
             walkieMicStage.elevation = 8f
             walkiePreview.alpha = 1f
-            if (::walkiePipFlip.isInitialized) {
-                walkiePipFlip.visibility = View.VISIBLE
-                walkiePipFlip.bringToFront()
-            }
+            placeSelfFlipOnPreview()
             // Second layout pass after measure so both phones get non-zero parent size
             walkiePipBox.post {
                 layoutFloatingPip(preservePosition = true)
                 applyNaturalPreviewTransform()
+                placeSelfFlipOnPreview()
             }
         } else {
             pipEnlarged = false
             pipLayoutActive = false
             pipLastLeft = -1
             pipLastTop = -1
-            if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
             resetPreviewFullBleed()
+            placeSelfFlipOnPreview()
         }
     }
 
@@ -1273,27 +1283,13 @@ class MainActivity : AppCompatActivity() {
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         lp.setMargins(left, top, 0, 0)
         walkiePipBox.layoutParams = lp
-        // Preview fills the box; flip is a badge ON the self-picture (bottom-end)
+        // Preview fills the box; flip is a badge ON the self-picture (top-end)
         walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
         )
         walkiePreview.alpha = 1f
-        // Flip badge always on floating self-view (not only when isSeeing is set late)
-        if (::walkiePipFlip.isInitialized) {
-            val dens = resources.displayMetrics.density
-            val badge = (40 * dens).toInt()
-            val m = (8 * dens).toInt()
-            walkiePipFlip.layoutParams = android.widget.FrameLayout.LayoutParams(badge, badge).apply {
-                gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
-                setMargins(m, m, m, m)
-            }
-            walkiePipFlip.visibility = View.VISIBLE
-            walkiePipFlip.elevation = 30f
-            walkiePipFlip.bringToFront()
-            walkiePipBox.clipChildren = false
-            walkiePipBox.clipToPadding = false
-        }
+        placeSelfFlipOnPreview()
         if (oldW != pipW || oldH != pipH) {
             walkiePreview.post { applyNaturalPreviewTransform() }
         }
@@ -1390,9 +1386,35 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.elevation = 0f
         walkiePreview.translationX = 0f
         walkiePreview.translationY = 0f
-        if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
+        // Keep flip ON the self-preview frame (top-end), full-bleed and PiP
+        placeSelfFlipOnPreview()
         if (::walkiePreview.isInitialized) walkiePreview.alpha = 1f
         applyNaturalPreviewTransform()
+    }
+
+    /**
+     * Flip control must sit on the self-picture frame itself (top-end), not only on the stage.
+     * Visible whenever local TextureView is the self cam (idle full-bleed or SEE PiP).
+     */
+    private fun placeSelfFlipOnPreview() {
+        if (!::walkiePipFlip.isInitialized || !::walkiePipBox.isInitialized) return
+        val dens = resources.displayMetrics.density
+        val badge = (40 * dens).toInt()
+        val m = (8 * dens).toInt()
+        walkiePipFlip.layoutParams = android.widget.FrameLayout.LayoutParams(badge, badge).apply {
+            gravity = android.view.Gravity.TOP or android.view.Gravity.END
+            setMargins(m, m, m, m)
+        }
+        walkiePipFlip.visibility = View.VISIBLE
+        walkiePipFlip.elevation = 30f
+        walkiePipBox.clipChildren = false
+        walkiePipBox.clipToPadding = false
+        walkiePipFlip.bringToFront()
+        // Stage flip is for peer during SEE; hide it when self badge is the local control
+        if (::walkieFlipCamera.isInitialized) {
+            walkieFlipCamera.visibility = if (isSeeing) View.VISIBLE else View.GONE
+            if (isSeeing) walkieFlipCamera.bringToFront()
+        }
     }
 
     /**

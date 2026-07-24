@@ -352,30 +352,33 @@ object FirebasePeerDirectory {
                 null
             }
         } else null
+        // NEVER run STUN on the walkie socket here. Concurrent STUN steals UDP from the
+        // walkie RX thread and drops LISTEN/SEE/RING/DELIVER packets (cellular fail).
+        // Engine owns STUN exclusively; callers must pass knownPublicIp/Port from engine.
         var pubIp = knownPublicIp?.takeIf { it.isNotBlank() }
         var pubPort = knownPublicUdpPort
-        if ((pubIp.isNullOrBlank() || pubPort <= 0) && walkieSocket != null && !walkieSocket.isClosed) {
-            try {
-                val mapped = com.example.barky.walkie.StunClient.discoverMappedAddress(
-                    walkieSocket,
-                    quick = onWifi
-                ) ?: if (!onWifi) {
-                    com.example.barky.walkie.StunClient.discoverMappedAddress(walkieSocket, quick = false)
-                } else null
-                if (mapped != null) {
-                    pubIp = mapped.host
-                    pubPort = mapped.port
-                    Log.i(TAG, "register STUN via walkie socket ${mapped.host}:${mapped.port}")
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "register STUN on walkie socket", t)
+        if (pubIp.isNullOrBlank() || pubPort <= 0) {
+            val prefIp = try {
+                com.example.barky.BarkyPrefs.lastStunPublicIp(context)
+            } catch (_: Throwable) {
+                null
+            }
+            val prefPort = try {
+                com.example.barky.BarkyPrefs.lastStunPublicUdp(context)
+            } catch (_: Throwable) {
+                0
+            }
+            if (!prefIp.isNullOrBlank() && prefPort > 0) {
+                pubIp = prefIp
+                pubPort = prefPort
+                Log.i(TAG, "register using last STUN prefs $pubIp:$pubPort (no socket STUN)")
             }
         }
         if (pubIp.isNullOrBlank() || pubPort <= 0) {
             Log.w(
                 TAG,
                 "register without public STUN (wifi=$onWifi) — peers on other networks " +
-                    "cannot reach us until STUN succeeds"
+                    "cannot reach us until engine STUN succeeds"
             )
         }
         val phoneModel = idSnap.model

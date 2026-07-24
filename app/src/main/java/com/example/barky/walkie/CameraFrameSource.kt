@@ -276,11 +276,13 @@ class CameraFrameSource(
             worker?.post {
                 try {
                     if (!running.get()) return@post
-                    // Prefer H.264 NV21 path when wired
+                    // Prefer H.264 NV21 path when wired — rotate/mirror to upright
+                    // (same orientation as JPEG) so remote SEE is not sideways.
                     val nv21Cb = onNv21Frame
                     if (nv21Cb != null) {
                         frameCount++
-                        nv21Cb(copy, w, h)
+                        val upright = nv21ToUpright(copy, w, h)
+                        nv21Cb(upright.data, upright.width, upright.height)
                     } else {
                         val jpeg = nv21ToUprightJpeg(copy, w, h)
                         if (jpeg != null && jpeg.isNotEmpty()) {
@@ -445,6 +447,124 @@ class CameraFrameSource(
         } else {
             (sensorOrientation - degrees + 360) % 360
         }
+    }
+
+    private data class UprightNv21(val data: ByteArray, val width: Int, val height: Int)
+
+    /**
+     * Match [nv21ToUprightJpeg]: rotate sensor NV21 to display-upright and mirror front camera.
+     * Used by H.264 so cellular SEE is not tilted 90°.
+     */
+    private fun nv21ToUpright(src: ByteArray, width: Int, height: Int): UprightNv21 {
+        val rot = computeJpegRotation()
+        var data = src
+        var w = width
+        var h = height
+        if (rot != 0) {
+            val rotated = rotateNv21(data, w, h, rot) ?: return UprightNv21(src, width, height)
+            data = rotated.first
+            w = rotated.second
+            h = rotated.third
+        }
+        if (facingFront) {
+            data = mirrorNv21Horizontal(data, w, h)
+        }
+        return UprightNv21(data, w, h)
+    }
+
+    /** Rotate NV21 by 0/90/180/270. Returns (bytes, newW, newH) or null. */
+    private fun rotateNv21(src: ByteArray, width: Int, height: Int, degrees: Int): Triple<ByteArray, Int, Int>? {
+        val d = ((degrees % 360) + 360) % 360
+        if (d == 0) return Triple(src, width, height)
+        val frameSize = width * height
+        if (src.size < frameSize + frameSize / 2) return null
+        return when (d) {
+            90 -> {
+                val outW = height
+                val outH = width
+                val out = ByteArray(outW * outH + outW * outH / 2)
+                var i = 0
+                for (x in 0 until width) {
+                    for (y in height - 1 downTo 0) {
+                        out[i++] = src[y * width + x]
+                    }
+                }
+                var uvOut = outW * outH
+                val uvHeight = height / 2
+                for (x in 0 until width step 2) {
+                    for (y in uvHeight - 1 downTo 0) {
+                        val srcIx = frameSize + y * width + x
+                        out[uvOut++] = src[srcIx]
+                        out[uvOut++] = src[srcIx + 1]
+                    }
+                }
+                Triple(out, outW, outH)
+            }
+            180 -> {
+                val out = ByteArray(src.size)
+                for (y in 0 until height) {
+                    for (x in 0 until width) {
+                        out[(height - 1 - y) * width + (width - 1 - x)] = src[y * width + x]
+                    }
+                }
+                val uvHeight = height / 2
+                for (y in 0 until uvHeight) {
+                    for (x in 0 until width step 2) {
+                        val srcIx = frameSize + y * width + x
+                        val dstIx = frameSize + (uvHeight - 1 - y) * width + (width - 2 - x)
+                        out[dstIx] = src[srcIx]
+                        out[dstIx + 1] = src[srcIx + 1]
+                    }
+                }
+                Triple(out, width, height)
+            }
+            270 -> {
+                val outW = height
+                val outH = width
+                val out = ByteArray(outW * outH + outW * outH / 2)
+                var i = 0
+                for (x in width - 1 downTo 0) {
+                    for (y in 0 until height) {
+                        out[i++] = src[y * width + x]
+                    }
+                }
+                var uvOut = outW * outH
+                val uvHeight = height / 2
+                for (x in width - 2 downTo 0 step 2) {
+                    for (y in 0 until uvHeight) {
+                        val srcIx = frameSize + y * width + x
+                        out[uvOut++] = src[srcIx]
+                        out[uvOut++] = src[srcIx + 1]
+                    }
+                }
+                Triple(out, outW, outH)
+            }
+            else -> Triple(src, width, height)
+        }
+    }
+
+    private fun mirrorNv21Horizontal(src: ByteArray, width: Int, height: Int): ByteArray {
+        val frameSize = width * height
+        if (src.size < frameSize + frameSize / 2) return src
+        val out = ByteArray(src.size)
+        for (y in 0 until height) {
+            val row = y * width
+            for (x in 0 until width) {
+                out[row + (width - 1 - x)] = src[row + x]
+            }
+        }
+        val uvHeight = height / 2
+        for (y in 0 until uvHeight) {
+            val row = frameSize + y * width
+            var x = 0
+            while (x < width) {
+                val sx = width - 2 - x
+                out[row + x] = src[row + sx]
+                out[row + x + 1] = src[row + sx + 1]
+                x += 2
+            }
+        }
+        return out
     }
 
     private fun computeDisplayOrientation(): Int {

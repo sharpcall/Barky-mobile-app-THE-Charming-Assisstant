@@ -137,10 +137,11 @@ class SeeCameraSession(
         val preferFront = BarkyPrefs.isCameraFront(context)
         var enc: AvcVideoEncoder? = null
         if (useAvc) {
-            // Free platform H.264 (MediaCodec) — best quality/compression available without paid SDKs
+            // Free platform H.264 — portrait 480×640 matches upright NV21 after camera rotation
+            // (was 640×480 landscape → remote SEE looked tilted 90° on phones held upright).
             enc = AvcVideoEncoder(
-                width = 640,
-                height = 480,
+                width = 480,
+                height = 640,
                 bitRate = 1_800_000,
                 frameRate = 24,
                 iFrameIntervalSec = 1
@@ -150,7 +151,7 @@ class SeeCameraSession(
                 enc = null
                 Log.w(TAG, "AVC encoder not ready — falling back to MJPEG")
             } else {
-                Log.i(TAG, "SEE camera codec=H.264/AVC 640x480@24 1.8Mbps file=${See.FILE_NAME}")
+                Log.i(TAG, "SEE camera codec=H.264/AVC 480x640@24 1.8Mbps upright file=${See.FILE_NAME}")
             }
         } else {
             Log.i(TAG, "SEE camera codec=MJPEG file=${See.FILE_NAME}")

@@ -29,17 +29,26 @@ object NetworkEndpoints {
     fun snapshot(context: Context, walkieSocket: DatagramSocket? = null): Snapshot {
         val onWifi = isWifi(context)
         val local = findLocalIpv4()
-        val mapped = try {
-            StunClient.discoverMappedAddress(walkieSocket)
-        } catch (t: Throwable) {
-            Log.w(TAG, "STUN", t)
+        // Never STUN on the shared walkie socket from here — concurrent STUN drops
+        // LISTEN/SEE/RING hub DELIVER packets. Prefer last known prefs / no STUN.
+        // [walkieSocket] kept for API compat; unused for STUN.
+        @Suppress("UNUSED_PARAMETER")
+        val unusedWalkie = walkieSocket
+        val prefIp = try {
+            com.example.barky.BarkyPrefs.lastStunPublicIp(context)
+        } catch (_: Throwable) {
             null
+        }
+        val prefPort = try {
+            com.example.barky.BarkyPrefs.lastStunPublicUdp(context)
+        } catch (_: Throwable) {
+            0
         }
         val ssid = if (onWifi) readSsid(context) else null
         return Snapshot(
             localIp = local,
-            publicIp = mapped?.host,
-            publicUdpPort = mapped?.port ?: 0,
+            publicIp = prefIp,
+            publicUdpPort = prefPort,
             onWifi = onWifi,
             wifiSsid = ssid
         )
