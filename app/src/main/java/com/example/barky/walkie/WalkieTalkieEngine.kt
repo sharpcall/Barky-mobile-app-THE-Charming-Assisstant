@@ -5273,6 +5273,16 @@ class WalkieTalkieEngine(
             val chunk = WalkieProtocol.VIDEO_CHUNK
             val parts = (payload.size + chunk - 1) / chunk
             if (parts > 64 || parts <= 0) return false
+            // Public/cellular relay: only single-datagram frames (multi-part almost always incomplete).
+            if (!PeerEndpoint.isPrivateIp(peer.host) && parts > 1) {
+                if (System.currentTimeMillis() % 40L == 0L) {
+                    Log.w(
+                        TAG,
+                        "skip multi-part public video type=$type parts=$parts size=${payload.size}"
+                    )
+                }
+                return false
+            }
             val frameId = (System.currentTimeMillis() and 0xFFFF).toInt()
             var offset = 0
             for (part in 0 until parts) {

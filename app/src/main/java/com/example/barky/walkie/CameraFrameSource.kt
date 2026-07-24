@@ -82,6 +82,8 @@ class CameraFrameSource(
     private val onPreviewReady: (previewW: Int, previewH: Int, displayOrientation: Int, front: Boolean) -> Unit =
         { _, _, _, _ -> },
     private val onError: (String) -> Unit = {},
+    /** Optional NV21 path for H.264 encoder (sensor order, preview size). */
+    private val onNv21Frame: ((nv21: ByteArray, width: Int, height: Int) -> Unit)? = null,
     private val onJpegFrame: (ByteArray) -> Unit
 ) {
     private val running = AtomicBoolean(false)
@@ -274,12 +276,19 @@ class CameraFrameSource(
             worker?.post {
                 try {
                     if (!running.get()) return@post
-                    val jpeg = nv21ToUprightJpeg(copy, w, h)
-                    if (jpeg != null && jpeg.isNotEmpty()) {
+                    // Prefer H.264 NV21 path when wired
+                    val nv21Cb = onNv21Frame
+                    if (nv21Cb != null) {
                         frameCount++
-                        onJpegFrame(jpeg)
+                        nv21Cb(copy, w, h)
                     } else {
-                        onError("JPEG encode returned empty (preview ${w}x${h})")
+                        val jpeg = nv21ToUprightJpeg(copy, w, h)
+                        if (jpeg != null && jpeg.isNotEmpty()) {
+                            frameCount++
+                            onJpegFrame(jpeg)
+                        } else {
+                            onError("JPEG encode returned empty (preview ${w}x${h})")
+                        }
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "encode", t)
@@ -371,12 +380,26 @@ class CameraFrameSource(
             quality -= 10
         } while (out.size > maxBytes && quality >= 35)
 
-        if (out.size > maxBytes && compactForUdp()) {
-            val small = Bitmap.createScaledBitmap(bmp, max(1, bmp.width / 2), max(1, bmp.height / 2), true)
-            val baos = ByteArrayOutputStream()
-            small.compress(Bitmap.CompressFormat.JPEG, 45, baos)
-            if (small !== bmp) small.recycle()
-            out = baos.toByteArray()
+        // Cellular/relay: must fit ONE datagram (maxBytes) or RX reassembly fails under loss.
+        if (compactForUdp() && out.size > maxBytes) {
+            var w = max(32, bmp.width / 2)
+            var h = max(32, bmp.height / 2)
+            var q = 40
+            var attempts = 0
+            while (out.size > maxBytes && attempts < 12) {
+                val small = Bitmap.createScaledBitmap(bmp, w, h, true)
+                val baos = ByteArrayOutputStream()
+                small.compress(Bitmap.CompressFormat.JPEG, q, baos)
+                if (small !== bmp) small.recycle()
+                out = baos.toByteArray()
+                if (out.size > maxBytes) {
+                    w = max(32, (w * 3) / 5)
+                    h = max(32, (h * 3) / 5)
+                    q = max(22, q - 4)
+                }
+                attempts++
+            }
+            Log.i(TAG, "UDP compact JPEG ${out.size}B max=$maxBytes attempts=$attempts ${w}x$h q=$q")
         }
 
         bmp.recycle()

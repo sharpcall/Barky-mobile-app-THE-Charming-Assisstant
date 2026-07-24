@@ -150,12 +150,19 @@ class SeeCameraSession(
         }
         encoder = enc
 
+        // Compact UDP path uses smaller edge so single-datagram JPEG is realistic on cellular relay.
+        val udpConfig = CaptureConfig(
+            minIntervalMs = CaptureConfig.Live.minIntervalMs,
+            maxEdge = 320,
+            jpegQuality = 55,
+            maxBytesTcp = CaptureConfig.Live.maxBytesTcp
+        )
         val cam = if (enc != null && enc.isReady()) {
             val readyEnc = enc
             CameraFrameSource(
                 context = context,
                 compactForUdp = { !isTcpConnected() },
-                config = CaptureConfig.Live,
+                config = udpConfig,
                 preferFrontCamera = preferFront,
                 externalSurfaceTexture = { null },
                 onFacingChanged = { front -> BarkyPrefs.setCameraFront(context, front) },
@@ -181,7 +188,7 @@ class SeeCameraSession(
             CameraFrameSource(
                 context = context,
                 compactForUdp = { !isTcpConnected() },
-                config = CaptureConfig.Live,
+                config = udpConfig,
                 preferFrontCamera = preferFront,
                 externalSurfaceTexture = { null },
                 onFacingChanged = { front -> BarkyPrefs.setCameraFront(context, front) },

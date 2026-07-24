@@ -97,8 +97,8 @@ object WalkieProtocol {
     const val SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS / 1000
     const val BYTES_PER_FRAME = SAMPLES_PER_FRAME * 2
 
-    // Keep under ~900 so FWD envelope + IDs still fit cellular/path MTU via hub relay.
-    const val VIDEO_CHUNK = 900
+    // One video chunk ≈ one UDP datagram after FWD header (dest/src deviceIds).
+    const val VIDEO_CHUNK = 1000
     const val VIDEO_HEADER = 1 + 2 + 1 + 1
     const val MAX_PACKET = VIDEO_HEADER + VIDEO_CHUNK + 128
 
@@ -114,8 +114,8 @@ object WalkieProtocol {
     const val VIDEO_OUT_MAX_EDGE = 1280
     const val VIDEO_JPEG_QUALITY_START = 90
     const val VIDEO_JPEG_MAX_BYTES_TCP = 280_000
-    // Single UDP datagram for compact JPEG (plus VIDEO_HEADER) — reliable on cellular relay.
-    const val VIDEO_JPEG_MAX_BYTES_UDP = 850
+    // Single UDP datagram JPEG payload (plus VIDEO_HEADER ≤ VIDEO_CHUNK).
+    const val VIDEO_JPEG_MAX_BYTES_UDP = 900
     /** Only one last message kept in RAM; cap frames so memory stays bounded. */
     const val MAX_STORED_FRAMES = 90
 
