@@ -2604,40 +2604,68 @@ class WalkieTalkieEngine(
             null
         }
         // Cellular / public path: forward via Oracle UDP relay (CGNAT-safe).
-        // LAN private peers stay direct.
+        // Never raw-send walkie bytes to the hub IP — hub only understands REG/FWD.
         val useRelay =
             BarkyHubConfig.relayEnabled &&
                 !BarkyPrefs.isWifiOnly(appContext) &&
                 !destHost.isNullOrBlank() &&
-                !PeerEndpoint.isPrivateIp(destHost) &&
-                !BarkyHubConfig.isHubAddress(destHost)
+                (BarkyHubConfig.isHubAddress(destHost) || !PeerEndpoint.isPrivateIp(destHost))
         if (useRelay) {
-            val destId = hostToDeviceId[destHost]
-                ?: peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key
-            if (!destId.isNullOrBlank()) {
-                val sock = socket
+            val destId = when {
+                BarkyHubConfig.isHubAddress(destHost) ->
+                    // Reply path when we only know hub source — use selected / monitor peer id
+                    hostToDeviceId[currentPeer()?.host ?: ""]
+                        ?: hostToDeviceId[monitorTarget?.host ?: ""]
+                        ?: peerHostByDeviceId.entries.firstOrNull {
+                            it.value == currentPeer()?.host || it.value == monitorTarget?.host
+                        }?.key
+                else ->
+                    hostToDeviceId[destHost]
+                        ?: peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key
+            }
+            val srcId = try {
+                DeviceIdentity.deviceId(appContext)
+            } catch (_: Throwable) {
+                ""
+            }
+            if (!destId.isNullOrBlank() && srcId.isNotBlank()) {
                 val ok = BarkyUdpRelay.sendForward(
-                    sock,
+                    socket,
                     destId,
+                    srcId,
                     packet.data,
                     packet.offset,
                     packet.length
                 )
                 if (ok) return
-                Log.w(TAG, "relay FWD failed — falling back to direct $destHost")
+                Log.w(TAG, "relay FWD failed destId=${destId.take(12)}…")
             } else {
-                Log.w(TAG, "relay skip: no deviceId for $destHost — direct UDP")
+                Log.w(
+                    TAG,
+                    "relay skip: destId=${destId?.take(12)} src=${srcId.take(8)} host=$destHost"
+                )
             }
+            // Do not fall through to raw hub IP — that can never deliver SEE_ACK
+            if (BarkyHubConfig.isHubAddress(destHost)) return
         }
         synchronized(udpSendLock) {
             socket?.send(packet)
         }
     }
 
-    /** Attribute hub-relay packets to the selected peer so RX state matches Contacts. */
-    private fun resolveFromHost(rawHost: String): String {
+    /** Attribute hub-relay packets to a known peer host (for UI / maps). */
+    private fun resolveFromHost(rawHost: String, srcDeviceId: String?): String {
+        if (!srcDeviceId.isNullOrBlank()) {
+            val mapped = peerHostByDeviceId[srcDeviceId]
+            if (!mapped.isNullOrBlank()) return mapped
+            // Bind deviceId to a synthetic host key so replies can FWD by id
+            val keyHost = "id:$srcDeviceId"
+            peerHostByDeviceId[srcDeviceId] = keyHost
+            hostToDeviceId[keyHost] = srcDeviceId
+            return keyHost
+        }
         if (!BarkyHubConfig.isHubAddress(rawHost)) return rawHost
-        val peer = currentPeer()
+        val peer = currentPeer() ?: monitorTarget
         if (peer != null && !PeerEndpoint.isPrivateIp(peer.host)) {
             return peer.host
         }
@@ -2843,20 +2871,45 @@ class WalkieTalkieEngine(
                         packet.offset + packet.length
                     )
                     val rawFrom = packet.address?.hostAddress?.substringBefore('%') ?: "peer"
-                    // Relay ACK (0xF2) — not walkie media
-                    if (snapshot[0] == 0xF2.toByte() && BarkyHubConfig.isHubAddress(rawFrom)) {
+                    // Relay REG-ACK
+                    if (snapshot[0] == BarkyUdpRelay.TYPE_ACK && BarkyHubConfig.isHubAddress(rawFrom)) {
                         BarkyUdpRelay.noteAck()
                         continue
                     }
-                    val from = resolveFromHost(rawFrom)
-                    val fromPort = packet.port
-                    when (snapshot[0]) {
-                        WalkieProtocol.TYPE_AUDIO -> handleAudioBytes(snapshot, from)
-                        WalkieProtocol.TYPE_AUDIO_OPUS -> handleAudioOpus(snapshot, from)
-                        WalkieProtocol.TYPE_VIDEO -> handleVideoBytes(snapshot, from)
-                        WalkieProtocol.TYPE_VIDEO_AVC -> handleVideoAvcUdp(snapshot, from)
+                    // Hub DELIVER: unwrap sender deviceId + walkie payload
+                    var walkieBytes = snapshot
+                    var srcDeviceId: String? = null
+                    val delivered = BarkyUdpRelay.parseDeliver(snapshot)
+                    if (delivered != null) {
+                        srcDeviceId = delivered.srcDeviceId.takeIf { it.isNotBlank() }
+                        walkieBytes = delivered.payload
+                        if (walkieBytes.isEmpty()) continue
+                        Log.i(
+                            TAG,
+                            "relay DELIVER src=${srcDeviceId?.take(12)}… " +
+                                "type=0x${(walkieBytes[0].toInt() and 0xFF).toString(16)} " +
+                                "len=${walkieBytes.size}"
+                        )
+                    }
+                    if (walkieBytes.isEmpty()) continue
+                    val from = resolveFromHost(rawFrom, srcDeviceId)
+                    // Never use hub source port (39000) as peer walkie port — use known peer port
+                    val fromPort = when {
+                        BarkyHubConfig.isHubAddress(rawFrom) || delivered != null -> {
+                            val existing = peers.values.firstOrNull { it.host == from }
+                            existing?.port?.takeIf { it > 0 && it != BarkyHubConfig.RELAY_UDP_PORT }
+                                ?: publicUdpPort.takeIf { it > 0 }
+                                ?: localPort
+                        }
+                        else -> packet.port
+                    }
+                    when (walkieBytes[0]) {
+                        WalkieProtocol.TYPE_AUDIO -> handleAudioBytes(walkieBytes, from)
+                        WalkieProtocol.TYPE_AUDIO_OPUS -> handleAudioOpus(walkieBytes, from)
+                        WalkieProtocol.TYPE_VIDEO -> handleVideoBytes(walkieBytes, from)
+                        WalkieProtocol.TYPE_VIDEO_AVC -> handleVideoAvcUdp(walkieBytes, from)
                         WalkieProtocol.TYPE_WAKEUP -> {
-                            val quiet = snapshot.size >= 2 && snapshot[1] != 0.toByte()
+                            val quiet = walkieBytes.size >= 2 && walkieBytes[1] != 0.toByte()
                             handleWakeupFrom(from, quiet)
                         }
                         WalkieProtocol.TYPE_WAKEUP_STOP -> {
@@ -2865,7 +2918,7 @@ class WalkieTalkieEngine(
                         }
                         WalkieProtocol.TYPE_SEE_ACK -> {
                             seeAckReceived.set(true)
-                            Log.i(TAG, "SEE_ACK from=$from port=$fromPort")
+                            Log.i(TAG, "SEE_ACK from=$from port=$fromPort relay=${delivered != null}")
                             postStatus("Peer accepted SEE — waiting for video…")
                         }
                         WalkieProtocol.TYPE_RING_ACK -> {
@@ -2875,7 +2928,7 @@ class WalkieTalkieEngine(
                             postStatus("Ring delivered to peer")
                         }
                         WalkieProtocol.TYPE_SESSION_FAIL -> {
-                            val reason = parseSessionFailReason(snapshot)
+                            val reason = parseSessionFailReason(walkieBytes)
                             Log.w(TAG, "SESSION_FAIL from=$from reason=$reason")
                             postError(reason.ifBlank { "Peer could not complete the session" })
                             // Stop local SEE request if we were waiting
@@ -2883,10 +2936,10 @@ class WalkieTalkieEngine(
                                 mainHandler.post { stopSeeRemote() }
                             }
                         }
-                        WalkieProtocol.TYPE_HELLO -> handleHello(snapshot, from, fromPort)
+                        WalkieProtocol.TYPE_HELLO -> handleHello(walkieBytes, from, fromPort)
                         WalkieProtocol.TYPE_TALK_START -> {
                             // Optional 2nd byte = speaker vs headset for privacy playback
-                            val mode = if (snapshot.size >= 2) snapshot[1] else WalkieProtocol.AUDIO_MODE_SPEAKER
+                            val mode = if (walkieBytes.size >= 2) walkieBytes[1] else WalkieProtocol.AUDIO_MODE_SPEAKER
                             rxPlaybackMode = mode
                             preparePlaybackAudio(headset = mode == WalkieProtocol.AUDIO_MODE_HEADSET)
                             Log.i(TAG, "TALK_START from $from playbackMode=$mode")
@@ -2903,19 +2956,19 @@ class WalkieTalkieEngine(
                         }
                         WalkieProtocol.TYPE_TALK_END -> handleTalkEndFrom(from)
                         WalkieProtocol.TYPE_PING -> sendPongTo(from, fromPort)
-                        WalkieProtocol.TYPE_LISTEN_REQ -> handleListenReq(snapshot, from, fromPort)
+                        WalkieProtocol.TYPE_LISTEN_REQ -> handleListenReq(walkieBytes, from, fromPort)
                         WalkieProtocol.TYPE_LISTEN_STOP -> stopServingListen()
-                        WalkieProtocol.TYPE_SEE_REQ -> handleSeeReq(snapshot, from, fromPort)
+                        WalkieProtocol.TYPE_SEE_REQ -> handleSeeReq(walkieBytes, from, fromPort)
                         WalkieProtocol.TYPE_SEE_STOP -> stopServingSee()
-                        WalkieProtocol.TYPE_SCREEN_REQ -> handleScreenReq(snapshot, from, fromPort)
+                        WalkieProtocol.TYPE_SCREEN_REQ -> handleScreenReq(walkieBytes, from, fromPort)
                         WalkieProtocol.TYPE_SCREEN_STOP -> stopServingScreen()
-                        WalkieProtocol.TYPE_GPS -> handleGpsPacket(snapshot)
-                        WalkieProtocol.TYPE_MONITOR_AUDIO -> handleMonitorAudio(snapshot)
-                        WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS -> handleMonitorAudioOpus(snapshot)
-                        WalkieProtocol.TYPE_MONITOR_VIDEO -> handleMonitorVideo(snapshot, from)
-                        WalkieProtocol.TYPE_MONITOR_VIDEO_AVC -> handleMonitorVideoAvc(snapshot, from)
+                        WalkieProtocol.TYPE_GPS -> handleGpsPacket(walkieBytes)
+                        WalkieProtocol.TYPE_MONITOR_AUDIO -> handleMonitorAudio(walkieBytes)
+                        WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS -> handleMonitorAudioOpus(walkieBytes)
+                        WalkieProtocol.TYPE_MONITOR_VIDEO -> handleMonitorVideo(walkieBytes, from)
+                        WalkieProtocol.TYPE_MONITOR_VIDEO_AVC -> handleMonitorVideoAvc(walkieBytes, from)
                         WalkieProtocol.TYPE_CAMERA_FLIP -> handleCameraFlipReq(from)
-                        WalkieProtocol.TYPE_PATH_UPDATE -> handlePathUpdate(snapshot, from, fromPort)
+                        WalkieProtocol.TYPE_PATH_UPDATE -> handlePathUpdate(walkieBytes, from, fromPort)
                     }
                 } catch (_: java.net.SocketTimeoutException) {
                 } catch (t: Throwable) {
@@ -4256,8 +4309,22 @@ class WalkieTalkieEngine(
         // Tell requester we accepted (so they can show "no ack" if this never arrives)
         thread(name = "walkie-see-ack", isDaemon = true) {
             try {
+                // Prefer deviceId FWD path: ensure host maps to a known id when from relay
+                val destId = hostToDeviceId[peer.host]
+                    ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
+                Log.i(
+                    TAG,
+                    "SEE_ACK → ${peer.host}:${peer.port} destId=${destId?.take(12)} " +
+                        "relayOn=${BarkyHubConfig.relayEnabled}"
+                )
                 sendSessionControl(peer, WalkieProtocol.TYPE_SEE_ACK)
-                Log.i(TAG, "SEE_ACK → ${peer.host}:${peer.port}")
+                // Extra burst for cellular
+                if (!PeerEndpoint.isPrivateIp(peer.host) || destId != null) {
+                    repeat(3) {
+                        Thread.sleep(40)
+                        sendSessionControl(peer, WalkieProtocol.TYPE_SEE_ACK)
+                    }
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "SEE_ACK send", t)
             }
@@ -4293,8 +4360,9 @@ class WalkieTalkieEngine(
             }
         }
         seeWatchdog = r
-        // 6s for ACK+first frames (cellular STUN can be slow)
-        mainHandler.postDelayed(r, 6_500L)
+        // Cellular + hub relay needs headroom for REG/FWD/ACK round-trips
+        val timeoutMs = if (NetworkEndpoints.isWifi(appContext)) 7_000L else 14_000L
+        mainHandler.postDelayed(r, timeoutMs)
     }
 
     private fun cancelSeeWatchdog() {
