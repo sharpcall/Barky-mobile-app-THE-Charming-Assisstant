@@ -18,15 +18,15 @@
         android:clipChildren="false"
         android:clipToPadding="false">
 
-        <!-- Self-view: full-bleed idle cam, or floating PiP during SEE.
-             Flip icon is a small overlay ON the picture (top-end), not beside it. -->
+        <!-- Self-view: hidden by default (solid stage). Floating PiP only during SEE. -->
         <FrameLayout
             android:id="@+id/walkie_pip_box"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipChildren="false"
             android:clipToPadding="false"
-            android:elevation="2dp">
+            android:elevation="2dp"
+            android:visibility="gone">
 
             <TextureView
                 android:id="@+id/walkie_preview"
@@ -48,7 +48,7 @@
                 android:padding="8dp"
                 android:scaleType="centerInside"
                 android:src="@drawable/ic_flip_camera"
-                android:visibility="visible" />
+                android:visibility="gone" />
         </FrameLayout>
 
         <ImageView

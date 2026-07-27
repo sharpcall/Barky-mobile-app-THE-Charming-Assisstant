@@ -69,6 +69,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnContacts: ImageButton
     private lateinit var btnSettings: ImageButton
     private lateinit var btnMore: ImageButton
+    private lateinit var walkieStageCard: android.widget.FrameLayout
     private lateinit var walkiePipBox: android.widget.FrameLayout
     private lateinit var walkiePreview: TextureView
     /** Flip button on self PiP — local camera only. */
@@ -164,18 +165,14 @@ class MainActivity : AppCompatActivity() {
                 applyStageVisibility()
                 walkieVideoHint.visibility = View.GONE
                 updateReplayVisibility()
-                showLocalCameraSurface(true)
+                // HOLD encodes camera but never paints self on the big stage
+                showSolidStageBackground()
             } else {
                 pttLocked = false
                 updatePttLabels()
                 updateReplayVisibility()
                 if (!isReceiving && !isReplaying && !isSeeing) {
-                    if (gpsEnabled) {
-                        showMap = true
-                        applyStageVisibility()
-                    } else {
-                        showLocalCameraSurface(true)
-                    }
+                    restoreIdleStage()
                 }
             }
             updateControls()
@@ -198,12 +195,7 @@ class MainActivity : AppCompatActivity() {
                 if (hasStickyFrame) walkieVideoHint.visibility = View.GONE
                 updateReplayVisibility()
                 if (!isTalking && !isReplaying && !isSeeing) {
-                    if (gpsEnabled) {
-                        showMap = true
-                        applyStageVisibility()
-                    } else {
-                        showLocalCameraSurface(true)
-                    }
+                    restoreIdleStage()
                 }
             }
             updateControls()
@@ -284,12 +276,7 @@ class MainActivity : AppCompatActivity() {
                     showMap = false
                     showLocalCameraSurface(false)
                 } else if (!isReceiving && !isTalking && !isSeeing) {
-                    if (gpsEnabled) {
-                        showMap = true
-                        applyStageVisibility()
-                    } else {
-                        showLocalCameraSurface(true)
-                    }
+                    restoreIdleStage()
                 }
                 updateReplayButton()
                 updateReplayVisibility()
@@ -340,7 +327,7 @@ class MainActivity : AppCompatActivity() {
                 isServingSee = serving
                 if (seeing) {
                     showMap = false
-                    // WhatsApp-style: big remote + small local self-view
+                    // Remote fills stage; self only in small PiP (never full-bleed)
                     applySeeSplitLayout(true)
                     // If we are also serving SEE, cameraSource already owns the lens —
                     // do not open a second Camera (dual-SEE crash).
@@ -349,14 +336,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 } else if (!isTalking && !isReceiving && !isReplaying) {
                     applySeeSplitLayout(false)
-                    if (gpsEnabled) {
-                        showMap = true
-                        applyStageVisibility()
-                    } else {
-                        showLocalCameraSurface(true)
-                    }
+                    restoreIdleStage()
                 } else {
                     applySeeSplitLayout(false)
+                    if (!isSeeing) showSolidStageBackground()
                 }
                 updateListenSeeButtons()
                 updateControls()
@@ -406,12 +389,15 @@ class MainActivity : AppCompatActivity() {
             if (walkiePreview.isAvailable) {
                 walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
             }
-            if (!gpsEnabled) {
-                walkieService?.startLocalPreview()
-                showLocalCameraSurface(!isReceiving && !isReplaying && !isSeeing)
-            } else {
+            // Default stage: solid color — never full-screen self camera
+            if (isSeeing) {
+                applySeeSplitLayout(true)
+                if (!isServingSee) walkieService?.startLocalPreview()
+            } else if (gpsEnabled) {
                 showMap = true
                 applyStageVisibility()
+            } else {
+                restoreIdleStage()
             }
             walkieStatus.text = if (selectedPeer != null) {
                 getString(R.string.walkie_status_ready, selectedPeer!!.displayName)
@@ -469,13 +455,15 @@ class MainActivity : AppCompatActivity() {
         walkieSee = findViewById(R.id.walkie_see)
         walkieReplay = findViewById(R.id.walkie_replay)
         walkieFlipCamera = findViewById(R.id.walkie_flip_camera)
+        walkieStageCard = findViewById(R.id.walkie_stage_card)
         walkiePipBox = findViewById(R.id.walkie_pip_box)
         walkiePreview = findViewById(R.id.walkie_preview)
         walkiePipFlip = findViewById(R.id.walkie_pip_flip)
-        placeSelfFlipOnPreview()
         walkieVideo = findViewById(R.id.walkie_video)
         walkieVideoHint = findViewById(R.id.walkie_video_hint)
         walkieMap = findViewById(R.id.walkie_map)
+        // Default: solid stage — no full-screen self camera
+        showSolidStageBackground()
         walkieLockHint = findViewById(R.id.walkie_lock_hint)
         permissionGate = findViewById(R.id.permission_gate)
         permissionGateList = findViewById(R.id.permission_gate_list)
@@ -499,9 +487,10 @@ class MainActivity : AppCompatActivity() {
         walkiePreview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
                 walkieService?.setUiPreviewTexture(surface)
-                if (!showMap) {
+                // Self camera only for SEE PiP — never auto full-screen idle cam
+                if (isSeeing && !isServingSee) {
                     walkieService?.startLocalPreview()
-                    showLocalCameraSurface(true)
+                    applySeeSplitLayout(true)
                 }
                 applyNaturalPreviewTransform()
             }
@@ -727,8 +716,8 @@ class MainActivity : AppCompatActivity() {
                     BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
                     showMap = false
                     applyStageVisibility()
-                    showLocalCameraSurface(true)
-                    walkieService?.startLocalPreview()
+                    // HOLD: encode path owns camera; big stage stays solid (no self view)
+                    showSolidStageBackground()
                     downRawX = event.rawX
                     downRawY = event.rawY
                     modeLive = WalkieProtocol.AUDIO_MODE_SPEAKER
@@ -849,8 +838,9 @@ class MainActivity : AppCompatActivity() {
             gpsEnabled = false
             showMap = false
             applyStageVisibility()
-            showLocalCameraSurface(!isReceiving && !isReplaying && !isSeeing)
-            walkieService?.startLocalPreview()
+            if (!isReceiving && !isReplaying && !isSeeing && !isTalking) {
+                restoreIdleStage()
+            }
             BarkyPrefs.setGpsEnabled(this, false)
         }
     }
@@ -858,11 +848,53 @@ class MainActivity : AppCompatActivity() {
     private fun applyStageVisibility() {
         if (showMap && gpsEnabled) {
             walkieMap.visibility = View.VISIBLE
+            if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
             walkiePreview.visibility = View.GONE
             walkieVideo.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
-            walkieService?.stopLocalPreview()
+            if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
+            if (!isSeeing) walkieService?.stopLocalPreview()
             pushMapTrail()
+        }
+    }
+
+    /**
+     * Idle / HOLD default: solid stage only — own camera never fills the big screen.
+     * Self preview is reserved for the small SEE PiP.
+     */
+    private fun showSolidStageBackground() {
+        if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
+        showMap = false
+        if (::walkieMap.isInitialized) walkieMap.visibility = View.GONE
+        if (::walkiePipBox.isInitialized) {
+            walkiePipBox.visibility = View.GONE
+            walkiePipBox.elevation = 0f
+        }
+        walkiePreview.visibility = View.GONE
+        walkieVideo.visibility = View.GONE
+        if (::walkieVideoHint.isInitialized) walkieVideoHint.visibility = View.GONE
+        if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
+        if (::walkieFlipCamera.isInitialized) walkieFlipCamera.visibility = View.GONE
+        if (::walkieStageCard.isInitialized) {
+            walkieStageCard.setBackgroundColor(0xFF0F0A1A.toInt())
+        }
+        // Don't keep idle camera open just to fill the stage
+        if (!isSeeing && !isServingSee && !isTalking) {
+            walkieService?.stopLocalPreview()
+        }
+    }
+
+    /** Map if GPS on, otherwise solid stage (never full-screen self cam). */
+    private fun restoreIdleStage() {
+        if (isSeeing) {
+            applySeeSplitLayout(true)
+            return
+        }
+        if (gpsEnabled) {
+            showMap = true
+            applyStageVisibility()
+        } else {
+            showSolidStageBackground()
         }
     }
 
@@ -987,7 +1019,8 @@ class MainActivity : AppCompatActivity() {
         if (!BarkyPrefs.isWifiOnly(this)) {
             walkieService?.applyNetworkMode()
         }
-        if (!showMap) walkieService?.startLocalPreview()
+        // Self cam only while watching SEE (PiP); never idle full-screen preview
+        if (isSeeing && !isServingSee) walkieService?.startLocalPreview()
     }
 
     override fun onResume() {
@@ -997,7 +1030,7 @@ class MainActivity : AppCompatActivity() {
             showPermissionGate()
         } else {
             if (::permissionGate.isInitialized) permissionGate.visibility = View.GONE
-            if (!showMap) walkieService?.startLocalPreview()
+            if (isSeeing && !isServingSee) walkieService?.startLocalPreview()
         }
         if (::walkieScrn.isInitialized) {
             updateScrnButton()
@@ -1180,6 +1213,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * @param local true = idle solid stage (never full-screen self cam).
+     *              false = remote video fills the stage.
+     */
     private fun showLocalCameraSurface(local: Boolean) {
         if (!::walkiePreview.isInitialized || !::walkieVideo.isInitialized) return
         showMap = false
@@ -1188,19 +1225,15 @@ class MainActivity : AppCompatActivity() {
             applySeeSplitLayout(true)
             return
         }
-        // Reset any PiP layout params
-        resetPreviewFullBleed()
         if (local) {
-            walkiePreview.visibility = View.VISIBLE
-            walkieVideo.visibility = View.GONE
-            walkieVideoHint.visibility = View.GONE
-            applyNaturalPreviewTransform()
-            placeSelfFlipOnPreview()
+            showSolidStageBackground()
         } else {
+            if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
             walkiePreview.visibility = View.GONE
             walkieVideo.visibility = View.VISIBLE
             walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
             if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
+            if (::walkieFlipCamera.isInitialized) walkieFlipCamera.visibility = View.GONE
         }
     }
 
@@ -1243,8 +1276,14 @@ class MainActivity : AppCompatActivity() {
             pipLayoutActive = false
             pipLastLeft = -1
             pipLastTop = -1
-            resetPreviewFullBleed()
-            placeSelfFlipOnPreview()
+            // Leave stage solid — do not expand self cam to full screen after SEE
+            if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
+            walkiePreview.visibility = View.GONE
+            if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
+            if (!isReceiving && !isReplaying && !isTalking) {
+                showSolidStageBackground()
+            }
+            walkieService?.stopLocalPreview()
         }
     }
 
@@ -1476,18 +1515,17 @@ class MainActivity : AppCompatActivity() {
             gravity = android.view.Gravity.TOP or android.view.Gravity.END
             setMargins(m, m, m, m)
         }
-        walkiePipFlip.visibility = View.VISIBLE
-        walkiePipFlip.elevation = 30f
-        // During SEE keep clip so TextureView cannot paint outside the tiny PiP bubble
+        // Flip badge only when self is actually shown (SEE PiP) — not on empty solid stage
         if (isSeeing) {
+            walkiePipFlip.visibility = View.VISIBLE
+            walkiePipFlip.elevation = 30f
             walkiePipBox.clipChildren = true
             walkiePipBox.clipToPadding = true
+            walkiePipFlip.bringToFront()
         } else {
-            walkiePipBox.clipChildren = false
-            walkiePipBox.clipToPadding = false
+            walkiePipFlip.visibility = View.GONE
         }
-        walkiePipFlip.bringToFront()
-        // Stage flip is for peer during SEE; hide it when self badge is the local control
+        // Stage flip is for peer during SEE
         if (::walkieFlipCamera.isInitialized) {
             walkieFlipCamera.visibility = if (isSeeing) View.VISIBLE else View.GONE
             if (isSeeing) walkieFlipCamera.bringToFront()
