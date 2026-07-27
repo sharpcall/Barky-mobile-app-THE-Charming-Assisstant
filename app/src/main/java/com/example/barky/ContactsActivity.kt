@@ -422,10 +422,11 @@ class ContactsActivity : AppCompatActivity() {
             ) {
                 return null
             }
+            // Public UDP for control/hub; never pair public host with a LAN-only video port
             return PickedPath(
                 ep.publicIp!!,
                 ep.publicUdpPort,
-                if (ep.localVideoPort > 0) ep.localVideoPort else ep.publicUdpPort,
+                ep.publicUdpPort,
                 if (samePublicNat) "Same-NAT" else "Internet"
             )
         }

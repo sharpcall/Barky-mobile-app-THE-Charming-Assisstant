@@ -18,31 +18,6 @@
         android:clipChildren="false"
         android:clipToPadding="false">
 
-        <!-- Self-view: hidden by default (solid stage). Floating PiP only during SEE. -->
-        <FrameLayout
-            android:id="@+id/walkie_pip_box"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:clipChildren="false"
-            android:clipToPadding="false"
-            android:elevation="2dp"
-            android:visibility="gone">
-
-            <TextureView
-                android:id="@+id/walkie_preview"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@string/walkie_flip_self_camera" />
-
-            <!-- Kept gone: self flip is tap-on-picture, not a separate button. -->
-            <ImageButton
-                android:id="@+id/walkie_pip_flip"
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:visibility="gone"
-                android:contentDescription="@string/walkie_flip_self_camera" />
-        </FrameLayout>
-
         <ImageView
             android:id="@+id/walkie_video"
             android:layout_width="match_parent"
@@ -469,6 +444,35 @@
         </FrameLayout>
     </LinearLayout>
 
+    <!-- Self PiP must be a ROOT sibling AFTER footer so it receives touches (elevation alone
+         cannot beat a later sibling that covers the bottom of the screen). -->
+    <FrameLayout
+        android:id="@+id/walkie_pip_box"
+        android:layout_width="140dp"
+        android:layout_height="186dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="96dp"
+        android:layout_marginEnd="12dp"
+        android:background="#FF1A1228"
+        android:clipChildren="true"
+        android:clipToPadding="true"
+        android:elevation="40dp"
+        android:visibility="gone">
+
+        <TextureView
+            android:id="@+id/walkie_preview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/walkie_flip_self_camera" />
+
+        <ImageButton
+            android:id="@+id/walkie_pip_flip"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
+            android:contentDescription="@string/walkie_flip_self_camera" />
+    </FrameLayout>
+
     <!-- Blocks the whole app until every required permission is granted -->
     <FrameLayout
         android:id="@+id/permission_gate"
@@ -476,7 +480,7 @@
         android:layout_height="match_parent"
         android:background="@color/barky_perm_gate"
         android:clickable="true"
-        android:elevation="24dp"
+        android:elevation="48dp"
         android:focusable="true"
         android:visibility="gone">
 

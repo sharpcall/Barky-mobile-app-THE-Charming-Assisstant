@@ -355,6 +355,8 @@ class WalkieTalkieEngine(
             if (!deviceId.isNullOrBlank()) {
                 peerHostByDeviceId[deviceId] = host
                 hostToDeviceId[host] = deviceId
+                // Also map any prior host for this id so hub FWD still works after STUN remap
+                peerHostByDeviceId[deviceId] = host
             }
             postPeers()
             postStatus("Selected $cleanName @ $host:$udpPort")
