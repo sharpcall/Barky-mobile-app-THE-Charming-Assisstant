@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 92
-        versionName "5.52-pip-aspect-cell-restore"
+        versionCode 93
+        versionName "5.53-see-restore-working"
     }
 
     compileOptions {

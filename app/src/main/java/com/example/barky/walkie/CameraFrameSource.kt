@@ -43,12 +43,12 @@ data class CaptureConfig(
             jpegQuality = 70,
             maxBytesTcp = 80_000
         )
-        /** SEE remote camera: max-quality MJPEG (resolution + q), not bandwidth-capped. */
+        /** SEE: known-good compact MJPEG (cellular hub + LAN TCP). */
         val SeeLive = CaptureConfig(
             minIntervalMs = WalkieProtocol.SEE_VIDEO_MIN_INTERVAL_MS,
             maxEdge = WalkieProtocol.SEE_VIDEO_MAX_EDGE,
             jpegQuality = WalkieProtocol.SEE_VIDEO_JPEG_QUALITY,
-            maxBytesTcp = WalkieProtocol.SEE_VIDEO_JPEG_MAX_BYTES
+            maxBytesTcp = 120_000
         )
         /** Local record-only path: denser frames, sharper JPEGs (no network pressure while capturing). */
         val BestRecord = CaptureConfig(
@@ -353,9 +353,7 @@ class CameraFrameSource(
 
         val yuv = YuvImage(srcNv21, ImageFormat.NV21, srcW, srcH, null)
         val rawJpeg = ByteArrayOutputStream(srcW * srcH / 2)
-        // First pass quality tracks config (SEE max q=95); avoid hard-coded soft 85
-        val yuvQ = config.jpegQuality.coerceIn(70, 100)
-        if (!yuv.compressToJpeg(Rect(0, 0, srcW, srcH), yuvQ, rawJpeg)) return null
+        if (!yuv.compressToJpeg(Rect(0, 0, srcW, srcH), 85, rawJpeg)) return null
         val rawBytes = rawJpeg.toByteArray()
 
         val opts = BitmapFactory.Options().apply {
@@ -382,15 +380,14 @@ class CameraFrameSource(
         } else {
             config.maxBytesTcp
         }
-        var quality = config.jpegQuality.coerceIn(35, 100)
+        var quality = config.jpegQuality
         var out: ByteArray
         do {
-            val baos = ByteArrayOutputStream(maxBytes.coerceIn(64_000, 1_200_000))
+            val baos = ByteArrayOutputStream(maxBytes.coerceAtMost(360_000))
             bmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
             out = baos.toByteArray()
-            // Only step quality down if over budget (SEE budget is large → keep high q)
-            quality -= 5
-        } while (out.size > maxBytes && quality >= 50)
+            quality -= 10
+        } while (out.size > maxBytes && quality >= 35)
 
         // Cellular/relay: must fit ONE datagram (maxBytes) or RX reassembly fails under loss.
         if (compactForUdp() && out.size > maxBytes) {

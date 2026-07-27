@@ -114,13 +114,9 @@ object WalkieProtocol {
     const val VIDEO_HEIGHT = 720
     /** Longer edge of upright frame sent over TCP (clear on phone screens). */
     const val VIDEO_OUT_MAX_EDGE = 1280
-    /**
-     * SEE max-quality MJPEG: full phone-class resolution, high JPEG quality.
-     * Bandwidth is not throttled (large TCP frames OK on LAN).
-     */
-    const val SEE_VIDEO_MAX_EDGE = 1920
-    const val SEE_VIDEO_JPEG_QUALITY = 95
-    const val SEE_VIDEO_JPEG_MAX_BYTES = 900_000
+    /** SEE MJPEG that worked on LAN + cellular (pre-5.49). Do not inflate for “max quality”. */
+    const val SEE_VIDEO_MAX_EDGE = 480
+    const val SEE_VIDEO_JPEG_QUALITY = 62
     const val VIDEO_JPEG_QUALITY_START = 90
     const val VIDEO_JPEG_MAX_BYTES_TCP = 280_000
     // Single UDP datagram JPEG payload (plus VIDEO_HEADER ≤ VIDEO_CHUNK).

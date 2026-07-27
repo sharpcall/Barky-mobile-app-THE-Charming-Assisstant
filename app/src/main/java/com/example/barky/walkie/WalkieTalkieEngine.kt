@@ -5437,8 +5437,11 @@ class WalkieTalkieEngine(
                     isActive = { servingSee.get() },
                     isTcpConnected = { synchronized(videoOutLock) { videoOut != null } },
                     useAvc = useAvc,
-                    // Self PiP while serving: same TextureView as idle preview
-                    externalSurfaceTexture = { uiPreviewTexture },
+                    // Dummy surface unless we also watch (PiP). Idle TextureView is GONE after solid-stage
+                    // and a dead SurfaceTexture kills Camera1 open → no video both ways.
+                    externalSurfaceTexture = {
+                        if (requestingSee.get()) uiPreviewTexture else null
+                    },
                     onPreviewReady = { w, h, orient, front ->
                         mainHandler.post { listener.onLocalPreviewGeometry(w, h, orient, front) }
                     },
