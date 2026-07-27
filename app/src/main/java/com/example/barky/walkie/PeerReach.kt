@@ -101,25 +101,13 @@ object PeerReach {
             onWifi = selfOnWifi,
             wifiSsid = null
         )
-        // On Wi‑Fi + same /16 private peer: prefer LAN even without live HELLO (cell→wifi handoff).
-        // liveLanHello still required when subnets differ (avoid stale foreign 192.168.x).
-        val sameHomeLan = run {
-            val a = selfSnap.localIp
-            val b = lanHost
-            if (a.isNullOrBlank() || b.isNullOrBlank()) return@run false
-            if (!PeerEndpoint.isPrivateIp(a) || !PeerEndpoint.isPrivateIp(b)) return@run false
-            val ap = a.split(".")
-            val bp = b.split(".")
-            ap.size == 4 && bp.size == 4 && ap[0] == bp[0] && ap[1] == bp[1]
-        }
-        val preferLan = !mustPublic && selfOnWifi && !lanHost.isNullOrBlank() && lanUdp > 0 &&
-            (liveLanHello || sameHomeLan) &&
+        // Only prefer LAN with a live HELLO (stale Firebase localIp breaks cellular SEE)
+        val preferLan = !mustPublic &&
             NetworkEndpoints.preferLanPath(
                 selfSnap,
                 lanHost,
                 null,
-                // sameHomeLan acts as optimistic live path after we just joined Wi‑Fi
-                liveLanHello = liveLanHello || sameHomeLan
+                liveLanHello = liveLanHello && !lanHost.isNullOrBlank()
             )
 
         val primary: WalkiePeer = when {

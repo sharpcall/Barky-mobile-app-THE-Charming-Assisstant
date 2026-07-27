@@ -466,12 +466,10 @@ class WalkieTalkieEngine(
         if (!running.get()) return
         thread(name = "walkie-path-change", isDaemon = true) {
             try {
-                val wasWifi = NetworkEndpoints.isWifi(appContext)
-                Log.i(TAG, "onLocalPathChanged reason=$reason wifi=$wasWifi")
-                // Cell→Wi‑Fi needs longer settle (DHCP + default route); Wi‑Fi→cell is faster
-                val settleMs = if (wasWifi) 450L else 200L
+                Log.i(TAG, "onLocalPathChanged reason=$reason")
+                // Keep the pre-5.50 path (worked on cellular). Do not multi-path rebind / remap peer.
                 try {
-                    Thread.sleep(settleMs)
+                    Thread.sleep(180)
                 } catch (_: InterruptedException) {
                     return@thread
                 }
@@ -493,7 +491,7 @@ class WalkieTalkieEngine(
                 }
                 val known = peers.values.toList()
                 // Aggressive burst so peer remaps before media stalls
-                repeat(16) {
+                repeat(14) {
                     if (!running.get()) return@thread
                     for (p in known) {
                         try {
@@ -512,32 +510,25 @@ class WalkieTalkieEngine(
                         }
                     }
                     try {
-                        Thread.sleep(40)
+                        Thread.sleep(35)
                     } catch (_: InterruptedException) {
                         return@thread
                     }
                 }
-                // Extra settle on Wi‑Fi so HELLO/PATH can flip peer to LAN before video rebind
-                if (NetworkEndpoints.isWifi(appContext)) {
-                    try {
-                        Thread.sleep(200)
-                    } catch (_: InterruptedException) {
-                        return@thread
-                    }
-                }
-                // Re-open video TCP: try resolved LAN then public (cell→wifi must leave hub when LAN works)
+                // Re-open video TCP for both LAN and hub — same dest as before (no peer remap)
                 if (servingSee.get() || talking.get() || servingScreen.get()) {
-                    val seed = monitorTarget ?: currentPeer() ?: bestLivePeer()
-                    if (seed != null) {
-                        val ok = reconnectVideoOutMultiPath(seed, "serve-path-change")
+                    val dest = monitorTarget ?: bestLivePeer()
+                    if (dest != null) {
+                        closeVideoOut()
+                        val ok = openVideoOut(dest)
                         Log.i(
                             TAG,
-                            "video OUT after path change ok=$ok seed=${seed.host} wifi=" +
-                                "${NetworkEndpoints.isWifi(appContext)}"
+                            "video OUT reconnected after path change ok=$ok → ${dest.host} " +
+                                "public=${!PeerEndpoint.isPrivateIp(dest.host)}"
                         )
                     }
                 }
-                // Viewer side: re-bind hub TCP IN + re-REQ so peer reopens to our new mapping
+                // Viewer side: re-bind hub TCP IN so frames keep landing after Wi‑Fi↔cell
                 if (requestingSee.get() || requestingScreen.get()) {
                     try {
                         ensureHubVideoRxLink()
@@ -549,18 +540,11 @@ class WalkieTalkieEngine(
                     if (seed != null && requestingSee.get()) {
                         try {
                             val targets = resolveControlTargets(seed)
-                            applyPrimaryPeer(targets.primary)
-                            seeWatchPeer = targets.primary
+                            // Do NOT applyPrimaryPeer here — remapping contact broke cellular SEE
                             for (t in targets.all) {
                                 sendControlWithPort(t, WalkieProtocol.TYPE_SEE_REQ, localPort)
-                                sendHelloTo(t)
-                                sendPathUpdateTo(t)
                             }
-                            Log.i(
-                                TAG,
-                                "SEE re-REQ after path change primary=${targets.primary.host} " +
-                                    "alts=${targets.all.size} ${targets.reason}"
-                            )
+                            Log.i(TAG, "SEE re-REQ after path change → ${targets.primary.host}")
                         } catch (t: Throwable) {
                             Log.w(TAG, "SEE re-REQ path change", t)
                         }
@@ -1952,55 +1936,6 @@ class WalkieTalkieEngine(
             setChannelBusy(false, "timeout")
             postStatus("Ready")
         }
-    }
-
-    /**
-     * After NIC change: try every resolved path (LAN first on Wi‑Fi, then public/hub).
-     * Fixes cell→Wi‑Fi SEE where a single openVideoOut(old public) stuck or failed.
-     */
-    private fun reconnectVideoOutMultiPath(seed: WalkiePeer, tag: String): Boolean {
-        val targets = try {
-            resolveControlTargets(seed).all
-        } catch (_: Throwable) {
-            listOf(seed)
-        }
-        val ordered = LinkedHashSet<WalkiePeer>()
-        // On Wi‑Fi prefer private targets first (smooth handoff off cellular hub)
-        if (NetworkEndpoints.isWifi(appContext)) {
-            targets.filter { PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
-            targets.filter { !PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
-        } else {
-            targets.filter { !PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
-            targets.filter { PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
-        }
-        if (ordered.isEmpty()) ordered.add(seed)
-        for (attempt in 1..3) {
-            for (t in ordered) {
-                try {
-                    closeVideoOut()
-                    // Pin monitor target so hub FWD / SEE serve stay aligned
-                    monitorTarget = t
-                    if (servingSee.get() || requestingSee.get()) {
-                        seeWatchPeer = t
-                    }
-                    applyPrimaryPeer(t)
-                    val ok = openVideoOut(t)
-                    Log.i(
-                        TAG,
-                        "reconnectVideoOut $tag attempt=$attempt → ${t.host}:${t.videoPort.coerceAtLeast(t.port)} ok=$ok"
-                    )
-                    if (ok) return true
-                } catch (ex: Throwable) {
-                    Log.w(TAG, "reconnectVideoOut $tag ${t.host}", ex)
-                }
-            }
-            try {
-                Thread.sleep(180L * attempt)
-            } catch (_: InterruptedException) {
-                return false
-            }
-        }
-        return false
     }
 
     /** @return true if TCP video out is connected */

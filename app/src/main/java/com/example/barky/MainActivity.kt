@@ -1331,19 +1331,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Self PiP = **1/9 of the stage** (each side = 1/3 of stage width/height),
-     * with camera aspect fitted inside that budget. No enlarge mode.
-     */
-    /**
-     * Exactly **1/9 of the full screen**: width = screenW/3, height = screenH/3.
-     * (Fitting camera aspect inside that budget was shrinking the box toward ~1/18.)
-     * TextureView center-crops the camera into this fixed rectangle.
+     * Self PiP ~1/9 screen **area** with correct camera aspect.
+     * Height = fullScreenH/3 (looks right); width = height / uprightAspect
+     * so portrait camera is not stretched (screenW/3 × screenH/3 was too skinny).
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val screenW = resources.displayMetrics.widthPixels.coerceAtLeast(1)
         val screenH = resources.displayMetrics.heightPixels.coerceAtLeast(1)
-        val pipW = (screenW / 3).coerceAtLeast(1)
         val pipH = (screenH / 3).coerceAtLeast(1)
+        val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
+            val orient = previewDisplayOrient
+            val uprightW: Float
+            val uprightH: Float
+            if (orient % 180 == 0) {
+                uprightW = previewBufW.toFloat()
+                uprightH = previewBufH.toFloat()
+            } else {
+                uprightW = previewBufH.toFloat()
+                uprightH = previewBufW.toFloat()
+            }
+            (uprightH / uprightW).coerceIn(1.2f, 1.9f)
+        } else {
+            4f / 3f // typical upright phone camera
+        }
+        var pipW = (pipH / uprightAspectHOverW).toInt().coerceAtLeast(1)
+        // Never wider than 1/3 of screen width
+        val maxW = (screenW / 3).coerceAtLeast(1)
+        if (pipW > maxW) {
+            pipW = maxW
+            // keep aspect if we hit the width cap
+            val h2 = (pipW * uprightAspectHOverW).toInt().coerceAtLeast(1)
+            return pipW to h2.coerceAtMost(pipH)
+        }
         return pipW to pipH
     }
 
