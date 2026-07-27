@@ -2296,11 +2296,11 @@ class WalkieTalkieEngine(
             if (selectedPeerKey == null) selectedPeerKey = key(peer)
             postPeers()
         }
-        // Keep NAT warm back
+        // Keep NAT warm with HELLO only — never PATH_UPDATE back (that caused a flood loop
+        // and broke cellular SEE control).
         val p = peers.values.find { it.host == newHost }
         if (p != null) {
             sendHelloTo(p)
-            sendPathUpdateTo(p)
         }
     }
 
