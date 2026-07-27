@@ -572,13 +572,8 @@ class MainActivity : AppCompatActivity() {
             }
             walkieFlipCamera.animate().rotationBy(180f).setDuration(200).start()
         }
-        // Self PiP flip: always local camera
-        walkiePipFlip.setOnClickListener {
-            walkieService?.switchCamera()
-            walkiePipFlip.animate().rotationBy(180f).setDuration(200).start()
-            Toast.makeText(this, R.string.walkie_flip_self_toast, Toast.LENGTH_SHORT).show()
-            updateFlipCameraLabel()
-        }
+        // Self flip: tap on PiP picture only (bindFloatingPip) — no separate button
+        if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
         updateFlipCameraLabel()
 
         walkieReplay.setOnClickListener {
@@ -1288,13 +1283,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Compact WhatsApp-style self PiP. Absolute dp caps only — never % of full-bleed stage
-     * (that made self look “very big” on phones). Texture is clipped to the box.
+     * Self PiP = **1/9 of the stage** (each side = 1/3 of stage width/height),
+     * with camera aspect fitted inside that budget. No enlarge mode.
      */
     private fun pipSizePx(): Pair<Int, Int> {
-        val density = resources.displayMetrics.density
-        // Tiny corner bubble: ~88×118dp normal, ~120×160dp when user taps to enlarge
-        val baseW = ((if (pipEnlarged) 120f else 88f) * density).toInt()
+        val parent = walkiePipBox.parent as? android.view.ViewGroup
+        val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
+        val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
+        // 1/9 area → linear ~1/3 × 1/3 of stage
+        val budgetW = (parentW / 3).coerceAtLeast(1)
+        val budgetH = (parentH / 3).coerceAtLeast(1)
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1306,32 +1304,16 @@ class MainActivity : AppCompatActivity() {
                 uprightW = previewBufH.toFloat()
                 uprightH = previewBufW.toFloat()
             }
-            (uprightH / uprightW).coerceIn(1.25f, 1.85f)
+            (uprightH / uprightW).coerceIn(1.2f, 1.9f)
         } else {
             4f / 3f
         }
-        var pipW = baseW
-        var pipH = (baseW * uprightAspectHOverW).toInt()
-        // Absolute hard caps in px (ignore parent % — full stage is huge)
-        val maxW = ((if (pipEnlarged) 128f else 96f) * density).toInt()
-        val maxH = ((if (pipEnlarged) 172f else 132f) * density).toInt()
-        if (pipW > maxW) {
-            val s = maxW.toFloat() / pipW
-            pipW = maxW
-            pipH = (pipH * s).toInt()
-        }
-        if (pipH > maxH) {
-            val s = maxH.toFloat() / pipH
-            pipH = maxH
-            pipW = (pipW * s).toInt()
-        }
-        // Never exceed ~22% of screen width even on large tablets
-        val screenW = resources.displayMetrics.widthPixels
-        val screenMaxW = (screenW * 0.22f).toInt().coerceAtLeast((72 * density).toInt())
-        if (pipW > screenMaxW) {
-            val s = screenMaxW.toFloat() / pipW
-            pipW = screenMaxW
-            pipH = (pipH * s).toInt()
+        // Fit portrait-ish camera rect inside the 1/3×1/3 budget
+        var pipW = budgetW
+        var pipH = (pipW * uprightAspectHOverW).toInt()
+        if (pipH > budgetH) {
+            pipH = budgetH
+            pipW = (pipH / uprightAspectHOverW).toInt()
         }
         return pipW.coerceAtLeast(1) to pipH.coerceAtLeast(1)
     }
@@ -1353,9 +1335,10 @@ class MainActivity : AppCompatActivity() {
         val lp = existing ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
         val oldW = lp.width
         val oldH = lp.height
+        // 1/3 stage is intentional (area 1/9); allow up to ~40% so sizeOk accepts it
         val sizeOk = !wasFullBleed &&
-            lp.width in 1..(parentW * 0.3f).toInt() &&
-            lp.height in 1..(parentH * 0.3f).toInt()
+            lp.width in 1..(parentW * 0.40f).toInt() &&
+            lp.height in 1..(parentH * 0.40f).toInt()
         val useSaved = preservePosition && !wasFullBleed && pipLastLeft >= 0 && pipLastTop >= 0 && sizeOk
         var left = if (useSaved) {
             pipLastLeft
@@ -1389,12 +1372,13 @@ class MainActivity : AppCompatActivity() {
         walkiePipBox.clipChildren = true
         walkiePipBox.clipToPadding = true
         walkiePipBox.elevation = 24f
-        // Preview fills the box; flip is a badge ON the self-picture (top-end)
+        // Preview fills the entire PiP box (no flip button chrome)
         walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
         )
         walkiePreview.alpha = 1f
+        if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
         placeSelfFlipOnPreview()
         walkiePipBox.requestLayout()
         walkiePipBox.post {
@@ -1406,8 +1390,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Drag/tap on the **TextureView** only so the PiP flip button still receives clicks.
-     * (A touch listener on the whole [walkiePipBox] was eating flip-button taps.)
+     * Drag to move PiP. Tap (no drag) flips front/back camera — no flip button.
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindFloatingPip() {
@@ -1461,13 +1444,9 @@ class MainActivity : AppCompatActivity() {
                         pipLastTop = cur.topMargin
                     }
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
-                        pipEnlarged = !pipEnlarged
-                        layoutFloatingPip(preservePosition = true)
-                        Toast.makeText(
-                            this,
-                            if (pipEnlarged) R.string.pip_enlarged else R.string.pip_normal,
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        // Tap self-picture → flip front/back (no separate flip button)
+                        walkieService?.switchCamera()
+                        Toast.makeText(this, R.string.walkie_flip_self_toast, Toast.LENGTH_SHORT).show()
                     }
                     true
                 }
@@ -1503,29 +1482,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Flip control must sit on the self-picture frame itself (top-end), not only on the stage.
-     * Visible whenever local TextureView is the self cam (idle full-bleed or SEE PiP).
+     * No self flip button — tap on PiP flips. Stage button flips *peer* camera while SEE.
      */
     private fun placeSelfFlipOnPreview() {
-        if (!::walkiePipFlip.isInitialized || !::walkiePipBox.isInitialized) return
-        val dens = resources.displayMetrics.density
-        val badge = (40 * dens).toInt()
-        val m = (8 * dens).toInt()
-        walkiePipFlip.layoutParams = android.widget.FrameLayout.LayoutParams(badge, badge).apply {
-            gravity = android.view.Gravity.TOP or android.view.Gravity.END
-            setMargins(m, m, m, m)
-        }
-        // Flip badge only when self is actually shown (SEE PiP) — not on empty solid stage
-        if (isSeeing) {
-            walkiePipFlip.visibility = View.VISIBLE
-            walkiePipFlip.elevation = 30f
+        if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
+        if (::walkiePipBox.isInitialized) {
             walkiePipBox.clipChildren = true
             walkiePipBox.clipToPadding = true
-            walkiePipFlip.bringToFront()
-        } else {
-            walkiePipFlip.visibility = View.GONE
         }
-        // Stage flip is for peer during SEE
         if (::walkieFlipCamera.isInitialized) {
             walkieFlipCamera.visibility = if (isSeeing) View.VISIBLE else View.GONE
             if (isSeeing) walkieFlipCamera.bringToFront()

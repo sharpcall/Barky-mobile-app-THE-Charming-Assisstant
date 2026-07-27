@@ -31,24 +31,16 @@
             <TextureView
                 android:id="@+id/walkie_preview"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent" />
+                android:layout_height="match_parent"
+                android:contentDescription="@string/walkie_flip_self_camera" />
 
-            <!-- Flip sits ON the self-picture frame only (top-end of this box). -->
+            <!-- Kept gone: self flip is tap-on-picture, not a separate button. -->
             <ImageButton
                 android:id="@+id/walkie_pip_flip"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:layout_gravity="top|end"
-                android:layout_margin="8dp"
-                android:background="@drawable/bg_flip_camera_circle"
-                android:clickable="true"
-                android:contentDescription="@string/walkie_flip_self_camera"
-                android:elevation="20dp"
-                android:focusable="true"
-                android:padding="8dp"
-                android:scaleType="centerInside"
-                android:src="@drawable/ic_flip_camera"
-                android:visibility="gone" />
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone"
+                android:contentDescription="@string/walkie_flip_self_camera" />
         </FrameLayout>
 
         <ImageView
