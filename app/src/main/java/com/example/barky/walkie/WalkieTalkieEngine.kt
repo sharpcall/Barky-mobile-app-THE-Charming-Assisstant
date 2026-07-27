@@ -2931,19 +2931,11 @@ class WalkieTalkieEngine(
                 !destHost.isNullOrBlank() &&
                 (BarkyHubConfig.isHubAddress(destHost) || !PeerEndpoint.isPrivateIp(destHost))
         if (useRelay) {
-            val destId = when {
-                BarkyHubConfig.isHubAddress(destHost) ->
-                    // Hub packet: dest is in hostToDeviceId[hub] (packetToPeer) or selected peer
-                    hostToDeviceId[destHost]
-                        ?: hostToDeviceId[currentPeer()?.host ?: ""]
-                        ?: hostToDeviceId[monitorTarget?.host ?: ""]
-                        ?: peerHostByDeviceId.entries.firstOrNull {
-                            it.value == currentPeer()?.host || it.value == monitorTarget?.host
-                        }?.key
-                        ?: peerHostByDeviceId.keys.firstOrNull()
-                else ->
-                    hostToDeviceId[destHost]
-                        ?: peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key
+            val destId = resolveRelayDestId(destHost)
+            // Remember mapping so later public-IP packets FWD without skip
+            if (!destId.isNullOrBlank() && !destHost.isNullOrBlank()) {
+                hostToDeviceId[destHost] = destId
+                peerHostByDeviceId[destId] = destHost
             }
             val srcId = try {
                 DeviceIdentity.deviceId(appContext)
@@ -2964,7 +2956,9 @@ class WalkieTalkieEngine(
             } else {
                 Log.w(
                     TAG,
-                    "relay skip: destId=${destId?.take(12)} src=${srcId.take(8)} host=$destHost"
+                    "relay skip: destId=${destId?.take(12)} src=${srcId.take(8)} host=$destHost " +
+                        "selected=${currentPeer()?.host} see=${seeWatchPeer?.host} " +
+                        "ids=${peerHostByDeviceId.keys.joinToString { it.take(12) }}"
                 )
             }
             // Do not fall through to raw hub IP — that can never deliver SEE_ACK
@@ -2973,6 +2967,34 @@ class WalkieTalkieEngine(
         synchronized(udpSendLock) {
             socket?.send(packet)
         }
+    }
+
+    /**
+     * Map a public/hub destination IP to Firebase deviceId for hub FWD.
+     * Missing mapping was the cellular SEE failure: `relay skip destId=null`.
+     */
+    private fun resolveRelayDestId(destHost: String?): String? {
+        if (destHost.isNullOrBlank()) return null
+        hostToDeviceId[destHost]?.let { return it }
+        peerHostByDeviceId.entries.firstOrNull { it.value == destHost }?.key?.let { return it }
+        // Selected / SEE / monitor peers (host may have changed after STUN remap)
+        val candidates = listOfNotNull(
+            currentPeer()?.host,
+            seeWatchPeer?.host,
+            monitorTarget?.host
+        )
+        for (h in candidates) {
+            hostToDeviceId[h]?.let { return it }
+            peerHostByDeviceId.entries.firstOrNull { it.value == h }?.key?.let { return it }
+        }
+        // Single known contact → use it (typical 2-phone setup)
+        if (peerHostByDeviceId.size == 1) return peerHostByDeviceId.keys.first()
+        // Hub envelope: dest already stored under hub host
+        if (BarkyHubConfig.isHubAddress(destHost)) {
+            return hostToDeviceId[destHost]
+                ?: peerHostByDeviceId.keys.firstOrNull()
+        }
+        return null
     }
 
     /** Attribute hub-relay packets to a known peer host (for UI / maps). */
