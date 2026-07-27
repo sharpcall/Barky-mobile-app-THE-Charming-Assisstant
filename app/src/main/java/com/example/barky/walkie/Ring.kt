@@ -84,13 +84,25 @@ class Ring(
         val payload = byteArrayOf(WalkieProtocol.TYPE_WAKEUP_STOP)
         for (t in targets) {
             try {
+                // Skip synthetic id: hosts that cannot resolve for InetAddress
+                if (t.host.startsWith("id:") || t.port <= 0) {
+                    Log.w(TAG, "RING stop skip bad target ${t.host}:${t.port}")
+                    continue
+                }
+                sendHello(t)
+                val public = !com.example.barky.net.PeerEndpoint.isPrivateIp(t.host)
+                if (public) {
+                    holePunch(t, 6)
+                }
                 val packet = DatagramPacket(
                     payload, payload.size, InetAddress.getByName(t.host), t.port
                 )
-                repeat(6) {
+                // More bursts than RING start path — STOP is critical
+                repeat(12) {
                     sendUdp(packet)
-                    Thread.sleep(30)
+                    Thread.sleep(25)
                 }
+                Log.i(TAG, "RING STOP → ${t.displayName} ${t.host}:${t.port}")
             } catch (ex: Throwable) {
                 Log.w(TAG, "RING stop remote ${t.host}", ex)
             }

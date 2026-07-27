@@ -307,10 +307,15 @@ class MainActivity : AppCompatActivity() {
                 this@MainActivity.peerTrail = peerTrail
                 this@MainActivity.gpsEnabled = gpsEnabled
                 if (gpsEnabled && !isTalking && !isReceiving && !isReplaying && !isSeeing) {
-                    showMap = true
-                    applyStageVisibility()
+                    if (!showMap || walkieMap.visibility != View.VISIBLE) {
+                        showMap = true
+                        applyStageVisibility()
+                    } else {
+                        pushMapTrail()
+                    }
+                } else {
+                    pushMapTrail()
                 }
-                pushMapTrail()
             }
         }
 
@@ -476,10 +481,33 @@ class MainActivity : AppCompatActivity() {
         walkieMap.settings.javaScriptEnabled = true
         walkieMap.settings.domStorageEnabled = true
         walkieMap.setBackgroundColor(0xFF0F0A1A.toInt())
+        walkieMap.settings.domStorageEnabled = true
+        walkieMap.settings.javaScriptEnabled = true
+        // Allow OSM tiles / unpkg leaflet over https
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            walkieMap.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        }
         walkieMap.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 mapReady = true
+                android.util.Log.i("BarkyVideoUI", "gps_map.html loaded")
+                view?.evaluateJavascript(
+                    "try{if(typeof map!=='undefined'&&map){map.invalidateSize(true);}}catch(e){}",
+                    null
+                )
                 pushMapTrail()
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                errorCode: Int,
+                description: String?,
+                failingUrl: String?
+            ) {
+                android.util.Log.w(
+                    "BarkyVideoUI",
+                    "gps map error code=$errorCode desc=$description url=$failingUrl"
+                )
             }
         }
         walkieMap.loadUrl("file:///android_asset/gps_map.html")
@@ -841,15 +869,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyStageVisibility() {
+        if (!::walkieMap.isInitialized) return
         if (showMap && gpsEnabled) {
             walkieMap.visibility = View.VISIBLE
+            walkieMap.elevation = 4f
+            walkieMap.bringToFront()
             if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
             walkiePreview.visibility = View.GONE
             walkieVideo.visibility = View.GONE
             walkieVideoHint.visibility = View.GONE
             if (::walkiePipFlip.isInitialized) walkiePipFlip.visibility = View.GONE
             if (!isSeeing) walkieService?.stopLocalPreview()
-            pushMapTrail()
+            // Leaflet is blank until invalidateSize after leaving GONE
+            walkieMap.post {
+                walkieMap.evaluateJavascript(
+                    "try{if(typeof map!=='undefined'&&map){map.invalidateSize(true);}}catch(e){}",
+                    null
+                )
+                pushMapTrail()
+            }
+            walkieMap.postDelayed({
+                walkieMap.evaluateJavascript(
+                    "try{if(typeof map!=='undefined'&&map){map.invalidateSize(true);}}catch(e){}",
+                    null
+                )
+                pushMapTrail()
+            }, 400)
+            android.util.Log.i("BarkyVideoUI", "GPS map stage VISIBLE")
+        } else {
+            walkieMap.visibility = View.GONE
         }
     }
 

@@ -466,10 +466,12 @@ class WalkieTalkieEngine(
         if (!running.get()) return
         thread(name = "walkie-path-change", isDaemon = true) {
             try {
-                Log.i(TAG, "onLocalPathChanged reason=$reason")
-                // Fast handover: brief settle only (was 1.2s — felt broken mid-call)
+                val wasWifi = NetworkEndpoints.isWifi(appContext)
+                Log.i(TAG, "onLocalPathChanged reason=$reason wifi=$wasWifi")
+                // Cell→Wi‑Fi needs longer settle (DHCP + default route); Wi‑Fi→cell is faster
+                val settleMs = if (wasWifi) 450L else 200L
                 try {
-                    Thread.sleep(180)
+                    Thread.sleep(settleMs)
                 } catch (_: InterruptedException) {
                     return@thread
                 }
@@ -491,7 +493,7 @@ class WalkieTalkieEngine(
                 }
                 val known = peers.values.toList()
                 // Aggressive burst so peer remaps before media stalls
-                repeat(14) {
+                repeat(16) {
                     if (!running.get()) return@thread
                     for (p in known) {
                         try {
@@ -510,25 +512,32 @@ class WalkieTalkieEngine(
                         }
                     }
                     try {
-                        Thread.sleep(35)
+                        Thread.sleep(40)
                     } catch (_: InterruptedException) {
                         return@thread
                     }
                 }
-                // Re-open video TCP for both LAN and hub (cellular HD) — no user restart needed
+                // Extra settle on Wi‑Fi so HELLO/PATH can flip peer to LAN before video rebind
+                if (NetworkEndpoints.isWifi(appContext)) {
+                    try {
+                        Thread.sleep(200)
+                    } catch (_: InterruptedException) {
+                        return@thread
+                    }
+                }
+                // Re-open video TCP: try resolved LAN then public (cell→wifi must leave hub when LAN works)
                 if (servingSee.get() || talking.get() || servingScreen.get()) {
-                    val dest = monitorTarget ?: bestLivePeer()
-                    if (dest != null) {
-                        closeVideoOut()
-                        val ok = openVideoOut(dest)
+                    val seed = monitorTarget ?: currentPeer() ?: bestLivePeer()
+                    if (seed != null) {
+                        val ok = reconnectVideoOutMultiPath(seed, "serve-path-change")
                         Log.i(
                             TAG,
-                            "video OUT reconnected after path change ok=$ok → ${dest.host} " +
-                                "public=${!PeerEndpoint.isPrivateIp(dest.host)}"
+                            "video OUT after path change ok=$ok seed=${seed.host} wifi=" +
+                                "${NetworkEndpoints.isWifi(appContext)}"
                         )
                     }
                 }
-                // Viewer side: re-bind hub TCP IN so HD frames keep landing after Wi‑Fi↔cell
+                // Viewer side: re-bind hub TCP IN + re-REQ so peer reopens to our new mapping
                 if (requestingSee.get() || requestingScreen.get()) {
                     try {
                         ensureHubVideoRxLink()
@@ -536,16 +545,22 @@ class WalkieTalkieEngine(
                     } catch (t: Throwable) {
                         Log.w(TAG, "hub video IN after path change", t)
                     }
-                    // Re-nudge peer SEE so they reopen hub FWD to our new mapping
                     val seed = seeWatchPeer ?: currentPeer()
                     if (seed != null && requestingSee.get()) {
                         try {
                             val targets = resolveControlTargets(seed)
                             applyPrimaryPeer(targets.primary)
+                            seeWatchPeer = targets.primary
                             for (t in targets.all) {
                                 sendControlWithPort(t, WalkieProtocol.TYPE_SEE_REQ, localPort)
+                                sendHelloTo(t)
+                                sendPathUpdateTo(t)
                             }
-                            Log.i(TAG, "SEE re-REQ after path change → ${targets.primary.host}")
+                            Log.i(
+                                TAG,
+                                "SEE re-REQ after path change primary=${targets.primary.host} " +
+                                    "alts=${targets.all.size} ${targets.reason}"
+                            )
                         } catch (t: Throwable) {
                             Log.w(TAG, "SEE re-REQ path change", t)
                         }
@@ -1597,15 +1612,61 @@ class WalkieTalkieEngine(
     /** Stop local ringing and/or cancel a wakeup we sent to the peer. */
     fun stopWakeupRinging() {
         cancelRingWatchdog()
-        val targets = lastControlTargets.ifEmpty {
-            listOfNotNull(currentPeer())
-        }
-        thread(name = "walkie-ring-stop", isDaemon = true) {
-            ring.stop(targets = targets, alsoRemote = true)
+        // Stop local alarm immediately (main-thread audio) — do not wait for network
+        try {
+            ring.stopLocalOnly()
+        } catch (_: Throwable) {
         }
         mainHandler.removeCallbacks(remoteWakeupClear)
-        mainHandler.post { listener.onRemoteWakeupActive(false) }
+        mainHandler.post {
+            listener.onRemoteWakeupActive(false)
+            listener.onWakeupRingingChanged(false)
+        }
         postStatus("Ringing stopped")
+        // Fan-out STOP on all known LAN+public paths (stale lastControlTargets alone often miss cell↔wifi)
+        thread(name = "walkie-ring-stop", isDaemon = true) {
+            try {
+                val seed = currentPeer() ?: lastControlTargets.firstOrNull()
+                val resolved = if (seed != null) {
+                    try {
+                        resolveControlTargets(seed).all
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                } else {
+                    emptyList()
+                }
+                val merged = LinkedHashMap<String, WalkiePeer>()
+                for (t in lastControlTargets + resolved + listOfNotNull(currentPeer(), seeWatchPeer)) {
+                    if (t.port > 0 && !t.host.isBlank()) {
+                        merged["${t.host}:${t.port}"] = t
+                    }
+                }
+                val targets = merged.values.toList()
+                if (targets.isEmpty()) {
+                    Log.w(TAG, "RING stop: no remote targets")
+                    return@thread
+                }
+                lastControlTargets = targets
+                // Hole-punch public targets so STOP reaches ringing peer
+                for (t in targets) {
+                    if (!PeerEndpoint.isPrivateIp(t.host)) {
+                        try {
+                            holePunchPeer(t, 8)
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
+                ring.stop(targets = targets, alsoRemote = true)
+                Log.i(
+                    TAG,
+                    "RING stop fan-out n=${targets.size} → " +
+                        targets.joinToString { "${it.host}:${it.port}" }
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "stopWakeupRinging remote", t)
+            }
+        }
     }
 
     fun isWakeupRinging(): Boolean = ring.isRinging
@@ -1891,6 +1952,55 @@ class WalkieTalkieEngine(
             setChannelBusy(false, "timeout")
             postStatus("Ready")
         }
+    }
+
+    /**
+     * After NIC change: try every resolved path (LAN first on Wi‑Fi, then public/hub).
+     * Fixes cell→Wi‑Fi SEE where a single openVideoOut(old public) stuck or failed.
+     */
+    private fun reconnectVideoOutMultiPath(seed: WalkiePeer, tag: String): Boolean {
+        val targets = try {
+            resolveControlTargets(seed).all
+        } catch (_: Throwable) {
+            listOf(seed)
+        }
+        val ordered = LinkedHashSet<WalkiePeer>()
+        // On Wi‑Fi prefer private targets first (smooth handoff off cellular hub)
+        if (NetworkEndpoints.isWifi(appContext)) {
+            targets.filter { PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
+            targets.filter { !PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
+        } else {
+            targets.filter { !PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
+            targets.filter { PeerEndpoint.isPrivateIp(it.host) }.forEach { ordered.add(it) }
+        }
+        if (ordered.isEmpty()) ordered.add(seed)
+        for (attempt in 1..3) {
+            for (t in ordered) {
+                try {
+                    closeVideoOut()
+                    // Pin monitor target so hub FWD / SEE serve stay aligned
+                    monitorTarget = t
+                    if (servingSee.get() || requestingSee.get()) {
+                        seeWatchPeer = t
+                    }
+                    applyPrimaryPeer(t)
+                    val ok = openVideoOut(t)
+                    Log.i(
+                        TAG,
+                        "reconnectVideoOut $tag attempt=$attempt → ${t.host}:${t.videoPort.coerceAtLeast(t.port)} ok=$ok"
+                    )
+                    if (ok) return true
+                } catch (ex: Throwable) {
+                    Log.w(TAG, "reconnectVideoOut $tag ${t.host}", ex)
+                }
+            }
+            try {
+                Thread.sleep(180L * attempt)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return false
     }
 
     /** @return true if TCP video out is connected */
@@ -3246,7 +3356,11 @@ class WalkieTalkieEngine(
                             handleWakeupFrom(from, quiet)
                         }
                         WalkieProtocol.TYPE_WAKEUP_STOP -> {
+                            Log.i(TAG, "WAKEUP_STOP from=$from port=$fromPort")
                             ring.stopLocalOnly()
+                            mainHandler.post {
+                                listener.onWakeupRingingChanged(false)
+                            }
                             postStatus("Remote stopped ringing")
                         }
                         WalkieProtocol.TYPE_SEE_ACK -> {
@@ -4233,12 +4347,20 @@ class WalkieTalkieEngine(
 
     private fun sendGpsPoint(pt: LocationTracker.GpsPoint) {
         // Deduplicate peers by host (keep highest known UDP port / latest entry)
+        val selfIps = try {
+            NetworkEndpoints.findAllLocalIpv4().toSet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
         val byHost = LinkedHashMap<String, WalkiePeer>()
         for (p in getPeers()) {
+            if (p.host in selfIps || p.host.startsWith("id:")) continue
             val prev = byHost[p.host]
             if (prev == null || p.port > 0) byHost[p.host] = p
         }
-        currentPeer()?.let { byHost[it.host] = it }
+        currentPeer()?.let { p ->
+            if (p.host !in selfIps && !p.host.startsWith("id:")) byHost[p.host] = p
+        }
         val targets = byHost.values.filter { it.port > 0 }
         if (targets.isEmpty()) {
             Log.w(TAG, "sendGpsPoint: no peers yet lat=${pt.lat}")
