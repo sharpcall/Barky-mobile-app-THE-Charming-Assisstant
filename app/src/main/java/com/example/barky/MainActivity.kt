@@ -1331,14 +1331,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Self PiP ~1/9 screen **area** with correct camera aspect.
-     * Height = fullScreenH/3 (looks right); width = height / uprightAspect
-     * so portrait camera is not stretched (screenW/3 × screenH/3 was too skinny).
+     * Self PiP size (dp + aspect), not a tiny 1/9 box.
+     * Normal ~176dp wide; double-tap enlarge ~220dp (restored from earlier build).
+     * Height follows camera aspect so the picture is not stretched.
      */
     private fun pipSizePx(): Pair<Int, Int> {
-        val screenW = resources.displayMetrics.widthPixels.coerceAtLeast(1)
-        val screenH = resources.displayMetrics.heightPixels.coerceAtLeast(1)
-        val pipH = (screenH / 3).coerceAtLeast(1)
+        val density = resources.displayMetrics.density
+        val baseW = ((if (pipEnlarged) 220f else 176f) * density).toInt()
         val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
             val orient = previewDisplayOrient
             val uprightW: Float
@@ -1352,18 +1351,26 @@ class MainActivity : AppCompatActivity() {
             }
             (uprightH / uprightW).coerceIn(1.2f, 1.9f)
         } else {
-            4f / 3f // typical upright phone camera
+            4f / 3f
         }
-        var pipW = (pipH / uprightAspectHOverW).toInt().coerceAtLeast(1)
-        // Never wider than 1/3 of screen width
-        val maxW = (screenW / 3).coerceAtLeast(1)
+        var pipW = baseW
+        var pipH = (baseW * uprightAspectHOverW).toInt()
+        val parent = walkiePipBox.parent as? android.view.ViewGroup
+        val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
+        val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
+        val maxW = (parentW * (if (pipEnlarged) 0.50f else 0.42f)).toInt().coerceAtLeast(baseW)
+        val maxH = (parentH * (if (pipEnlarged) 0.55f else 0.45f)).toInt().coerceAtLeast(baseW)
         if (pipW > maxW) {
+            val s = maxW.toFloat() / pipW
             pipW = maxW
-            // keep aspect if we hit the width cap
-            val h2 = (pipW * uprightAspectHOverW).toInt().coerceAtLeast(1)
-            return pipW to h2.coerceAtMost(pipH)
+            pipH = (pipH * s).toInt()
         }
-        return pipW to pipH
+        if (pipH > maxH) {
+            val s = maxH.toFloat() / pipH
+            pipH = maxH
+            pipW = (pipW * s).toInt()
+        }
+        return pipW.coerceAtLeast(1) to pipH.coerceAtLeast(1)
     }
 
     private fun layoutFloatingPip(preservePosition: Boolean) {
@@ -1438,18 +1445,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Drag to move PiP. Tap (no drag) flips front/back camera — no flip button.
+     * Drag to move PiP.
+     * Single tap = flip camera. Double tap = enlarge / shrink (restored).
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindFloatingPip() {
         if (pipDragBound || !::walkiePipBox.isInitialized || !::walkiePreview.isInitialized) return
         pipDragBound = true
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        val doubleTapMs = 320L
         var downX = 0f
         var downY = 0f
         var startLeft = 0
         var startTop = 0
         var moved = false
+        var lastTapUpMs = 0L
         walkiePreview.isClickable = true
         walkiePreview.setOnTouchListener { _, event ->
             if (!isSeeing) return@setOnTouchListener false
@@ -1492,9 +1502,30 @@ class MainActivity : AppCompatActivity() {
                         pipLastTop = cur.topMargin
                     }
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
-                        // Tap self-picture → flip front/back (no separate flip button)
-                        walkieService?.switchCamera()
-                        Toast.makeText(this, R.string.walkie_flip_self_toast, Toast.LENGTH_SHORT).show()
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (now - lastTapUpMs <= doubleTapMs) {
+                            lastTapUpMs = 0L
+                            pipEnlarged = !pipEnlarged
+                            layoutFloatingPip(preservePosition = true)
+                            Toast.makeText(
+                                this,
+                                if (pipEnlarged) R.string.pip_enlarged else R.string.pip_normal,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            lastTapUpMs = now
+                            // Delay single-tap flip so double-tap can cancel
+                            walkiePreview.postDelayed({
+                                if (lastTapUpMs == now && isSeeing) {
+                                    walkieService?.switchCamera()
+                                    Toast.makeText(
+                                        this,
+                                        R.string.walkie_flip_self_toast,
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }, doubleTapMs)
+                        }
                     }
                     true
                 }

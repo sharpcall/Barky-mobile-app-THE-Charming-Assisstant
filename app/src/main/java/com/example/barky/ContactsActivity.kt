@@ -411,10 +411,14 @@ class ContactsActivity : AppCompatActivity() {
                 "Wi-Fi"
             )
         }
-        // Public path: require peer STUN port and never our public port
+        // Public path: require peer STUN port. Only hide exact self (same IP AND same mapped port).
+        // Bug was: selfPublicUdp<=0 treated every peer on our public IP as self → empty contacts
+        // on cellular / same-house NAT.
         if (!ep.publicIp.isNullOrBlank() && ep.publicUdpPort > 0) {
-            if (ep.publicIp == selfPublicIp &&
-                (selfPublicUdp <= 0 || ep.publicUdpPort == selfPublicUdp)
+            if (!selfPublicIp.isNullOrBlank() &&
+                ep.publicIp == selfPublicIp &&
+                selfPublicUdp > 0 &&
+                ep.publicUdpPort == selfPublicUdp
             ) {
                 return null
             }
@@ -446,8 +450,9 @@ class ContactsActivity : AppCompatActivity() {
     ): Boolean {
         if (host.isBlank()) return true
         if (host in selfLocalIps) return true
+        // Public STUN: same IP alone is not enough (shared CGNAT / home NAT). Need same mapped port.
         if (!selfPublicIp.isNullOrBlank() && host == selfPublicIp) {
-            if (selfPublicUdp <= 0 || udp <= 0 || udp == selfPublicUdp) return true
+            if (selfPublicUdp > 0 && udp > 0 && udp == selfPublicUdp) return true
         }
         return false
     }
@@ -478,22 +483,24 @@ class ContactsActivity : AppCompatActivity() {
         if (ep.localIp.isNullOrBlank() && ep.publicIp.isNullOrBlank()) return false
         // Any of our local IPs (Wi‑Fi or cellular CGNAT 25.x)
         if (!ep.localIp.isNullOrBlank() && ep.localIp in selfLocalIps) return false
-        // Exact self public endpoint
+        // Exact self public endpoint (IP + mapped UDP). Same public IP alone is NOT self.
         if (!selfPublicIp.isNullOrBlank() && ep.publicIp == selfPublicIp &&
-            (selfPublicUdp <= 0 || ep.publicUdpPort == selfPublicUdp || ep.publicUdpPort <= 0)
+            selfPublicUdp > 0 && ep.publicUdpPort == selfPublicUdp
         ) {
             return false
         }
-        // Same model + manufacturer + same public IP → almost certainly this phone
-        // (covers deviceId edge cases after reinstall / cache glitch)
+        // Same model + manufacturer only hide when also our LAN or exact STUN port
         val sameModel = ep.phoneModel.isNotBlank() &&
             ep.phoneModel.equals(selfSnap.model, ignoreCase = true)
         val sameMfr = ep.manufacturer.isNotBlank() &&
             ep.manufacturer.equals(selfSnap.manufacturer, ignoreCase = true)
         if (sameModel && sameMfr) {
-            if (!selfPublicIp.isNullOrBlank() && ep.publicIp == selfPublicIp) return false
             if (!ep.localIp.isNullOrBlank() && ep.localIp in selfLocalIps) return false
-            // Cellular: public may be null on both; still hide exact model twin with our local
+            if (!selfPublicIp.isNullOrBlank() && ep.publicIp == selfPublicIp &&
+                selfPublicUdp > 0 && ep.publicUdpPort == selfPublicUdp
+            ) {
+                return false
+            }
             if (ep.localIp.isNullOrBlank() && ep.publicIp.isNullOrBlank()) return false
         }
         if (ep.updatedAtMs > 0L && now - ep.updatedAtMs > TimeUnit.HOURS.toMillis(2)) return false

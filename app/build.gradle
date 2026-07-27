@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 93
-        versionName "5.53-see-restore-working"
+        versionCode 94
+        versionName "5.54-pip-contacts-cell"
     }
 
     compileOptions {
