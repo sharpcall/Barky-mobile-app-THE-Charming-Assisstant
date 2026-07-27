@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 88
-        versionName "5.48-pip-ninth-tapflip"
+        versionCode 89
+        versionName "5.49-mjpeg-max-pip9"
     }
 
     compileOptions {
