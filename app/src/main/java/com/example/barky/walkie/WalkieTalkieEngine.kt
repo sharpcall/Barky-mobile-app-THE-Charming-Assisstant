@@ -192,6 +192,9 @@ class WalkieTalkieEngine(
     /** When true, [videoOut] is hub TCP relay (public/cellular HD path). */
     @Volatile private var videoOutViaHub: Boolean = false
     @Volatile private var hubVideoDestId: String? = null
+    /** Throttle PATH_UPDATE bursts (cell↔wifi handoff was flooding + multi TCP reconnect races). */
+    @Volatile private var lastPathUpdateTxMs: Long = 0L
+    @Volatile private var lastRemapVideoReconnectMs: Long = 0L
     private var hubVideoInThread: Thread? = null
 
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -469,20 +472,19 @@ class WalkieTalkieEngine(
         thread(name = "walkie-path-change", isDaemon = true) {
             try {
                 Log.i(TAG, "onLocalPathChanged reason=$reason")
-                // Keep the pre-5.50 path (worked on cellular). Do not multi-path rebind / remap peer.
                 try {
-                    Thread.sleep(180)
+                    Thread.sleep(220)
                 } catch (_: InterruptedException) {
                     return@thread
                 }
-                // Re-register hub relay + STUN immediately (cellular ↔ wifi)
+                // Re-register hub relay + forced STUN (cell↔wifi needs a new public map)
                 if (!BarkyPrefs.isWifiOnly(appContext)) {
                     try {
                         BarkyUdpRelay.register(socket, DeviceIdentity.deviceId(appContext))
                     } catch (_: Throwable) {
                     }
                     try {
-                        refreshInternetInvite()
+                        refreshInternetInvite(force = true)
                     } catch (t: Throwable) {
                         Log.w(TAG, "STUN after path change", t)
                     }
@@ -492,34 +494,62 @@ class WalkieTalkieEngine(
                     }
                 }
                 val known = peers.values.toList()
-                // Aggressive burst so peer remaps before media stalls
-                repeat(14) {
-                    if (!running.get()) return@thread
+                val selfOnWifi = NetworkEndpoints.isWifi(appContext)
+                // When we leave Wi‑Fi, private peer hosts are dead — remap to public + relay
+                // before announcing PATH (wifi→cell handoff was still PATH_UPDATEing 192.168.x).
+                if (!selfOnWifi && !BarkyPrefs.isWifiOnly(appContext)) {
                     for (p in known) {
+                        if (!PeerEndpoint.isPrivateIp(p.host)) continue
                         try {
-                            sendHelloTo(p)
-                            sendPathUpdateTo(p)
-                            val poke = byteArrayOf(WalkieProtocol.TYPE_PING)
-                            sendUdp(
-                                DatagramPacket(
-                                    poke,
-                                    poke.size,
-                                    InetAddress.getByName(p.host),
-                                    p.port
+                            val targets = resolveControlTargets(p)
+                            if (!PeerEndpoint.isPrivateIp(targets.primary.host)) {
+                                applyPrimaryPeer(targets.primary)
+                                Log.i(
+                                    TAG,
+                                    "path change forcePublic remap ${p.host} → ${targets.primary.host}"
                                 )
-                            )
+                            }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "path change forcePublic remap", t)
+                        }
+                    }
+                }
+                // Short HELLO/PATH burst to multi-path targets (public first when off Wi‑Fi)
+                val announcePeers = peers.values.toList().ifEmpty { known }
+                repeat(3) {
+                    if (!running.get()) return@thread
+                    for (p in announcePeers) {
+                        try {
+                            val targets = try {
+                                resolveControlTargets(p)
+                            } catch (_: Throwable) {
+                                PeerReach.Targets(p, listOf(p), usedPublic = false, reason = "fallback")
+                            }
+                            for (t in targets.all) {
+                                sendHelloTo(t)
+                                sendPathUpdateTo(t, force = true)
+                                val poke = byteArrayOf(WalkieProtocol.TYPE_PING)
+                                sendUdp(
+                                    DatagramPacket(
+                                        poke,
+                                        poke.size,
+                                        InetAddress.getByName(t.host),
+                                        t.port
+                                    )
+                                )
+                            }
                         } catch (_: Throwable) {
                         }
                     }
                     try {
-                        Thread.sleep(35)
+                        Thread.sleep(80)
                     } catch (_: InterruptedException) {
                         return@thread
                     }
                 }
-                // Re-open video TCP for both LAN and hub — same dest as before (no peer remap)
+                // Re-open video TCP for both LAN and hub — live monitorTarget (may have remapped)
                 if (servingSee.get() || talking.get() || servingScreen.get()) {
-                    val dest = monitorTarget ?: bestLivePeer()
+                    val dest = monitorTarget ?: currentPeer() ?: bestLivePeer()
                     if (dest != null) {
                         closeVideoOut()
                         val ok = openVideoOut(dest)
@@ -530,9 +560,10 @@ class WalkieTalkieEngine(
                         )
                     }
                 }
-                // Viewer side: re-bind hub TCP IN so frames keep landing after Wi‑Fi↔cell
+                // Viewer side: force-drop stale hub socket then re-REG so frames land after Wi‑Fi↔cell
                 if (requestingSee.get() || requestingScreen.get()) {
                     try {
+                        closeVideoOut()
                         ensureHubVideoRxLink()
                         Log.i(TAG, "hub video IN re-bound after path change")
                     } catch (t: Throwable) {
@@ -552,7 +583,7 @@ class WalkieTalkieEngine(
                         }
                     }
                 }
-                // LISTEN serve: keep mic stream; request side re-burst so peer serves us again
+                // LISTEN request side re-burst so peer serves us on the new path
                 if (requestingListen.get()) {
                     val seed = currentPeer()
                     if (seed != null) {
@@ -937,7 +968,11 @@ class WalkieTalkieEngine(
         return publicHost to publicUdpPort
     }
 
-    private fun refreshInternetInvite() {
+    /**
+     * @param force true on NIC handoff (wifi↔cell) so PATH_UPDATE/Firebase get a fresh public map.
+     *   Still serialized under stunLock; brief control loss is better than a dead cellular port.
+     */
+    private fun refreshInternetInvite(force: Boolean = false) {
         val sock = socket
         if (sock == null || sock.isClosed) {
             postError("Internet mode: UDP socket not ready")
@@ -945,9 +980,12 @@ class WalkieTalkieEngine(
         }
         // Never steal the walkie socket during live sessions — STUN exclusive was
         // dropping LISTEN_REQ / RING / SEE control on the peer (cellular).
-        if (hasActiveMediaSession() || requestingListen.get() || requestingSee.get() ||
-            requestingScreen.get() || servingListen.get() || servingSee.get() ||
-            servingScreen.get() || talking.get() || ring.isRinging
+        // Exception: forced refresh after NIC change (wifi↔cellular handoff).
+        if (!force && (
+                hasActiveMediaSession() || requestingListen.get() || requestingSee.get() ||
+                    requestingScreen.get() || servingListen.get() || servingSee.get() ||
+                    servingScreen.get() || talking.get() || ring.isRinging
+                )
         ) {
             Log.i(
                 TAG,
@@ -961,7 +999,7 @@ class WalkieTalkieEngine(
         val mapAge = if (lastStunOkMs > 0L) now0 - lastStunOkMs else Long.MAX_VALUE
         val haveMap = !publicHost.isNullOrBlank() && publicUdpPort > 0
         val freshMs = if (onWifi) 45_000L else 30_000L
-        if (haveMap && mapAge < freshMs) {
+        if (!force && haveMap && mapAge < freshMs) {
             Log.i(
                 TAG,
                 "STUN skip fresh map age=${mapAge}ms keep last=$publicHost:$publicUdpPort wifi=$onWifi"
@@ -2088,6 +2126,9 @@ class WalkieTalkieEngine(
                     if (!replaying.get()) emitAvcAccessUnit(au, from, storeClip = false)
                 } else if (payload.size >= 2 && payload[0] == 0xFF.toByte() && payload[1] == 0xD8.toByte()) {
                     monitorVideoRxCount++
+                    if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
+                        Log.i(TAG, "SEE/SCRN_JPEG_HUB_TCP n=$monitorVideoRxCount bytes=${payload.size}")
+                    }
                     if (!replaying.get()) decodeAndEmit(payload, live = true)
                 }
             }
@@ -2191,7 +2232,12 @@ class WalkieTalkieEngine(
         return out
     }
 
-    private fun sendPathUpdateTo(peer: WalkiePeer) {
+    private fun sendPathUpdateTo(peer: WalkiePeer, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastPathUpdateTxMs < 900L) {
+            return
+        }
+        lastPathUpdateTxMs = now
         thread(name = "walkie-path-tx", isDaemon = true) {
             try {
                 val buf = buildPathUpdatePayload()
@@ -2358,22 +2404,32 @@ class WalkieTalkieEngine(
         }
         if (seeWatchPeer?.host == oldHost) seeWatchPeer = peer
         if (monitorTarget?.host == oldHost) monitorTarget = peer
+        // Keep host→deviceId for old public host so hub FWD still resolves during transition
+        if (!deviceId.isNullOrBlank() && oldHost.isNotBlank()) {
+            hostToDeviceId[oldHost] = deviceId
+        }
         postPeers()
         Log.i(TAG, "remapped peer $oldHost → $newHost:$udpPort (video=$videoPort) deviceId=$deviceId")
-        // Reconnect video if we were streaming to old host
-        if (servingSee.get() || talking.get()) {
-            thread(name = "walkie-remap-video", isDaemon = true) {
-                try {
-                    closeVideoOut()
-                    openVideoOut(peer)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "remap video reconnect", t)
+        // Debounced video reconnect (PATH burst used to spawn many parallel openVideoOut races)
+        if (servingSee.get() || talking.get() || servingScreen.get()) {
+            val now = System.currentTimeMillis()
+            if (now - lastRemapVideoReconnectMs > 400L) {
+                lastRemapVideoReconnectMs = now
+                thread(name = "walkie-remap-video", isDaemon = true) {
+                    try {
+                        Thread.sleep(60)
+                        val dest = monitorTarget ?: peer
+                        closeVideoOut()
+                        val ok = openVideoOut(dest)
+                        Log.i(TAG, "remap video reconnect ok=$ok → ${dest.host}")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "remap video reconnect", t)
+                    }
                 }
             }
         }
-        // Announce back so peer also has our path (bidirectional)
+        // HELLO only — never PATH_UPDATE back (that caused a flood loop on handoff)
         sendHelloTo(peer)
-        sendPathUpdateTo(peer)
         videoDebug("Peer path remapped $oldHost → $newHost:$udpPort")
     }
 
@@ -5474,30 +5530,48 @@ class WalkieTalkieEngine(
                         Log.w(TAG, "SEE cam error: $msg")
                     },
                     onAvcUnit = { au ->
+                        // Live dest after PATH remap (stale `peer` was logging old public IP mid-handoff)
+                        val dest = monitorTarget ?: peer
                         val viaTcp = sendVideoFrameTcp(au, avc = true)
                         if (viaTcp) tcpOk = true
-                        val ok = viaTcp || sendMonitorVideoAvcUdp(au, peer)
+                        val ok = viaTcp || sendMonitorVideoAvcUdp(au, dest)
                         if (ok) {
                             frames++
                             if (frames == 1 || frames % 30 == 0) {
                                 Log.i(
                                     TAG,
                                     "SEE_TX_AVC n=$frames bytes=${au.size} tcp=$viaTcp " +
-                                        "hub=$videoOutViaHub → ${peer.host}"
+                                        "hub=$videoOutViaHub → ${dest.host}"
                                 )
                             }
                         }
                     },
                     onJpegFrame = { jpeg ->
-                        val viaTcp = sendVideoFrameTcp(jpeg)
-                        val ok = viaTcp || sendMonitorVideoUdp(jpeg, peer)
+                        var dest = monitorTarget ?: peer
+                        var viaTcp = sendVideoFrameTcp(jpeg)
+                        // After peer wifi→cell, LAN TCP dies — re-open via hub using live dest
+                        if (!viaTcp && PeerEndpoint.isPrivateIp(dest.host)) {
+                            try {
+                                val targets = resolveControlTargets(dest)
+                                if (!PeerEndpoint.isPrivateIp(targets.primary.host)) {
+                                    dest = targets.primary
+                                    monitorTarget = dest
+                                    closeVideoOut()
+                                    viaTcp = openVideoOut(dest) && sendVideoFrameTcp(jpeg)
+                                    Log.i(TAG, "SEE_TX failover private→public ${targets.primary.host} ok=$viaTcp")
+                                }
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "SEE_TX failover", t)
+                            }
+                        }
+                        val ok = viaTcp || sendMonitorVideoUdp(jpeg, dest)
                         if (ok) {
                             frames++
                             if (frames == 1 || frames % 30 == 0) {
                                 Log.i(
                                     TAG,
                                     "SEE_TX_JPEG n=$frames bytes=${jpeg.size} tcp=$viaTcp " +
-                                        "hub=$videoOutViaHub → ${peer.host}"
+                                        "hub=$videoOutViaHub → ${dest.host}"
                                 )
                             }
                         }
