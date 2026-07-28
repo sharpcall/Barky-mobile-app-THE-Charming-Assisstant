@@ -18,8 +18,8 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 100
-        versionName "5.60-handoff-w2c-public"
+        versionCode 101
+        versionName "5.61-pip-fill-no-letterbox"
     }
 
     compileOptions {

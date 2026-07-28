@@ -1606,16 +1606,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Center-crop TextureView into the PiP box so proportions stay natural (no stretch).
-     * Box size already matches upright camera aspect; transform fills without squashing.
+     * Fill PiP TextureView with camera (center-crop). No black bars on right/bottom.
+     *
+     * TextureView's matrix is relative to the default "stretch texture to fill view"
+     * mapping — NOT absolute buffer-pixel → view-pixel. Using absolute scales left the
+     * preview under-sized (dark purple letterbox on right + bottom).
      */
     private fun applyNaturalPreviewTransform() {
         if (!::walkiePreview.isInitialized) return
         val viewWidth = walkiePreview.width
         val viewHeight = walkiePreview.height
-        if (viewWidth <= 0 || viewHeight <= 0 || previewBufW <= 0 || previewBufH <= 0) return
+        if (viewWidth <= 0 || viewHeight <= 0) return
+        if (previewBufW <= 0 || previewBufH <= 0) {
+            // Fill box until geometry arrives (identity = full stretch into pip)
+            walkiePreview.setTransform(Matrix())
+            return
+        }
         val orient = previewDisplayOrient
-        // Buffer size as presented after setDisplayOrientation
+        // Upright buffer after camera displayOrientation
         val bufW: Float
         val bufH: Float
         if (orient % 180 == 0) {
@@ -1626,26 +1634,21 @@ class MainActivity : AppCompatActivity() {
             bufH = previewBufW.toFloat()
         }
         val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
-        val bufAspect = bufW / bufH
-        val scale: Float
-        val dx: Float
-        val dy: Float
+        val bufAspect = (bufW / bufH).coerceAtLeast(0.01f)
+        // Relative to default fill: scale up the short axis so we crop, never letterbox
+        val scaleX: Float
+        val scaleY: Float
         if (bufAspect > viewAspect) {
-            // Buffer wider than view → match height, crop sides
-            scale = viewHeight / bufH
-            dx = (viewWidth - bufW * scale) * 0.5f
-            dy = 0f
+            // Camera wider than box → grow X, crop left/right
+            scaleX = bufAspect / viewAspect
+            scaleY = 1f
         } else {
-            // Buffer taller than view → match width, crop top/bottom
-            scale = viewWidth / bufW
-            dx = 0f
-            dy = (viewHeight - bufH * scale) * 0.5f
+            // Camera taller than box → grow Y, crop top/bottom
+            scaleX = 1f
+            scaleY = viewAspect / bufAspect
         }
         val matrix = Matrix()
-        // Map sensor buffer (pre-orientation) into view; TextureView already has displayOrientation on camera
-        // Camera1 feeds TextureView in display orientation, so buffer is upright-sized as bufW×bufH
-        matrix.setScale(scale, scale)
-        matrix.postTranslate(dx, dy)
+        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
         walkiePreview.setTransform(matrix)
     }
 
