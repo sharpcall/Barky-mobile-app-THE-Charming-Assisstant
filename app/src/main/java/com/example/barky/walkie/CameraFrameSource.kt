@@ -43,12 +43,19 @@ data class CaptureConfig(
             jpegQuality = 70,
             maxBytesTcp = 80_000
         )
-        /** SEE: known-good compact MJPEG (cellular hub + LAN TCP). */
+        /** SEE over cellular/hub: compact MJPEG (known-good on CGNAT). */
         val SeeLive = CaptureConfig(
             minIntervalMs = WalkieProtocol.SEE_VIDEO_MIN_INTERVAL_MS,
             maxEdge = WalkieProtocol.SEE_VIDEO_MAX_EDGE,
             jpegQuality = WalkieProtocol.SEE_VIDEO_JPEG_QUALITY,
             maxBytesTcp = 120_000
+        )
+        /** SEE over same-LAN TCP: sharper full-screen (no hub size pressure). */
+        val SeeLan = CaptureConfig(
+            minIntervalMs = WalkieProtocol.SEE_VIDEO_MIN_INTERVAL_MS,
+            maxEdge = WalkieProtocol.SEE_LAN_MAX_EDGE,
+            jpegQuality = WalkieProtocol.SEE_LAN_JPEG_QUALITY,
+            maxBytesTcp = WalkieProtocol.SEE_LAN_MAX_BYTES_TCP
         )
         /** Local record-only path: denser frames, sharper JPEGs (no network pressure while capturing). */
         val BestRecord = CaptureConfig(
@@ -308,7 +315,12 @@ class CameraFrameSource(
             }
         }
         cam.startPreview()
-        Log.i(TAG, "preview ${size.width}x${size.height} front=$facingFront interval=${config.minIntervalMs}ms q=${config.jpegQuality}")
+        Log.i(
+            TAG,
+            "preview ${size.width}x${size.height} front=$facingFront " +
+                "interval=${config.minIntervalMs}ms maxEdge=${config.maxEdge} " +
+                "q=${config.jpegQuality} maxBytesTcp=${config.maxBytesTcp}"
+        )
         onError("Camera OK ${size.width}x${size.height} (MJPEG encode thread)")
     }
 

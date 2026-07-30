@@ -106,6 +106,11 @@ class SeeCameraSession(
     private val isActive: () -> Boolean,
     private val isTcpConnected: () -> Boolean,
     private val useAvc: Boolean,
+    /**
+     * True when peer is on private LAN (direct TCP). Uses sharper JPEG encode.
+     * False for public/cellular hub path (compact encode).
+     */
+    private val lanQuality: Boolean = false,
     /** Optional UI TextureView surface so local self-PiP shows while serving SEE. */
     private val externalSurfaceTexture: () -> android.graphics.SurfaceTexture? = { null },
     private val onPreviewReady: (w: Int, h: Int, orient: Int, front: Boolean) -> Unit = { _, _, _, _ -> },
@@ -160,12 +165,21 @@ class SeeCameraSession(
         }
         encoder = enc
 
-        // AVC uses full Live capture; JPEG SEE path optimised for low latency (~30 fps)
+        // AVC uses full Live capture; JPEG: LAN sharp (SeeLan), hub/cellular compact (SeeLive)
         val captureConfig = if (enc != null && enc.isReady()) {
             CaptureConfig.Live
+        } else if (lanQuality) {
+            CaptureConfig.SeeLan
         } else {
             CaptureConfig.SeeLive
         }
+        // Proof line for logcat: LAN → maxEdge=720 q=80; hub/cell → 480 q=62
+        Log.i(
+            TAG,
+            "SEE capture ${if (lanQuality) "LAN 720@q80" else "hub/cell 480@q62"} " +
+                "lanQuality=$lanQuality maxEdge=${captureConfig.maxEdge} " +
+                "q=${captureConfig.jpegQuality} maxBytes=${captureConfig.maxBytesTcp} avc=${enc != null}"
+        )
         val cam = if (enc != null && enc.isReady()) {
             val readyEnc = enc
             CameraFrameSource(

@@ -195,6 +195,7 @@ class WalkieTalkieEngine(
     /** Throttle PATH_UPDATE bursts (cell↔wifi handoff was flooding + multi TCP reconnect races). */
     @Volatile private var lastPathUpdateTxMs: Long = 0L
     @Volatile private var lastRemapVideoReconnectMs: Long = 0L
+    @Volatile private var lastSeeTxEnsureMs: Long = 0L
     private var hubVideoInThread: Thread? = null
 
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -1980,26 +1981,33 @@ class WalkieTalkieEngine(
 
     /** @return true if TCP video out is connected */
     private fun openVideoOut(peer: WalkiePeer): Boolean {
+        val wantHub = !PeerEndpoint.isPrivateIp(peer.host) && BarkyHubConfig.relayEnabled
         if (synchronized(videoOutLock) {
                 videoOut != null && videoOutSocket?.isConnected == true &&
                     (!videoOutViaHub || hubVideoDestId != null)
             }
         ) {
             // Hub link may already be open; refresh dest id for this peer
-            if (videoOutViaHub) {
+            if (videoOutViaHub && wantHub) {
                 val destId = hostToDeviceId[peer.host]
                     ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
                 if (!destId.isNullOrBlank()) {
                     hubVideoDestId = destId
                     return true
                 }
-            } else {
+            } else if (!videoOutViaHub && !wantHub) {
+                // LAN socket still correct for private peer
                 return true
             }
+            // Mismatch (LAN socket but public peer after wifi→cell handoff) — fall through reopen
+            Log.i(
+                TAG,
+                "openVideoOut path mismatch hubHave=$videoOutViaHub wantHub=$wantHub peer=${peer.host}"
+            )
         }
         closeVideoOut()
         // Public / cellular: outbound TCP to hub (CGNAT-safe HD H.264)
-        if (!PeerEndpoint.isPrivateIp(peer.host) && BarkyHubConfig.relayEnabled) {
+        if (wantHub) {
             return openHubVideoOut(peer)
         }
         val learned = learnedVideoPorts[peer.host]
@@ -2410,27 +2418,120 @@ class WalkieTalkieEngine(
         }
         postPeers()
         Log.i(TAG, "remapped peer $oldHost → $newHost:$udpPort (video=$videoPort) deviceId=$deviceId")
-        // Debounced video reconnect (PATH burst used to spawn many parallel openVideoOut races)
-        if (servingSee.get() || talking.get() || servingScreen.get()) {
-            val now = System.currentTimeMillis()
-            if (now - lastRemapVideoReconnectMs > 400L) {
-                lastRemapVideoReconnectMs = now
-                thread(name = "walkie-remap-video", isDaemon = true) {
-                    try {
-                        Thread.sleep(60)
-                        val dest = monitorTarget ?: peer
-                        closeVideoOut()
-                        val ok = openVideoOut(dest)
-                        Log.i(TAG, "remap video reconnect ok=$ok → ${dest.host}")
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "remap video reconnect", t)
-                    }
-                }
-            }
-        }
+        // Always schedule reconnect — guard is inside after sleep. Do not require servingSee
+        // here: PATH can race the serve flag, and a dead LAN socket freezes the picture.
+        Log.i(
+            TAG,
+            "remap schedule video reopen servingSee=${servingSee.get()} " +
+                "talk=${talking.get()} scrn=${servingScreen.get()}"
+        )
+        scheduleSeeVideoReconnect("remap:$oldHost->$newHost")
         // HELLO only — never PATH_UPDATE back (that caused a flood loop on handoff)
         sendHelloTo(peer)
         videoDebug("Peer path remapped $oldHost → $newHost:$udpPort")
+    }
+
+    /**
+     * Single-flight reconnect of SEE/talk video TCP after path handoff.
+     * Must work for LAN→public (hub) without re-selecting contact or stopping SEE.
+     */
+    private fun scheduleSeeVideoReconnect(reason: String) {
+        val now = System.currentTimeMillis()
+        // Allow one reconnect every 250ms (PATH burst may fire 2–3 remaps)
+        if (now - lastRemapVideoReconnectMs < 250L) {
+            Log.i(TAG, "see video reconnect coalesce reason=$reason")
+            return
+        }
+        lastRemapVideoReconnectMs = now
+        Log.i(TAG, "see video reconnect scheduled reason=$reason")
+        thread(name = "walkie-see-video-reopen", isDaemon = true) {
+            try {
+                Thread.sleep(120)
+                if (!running.get()) {
+                    Log.i(TAG, "see video reconnect abort not running reason=$reason")
+                    return@thread
+                }
+                // Wait briefly for serve flag if PATH arrived a tick early
+                var waits = 0
+                while (!servingSee.get() && !talking.get() && !servingScreen.get() && waits < 10) {
+                    Thread.sleep(100)
+                    waits++
+                }
+                if (!servingSee.get() && !talking.get() && !servingScreen.get()) {
+                    Log.i(TAG, "see video reconnect skip no active serve reason=$reason")
+                    return@thread
+                }
+                val dest = monitorTarget ?: currentPeer()
+                if (dest == null) {
+                    Log.w(TAG, "see video reconnect no dest reason=$reason")
+                    return@thread
+                }
+                closeVideoOut()
+                val ok = openVideoOut(dest)
+                Log.i(
+                    TAG,
+                    "see video reconnect reason=$reason ok=$ok host=${dest.host} " +
+                        "hub=$videoOutViaHub destId=${hubVideoDestId?.take(12)}"
+                )
+                if (!ok) {
+                    Thread.sleep(500)
+                    val dest2 = monitorTarget ?: currentPeer() ?: return@thread
+                    closeVideoOut()
+                    val ok2 = openVideoOut(dest2)
+                    Log.i(
+                        TAG,
+                        "see video reconnect retry ok=$ok2 host=${dest2.host} hub=$videoOutViaHub"
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "see video reconnect", t)
+            }
+        }
+    }
+
+    /**
+     * Serve-side: if TCP send fails mid-SEE (wifi off on peer), reopen to live dest.
+     * Works whether dest is still private (resolve public) or already remapped public.
+     * Throttled so a dead path does not open/close hub every JPEG frame.
+     */
+    private fun ensureSeeTxPath(preferred: WalkiePeer): Pair<WalkiePeer, Boolean> {
+        val now = System.currentTimeMillis()
+        var dest = monitorTarget ?: preferred
+        // Prefer public if we are serving and peer left the LAN
+        if (PeerEndpoint.isPrivateIp(dest.host)) {
+            try {
+                val targets = resolveControlTargets(dest)
+                if (!PeerEndpoint.isPrivateIp(targets.primary.host)) {
+                    dest = targets.primary
+                    monitorTarget = dest
+                    Log.i(TAG, "SEE_TX path upgrade private→public ${dest.host}")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "SEE_TX resolve", t)
+            }
+        }
+        // Public dest must ride hub — do not treat a lingering LAN socket as "still up"
+        val wantHub = !PeerEndpoint.isPrivateIp(dest.host) && BarkyHubConfig.relayEnabled
+        // Reuse in-flight reconnect if we just opened the correct path
+        if (now - lastSeeTxEnsureMs < 300L) {
+            val stillUpCorrect = synchronized(videoOutLock) {
+                videoOut != null &&
+                    videoOutSocket?.isConnected == true &&
+                    videoOutViaHub == wantHub
+            }
+            if (stillUpCorrect) {
+                return dest to true
+            }
+        }
+        lastSeeTxEnsureMs = now
+        closeVideoOut()
+        val ok = openVideoOut(dest)
+        Log.i(
+            TAG,
+            "SEE_TX ensure path ok=$ok → ${dest.host} hub=$videoOutViaHub " +
+                "public=${!PeerEndpoint.isPrivateIp(dest.host)} wantHub=$wantHub"
+        )
+        return dest to ok
     }
 
     private fun handleHello(data: ByteArray, fromHost: String, fromUdpPort: Int) {
@@ -2546,23 +2647,34 @@ class WalkieTalkieEngine(
     }
 
     private fun closeVideoOut() {
+        // Clear under lock, close I/O outside — never block handoff on a stalled LAN write/flush
+        val out: java.io.DataOutputStream?
+        val sock: java.net.Socket?
         synchronized(videoOutLock) {
-            try {
-                videoOut?.flush()
-            } catch (_: Exception) {
-            }
-            try {
-                videoOut?.close()
-            } catch (_: Exception) {
-            }
-            try {
-                videoOutSocket?.close()
-            } catch (_: Exception) {
-            }
+            out = videoOut
+            sock = videoOutSocket
             videoOut = null
             videoOutSocket = null
             videoOutViaHub = false
             hubVideoDestId = null
+        }
+        // Abortive close: SO_LINGER 0 sends RST. A graceful close() to a peer that left Wi‑Fi
+        // can block for tens of seconds and freezes mid-SEE handoff reconnect.
+        try {
+            sock?.setSoLinger(true, 0)
+        } catch (_: Exception) {
+        }
+        try {
+            sock?.shutdownOutput()
+        } catch (_: Exception) {
+        }
+        try {
+            out?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            sock?.close()
+        } catch (_: Exception) {
         }
     }
 
@@ -2621,52 +2733,49 @@ class WalkieTalkieEngine(
         }
     }
 
-    /** @return true if sent on TCP (JPEG or H.264 access unit). */
+    /**
+     * @return true if sent on TCP (JPEG or H.264 access unit).
+     * I/O is outside [videoOutLock] so a stalled write to a dead LAN peer cannot
+     * deadlock handoff reconnect ([closeVideoOut] / openHub).
+     */
     private fun sendVideoFrameTcp(payload: ByteArray, avc: Boolean = false): Boolean {
+        val out: DataOutputStream
+        val viaHub: Boolean
+        val destId: String?
         synchronized(videoOutLock) {
-            val out = videoOut ?: return false
-            return try {
-                val body = if (avc) {
-                    // body = [0x01][access unit] ; length includes codec byte
-                    ByteArray(1 + payload.size).also {
-                        it[0] = WalkieProtocol.TCP_CODEC_AVC
-                        System.arraycopy(payload, 0, it, 1, payload.size)
-                    }
-                } else {
-                    payload
+            out = videoOut ?: return false
+            viaHub = videoOutViaHub
+            destId = hubVideoDestId
+        }
+        return try {
+            val body = if (avc) {
+                // body = [0x01][access unit] ; length includes codec byte
+                ByteArray(1 + payload.size).also {
+                    it[0] = WalkieProtocol.TCP_CODEC_AVC
+                    System.arraycopy(payload, 0, it, 1, payload.size)
                 }
-                if (videoOutViaHub) {
-                    val dest = hubVideoDestId
-                    if (dest.isNullOrBlank()) return false
-                    val destBytes = dest.toByteArray(Charsets.UTF_8)
-                    out.write(0x02)
-                    out.write(destBytes.size)
-                    out.write(destBytes)
-                    out.writeInt(body.size)
-                    out.write(body)
-                } else {
-                    out.writeInt(body.size)
-                    out.write(body)
-                }
-                out.flush()
-                true
-            } catch (t: Throwable) {
-                lastVideoError = "TCP send: ${t.javaClass.simpleName}: ${t.message}"
-                Log.w(TAG, lastVideoError, t)
-                try {
-                    videoOut?.close()
-                } catch (_: Exception) {
-                }
-                try {
-                    videoOutSocket?.close()
-                } catch (_: Exception) {
-                }
-                videoOut = null
-                videoOutSocket = null
-                videoOutViaHub = false
-                hubVideoDestId = null
-                false
+            } else {
+                payload
             }
+            if (viaHub) {
+                if (destId.isNullOrBlank()) return false
+                val destBytes = destId.toByteArray(Charsets.UTF_8)
+                out.write(0x02)
+                out.write(destBytes.size)
+                out.write(destBytes)
+                out.writeInt(body.size)
+                out.write(body)
+            } else {
+                out.writeInt(body.size)
+                out.write(body)
+            }
+            out.flush()
+            true
+        } catch (t: Throwable) {
+            lastVideoError = "TCP send: ${t.javaClass.simpleName}: ${t.message}"
+            Log.w(TAG, lastVideoError, t)
+            closeVideoOut()
+            false
         }
     }
 
@@ -5495,13 +5604,17 @@ class WalkieTalkieEngine(
                 if (publicPeer) {
                     holePunchPeer(peer, rounds = 4)
                 }
-                // Public: hub TCP video (HD H.264). LAN: direct TCP. UDP fallback both.
+                // Public: hub TCP video. LAN private: direct TCP. UDP fallback both.
                 var tcpOk = openVideoOut(peer)
                 val useAvc = peerWantsAvc(peer.host)
+                // Private peer → SeeLan 720@q80 (sharp Wi‑Fi). Public/hub → SeeLive 480@q62.
+                // Never set true on hub path: videoOutViaHub implies public peer + compact.
+                val lanQuality = !publicPeer && !videoOutViaHub
                 Log.i(
                     TAG,
                     "SEE serve video start → ${peer.host}:${peer.port} public=$publicPeer " +
-                        "tcp=$tcpOk hubTcp=$videoOutViaHub avc=$useAvc vport=${peer.videoPort}"
+                        "lanQuality=$lanQuality tcp=$tcpOk hubTcp=$videoOutViaHub " +
+                        "avc=$useAvc vport=${peer.videoPort}"
                 )
                 if (useAvc) {
                     videoDebug(
@@ -5510,13 +5623,18 @@ class WalkieTalkieEngine(
                         else "TX video codec=H.264/AVC 640x480"
                     )
                 } else {
-                    videoDebug("TX video codec=MJPEG")
+                    videoDebug(
+                        if (lanQuality) "TX video codec=MJPEG LAN 720@q80"
+                        else "TX video codec=MJPEG hub/cell 480@q62"
+                    )
                 }
                 val seeSession = SeeCameraSession(
                     context = appContext,
                     isActive = { servingSee.get() },
                     isTcpConnected = { synchronized(videoOutLock) { videoOut != null } },
                     useAvc = useAvc,
+                    // SeeLan only for private-peer direct TCP (not cellular hub)
+                    lanQuality = lanQuality,
                     // Dummy surface unless we also watch (PiP). Idle TextureView is GONE after solid-stage
                     // and a dead SurfaceTexture kills Camera1 open → no video both ways.
                     externalSurfaceTexture = {
@@ -5530,9 +5648,13 @@ class WalkieTalkieEngine(
                         Log.w(TAG, "SEE cam error: $msg")
                     },
                     onAvcUnit = { au ->
-                        // Live dest after PATH remap (stale `peer` was logging old public IP mid-handoff)
-                        val dest = monitorTarget ?: peer
-                        val viaTcp = sendVideoFrameTcp(au, avc = true)
+                        var dest = monitorTarget ?: peer
+                        var viaTcp = sendVideoFrameTcp(au, avc = true)
+                        if (!viaTcp) {
+                            val ensured = ensureSeeTxPath(dest)
+                            dest = ensured.first
+                            viaTcp = ensured.second && sendVideoFrameTcp(au, avc = true)
+                        }
                         if (viaTcp) tcpOk = true
                         val ok = viaTcp || sendMonitorVideoAvcUdp(au, dest)
                         if (ok) {
@@ -5548,30 +5670,24 @@ class WalkieTalkieEngine(
                     },
                     onJpegFrame = { jpeg ->
                         var dest = monitorTarget ?: peer
-                        var viaTcp = sendVideoFrameTcp(jpeg)
-                        // After peer wifi→cell, LAN TCP dies — re-open via hub using live dest
-                        if (!viaTcp && PeerEndpoint.isPrivateIp(dest.host)) {
-                            try {
-                                val targets = resolveControlTargets(dest)
-                                if (!PeerEndpoint.isPrivateIp(targets.primary.host)) {
-                                    dest = targets.primary
-                                    monitorTarget = dest
-                                    closeVideoOut()
-                                    viaTcp = openVideoOut(dest) && sendVideoFrameTcp(jpeg)
-                                    Log.i(TAG, "SEE_TX failover private→public ${targets.primary.host} ok=$viaTcp")
-                                }
-                            } catch (t: Throwable) {
-                                Log.w(TAG, "SEE_TX failover", t)
-                            }
+                        // Public dest must use hub — never keep writing a dead LAN socket after handoff
+                        val mustHub = !PeerEndpoint.isPrivateIp(dest.host)
+                        val wrongPath = mustHub && !videoOutViaHub
+                        var viaTcp = if (wrongPath) false else sendVideoFrameTcp(jpeg)
+                        if (!viaTcp) {
+                            val ensured = ensureSeeTxPath(dest)
+                            dest = ensured.first
+                            viaTcp = ensured.second && sendVideoFrameTcp(jpeg)
                         }
                         val ok = viaTcp || sendMonitorVideoUdp(jpeg, dest)
                         if (ok) {
                             frames++
                             if (frames == 1 || frames % 30 == 0) {
+                                // LAN SeeLan ~50–70KB; cell SeeLive ~15–25KB
                                 Log.i(
                                     TAG,
                                     "SEE_TX_JPEG n=$frames bytes=${jpeg.size} tcp=$viaTcp " +
-                                        "hub=$videoOutViaHub → ${dest.host}"
+                                        "hub=$videoOutViaHub lanQuality=$lanQuality host=${dest.host}"
                                 )
                             }
                         }
