@@ -466,6 +466,9 @@ class WalkieTalkieService : Service() {
         override fun run() {
             try {
                 pushFirebaseRegistration(reason = "heartbeat")
+                // Periodically check Firebase _meta/app_update (throttled inside ApkSelfUpdate)
+                // so phones on cellular or Wi-Fi self-update hands-free when a new release is published.
+                ApkSelfUpdate.checkAsync(this@WalkieTalkieService, force = false)
                 // Cellular: keep STUN mapping warm in background
                 if (!BarkyPrefs.isWifiOnly(this@WalkieTalkieService) &&
                     !NetworkEndpoints.isWifi(this@WalkieTalkieService)
@@ -720,6 +723,11 @@ class WalkieTalkieService : Service() {
                 val ok = engine?.connectViaInvite(code) == true
                 Log.i(TAG, "CONNECT_INVITE ok=$ok codeLen=${code.length}")
             }
+            ACTION_CHECK_UPDATE -> {
+                // Force an immediate Firebase _meta/app_update check + hands-free install via ADB/intent.
+                Log.i(TAG, "CHECK_UPDATE via adb/intent (force=true)")
+                ApkSelfUpdate.checkAsync(this, force = true)
+            }
             ACTION_FIREBASE_LIST -> {
                 Log.i(TAG, "FIREBASE_LIST via adb")
                 pushFirebaseRegistration(reason = "adb_list")
@@ -728,15 +736,59 @@ class WalkieTalkieService : Service() {
                 } catch (_: Throwable) {
                     null
                 }
+                val myVc = ApkSelfUpdate.myVersionCode(this)
+                val selfNet = NetworkEndpoints.snapshot(this)
                 FirebasePeerDirectory.listAllAsync(this, self) { list ->
                     Log.i(TAG, "FIREBASE_LIST count=${list.size}")
+                    var newestRemoteVc = 0
                     list.forEach { ep ->
+                        if (ep.versionCode > newestRemoteVc) newestRemoteVc = ep.versionCode
                         Log.i(
                             TAG,
                             "FIREBASE_PEER ${ep.displayName} id=${ep.deviceId.take(12)} " +
                                 "local=${ep.localIp}:${ep.localUdpPort} public=${ep.publicIp}:${ep.publicUdpPort} " +
+                                "video=${ep.localVideoPort} fullId=${ep.deviceId} vc=${ep.versionCode} " +
                                 "android=${ep.androidVersion} app=${ep.appVersion}"
                         )
+                    }
+                    // If a peer in Firebase is running a newer versionCode, trigger immediate self-update.
+                    if (newestRemoteVc > myVc && myVc > 0) {
+                        Log.i(TAG, "Peer has newer versionCode=$newestRemoteVc (mine=$myVc) — triggering self-update")
+                        ApkSelfUpdate.checkAsync(this@WalkieTalkieService, force = true)
+                    }
+                    // If no peer is currently discovered (e.g. on cellular where NSD multicast is unavailable),
+                    // auto-adopt the freshest reachable peer from Firebase so tests & calls work over cellular.
+                    val eng = engine
+                    if (eng != null && eng.getPeers().isEmpty()) {
+                        val candidate = list.firstOrNull { ep ->
+                            (!ep.publicIp.isNullOrBlank() && ep.publicUdpPort > 0) ||
+                                (!ep.localIp.isNullOrBlank() && ep.localUdpPort > 0)
+                        }
+                        if (candidate != null) {
+                            val preferLan = NetworkEndpoints.preferLanPath(
+                                selfNet,
+                                candidate.localIp,
+                                candidate.wifiHint,
+                                liveLanHello = false
+                            )
+                            val host = candidate.preferredHost(preferLan)
+                            val udp = candidate.preferredUdpPort(preferLan)
+                            val vport = if (candidate.localVideoPort > 0) candidate.localVideoPort else udp
+                            if (!host.isNullOrBlank() && udp > 0) {
+                                Log.i(
+                                    TAG,
+                                    "FIREBASE_LIST auto-adopt cellular/directory peer " +
+                                        "${candidate.displayName} → $host:$udp vport=$vport id=${candidate.deviceId.take(12)}"
+                                )
+                                eng.adoptDirectoryPeer(
+                                    displayName = ContactLabels.fromEndpoint(candidate),
+                                    host = host,
+                                    udpPort = udp,
+                                    videoPort = vport,
+                                    deviceId = candidate.deviceId
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1006,6 +1058,8 @@ class WalkieTalkieService : Service() {
         const val ACTION_APPLY_NETWORK_MODE = "com.example.barky.APPLY_NETWORK_MODE"
         const val ACTION_CONNECT_INVITE = "com.example.barky.CONNECT_INVITE"
         const val ACTION_FIREBASE_LIST = "com.example.barky.FIREBASE_LIST"
+        /** Adb/service action to immediately check Firebase `_meta/app_update` and self-install. */
+        const val ACTION_CHECK_UPDATE = "com.example.barky.CHECK_UPDATE"
         const val ACTION_TEST_SCRN = "com.example.barky.TEST_SCRN"
         /** Adb test actions for SCRN start/stop and remote touch/keyboard control verification. */
         const val ACTION_TEST_SCRN_START = "com.example.barky.TEST_SCRN_START"

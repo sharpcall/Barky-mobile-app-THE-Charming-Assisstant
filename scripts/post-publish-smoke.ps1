@@ -1,4 +1,5 @@
 # A-Z post-publish checks for Barky, including duration comparison TX vs RX.
+# Uses fast logcat polling loops and supports both Wi-Fi and Cellular peer discovery.
 param(
     [string]$Package = "com.example.barky",
     [string]$Activity = "com.example.barky/.MainActivity",
@@ -18,6 +19,16 @@ function Adb-Svc([string]$serial, [string]$action, [string[]]$extraArgs = @()) {
     if ($LASTEXITCODE -ne 0) {
         $cmd = @("-s", $serial, "shell", "am", "startservice", "-n", $Service, "-a", $action) + $extraArgs
         & $adb @cmd 2>$null
+    }
+}
+
+# Fast logcat polling helper: returns as soon as $pat matches on $serial or after $timeoutSec.
+function Wait-DeviceLog([string]$serial, [string]$pat, [double]$timeoutSec = 6.0) {
+    $dl = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $dl) {
+        $l = & $adb -s $serial logcat -d -v time 2>$null
+        if (($l | Where-Object { $_ -match $pat } | Select-Object -First 1) -ne $null) { return }
+        Start-Sleep -Milliseconds 250
     }
 }
 
@@ -73,8 +84,23 @@ foreach ($s in $devices) {
     & $adb -s $s shell am start -n $Activity | Out-Null
 }
 
-Write-Output "Waiting ${WaitSeconds}s for HELLO / peer link..."
-Start-Sleep -Seconds $WaitSeconds
+Write-Output "Polling up to ${WaitSeconds}s for HELLO / Firebase peer link..."
+$linkDl = (Get-Date).AddSeconds([math]::Min(3.5, $WaitSeconds))
+$linked = $false
+while ((Get-Date) -lt $linkDl) {
+    $allOk = $true
+    foreach ($s in $devices) {
+        $l = & $adb -s $s logcat -d -v time 2>$null
+        if (-not ($l | Where-Object { $_ -match "HELLO from" } | Select-Object -First 1)) { $allOk = $false }
+    }
+    if ($allOk) { $linked = $true; break }
+    Start-Sleep -Milliseconds 250
+}
+if (-not $linked) {
+    # Fallback to Firebase directory peer auto-adoption for cellular / cross-subnet setups.
+    foreach ($s in $devices) { Adb-Svc $s "com.example.barky.FIREBASE_LIST" }
+    Wait-DeviceLog $devices[0] "HELLO from|adoptDirectoryPeer" ([math]::Max(2.0, $WaitSeconds - 3.5))
+}
 
 if ($devices.Count -ge 1) {
     $tx = $devices[0]
@@ -85,21 +111,25 @@ if ($devices.Count -ge 1) {
         Write-Output "=== Enable BEST quality on TX ==="
         Adb-Svc $tx "com.example.barky.SET_BEST_QUALITY" @("--ez", "best", "true")
     } else {
+        Write-Output "=== Disable BEST quality on TX (LIVE) ==="
         Adb-Svc $tx "com.example.barky.SET_BEST_QUALITY" @("--ez", "best", "false")
     }
-    Start-Sleep -Seconds 1
+    Wait-DeviceLog $tx "SET_BEST_QUALITY=" 1.5
 
     Write-Output "=== AUTO VIDEO TEST: TX=$txModel hold ${TalkSeconds}s mode=$modeLabel ==="
     Adb-Svc $tx "com.example.barky.TEST_TALK_START"
     Start-Sleep -Seconds $TalkSeconds
     Adb-Svc $tx "com.example.barky.TEST_TALK_STOP"
-    $settle = if ($BestQuality) { 8 } else { 4 }
-    Write-Output "Waiting ${settle}s for send/receive settle..."
-    Start-Sleep -Seconds $settle
+    $settle = if ($BestQuality) { 10.0 } else { 5.0 }
+    Write-Output "Polling up to ${settle}s for CLIP_TX / CLIP_RX..."
+    Wait-DeviceLog $tx "CLIP_TX" $settle
+    if ($devices.Count -ge 2) {
+        Wait-DeviceLog $devices[1] "CLIP_RX" $settle
+    }
 
     Write-Output "=== AUTO REPLAY TEST on TX ==="
     Adb-Svc $tx "com.example.barky.TEST_REPLAY"
-    Start-Sleep -Seconds 2
+    Wait-DeviceLog $tx "Replay start" 2.5
 }
 
 $pattern = "WalkieTalkieEngine|CameraFrameSource|HELLO|TCP video|TX OK|RX OK|Replay|channelBusy|TALK_START|TEST_TALK|Stored last|CLIP_TX|CLIP_RX|BEST|NetworkOnMainThread|FATAL|AndroidRuntime"

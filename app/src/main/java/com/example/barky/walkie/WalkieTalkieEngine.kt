@@ -3502,6 +3502,16 @@ class WalkieTalkieEngine(
                         packet.offset,
                         packet.offset + packet.length
                     )
+                    // Ignore trailing RFC 5389 STUN responses (0x0101 starts with 0x01 == TYPE_AUDIO,
+                    // magic cookie 0x2112A442 at bytes 4..7) on the shared walkie UDP socket.
+                    if (snapshot.size >= 20 &&
+                        snapshot[4] == 0x21.toByte() &&
+                        snapshot[5] == 0x12.toByte() &&
+                        snapshot[6] == 0xA4.toByte() &&
+                        snapshot[7] == 0x42.toByte()
+                    ) {
+                        continue
+                    }
                     val rawFrom = packet.address?.hostAddress?.substringBefore('%') ?: "peer"
                     // Relay REG-ACK
                     if (snapshot[0] == BarkyUdpRelay.TYPE_ACK && BarkyHubConfig.isHubAddress(rawFrom)) {

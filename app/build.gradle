@@ -18,10 +18,10 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        // Release 109 (5.69-remove-gps-checkbox): remove duplicate GPS checkbox so the Row 2
-        // GPS button is the single control for GPS tracking and map visibility.
-        versionCode 109
-        versionName "5.69-remove-gps-checkbox"
+        // Release 110 (5.70-fast-poll-auto-update): fast logcat-polling smoke/matrix tests
+        // (Wi-Fi + cellular) and hands-free ADB + Firebase APK self-update confirmation.
+        versionCode 110
+        versionName "5.70-fast-poll-auto-update"
     }
 
     compileOptions {

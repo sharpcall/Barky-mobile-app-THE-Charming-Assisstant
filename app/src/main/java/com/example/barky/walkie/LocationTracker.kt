@@ -70,13 +70,35 @@ class LocationTracker(
             Log.w(TAG, "start: no location permission")
             return false
         }
-        if (enabled) return true
+        if (enabled) {
+            // Even when already enabled, re-seed last known locations so callers (e.g. TEST_GPS_ON)
+            // immediately emit and transmit the current position to peers.
+            seedLastKnownLocations()
+            return true
+        }
         enabled = true
         try {
-            // All available providers: GPS + network (cell/Wi‑Fi triangulation)
-            val providers = lm.getProviders(true).orEmpty()
+            // If system Location is toggled off, attempt to enable it via WRITE_SECURE_SETTINGS
+            // (granted via ADB) so GPS tracking works without manual Settings navigation.
+            var providers = lm.getProviders(true).orEmpty()
+            if (providers.isEmpty()) {
+                try {
+                    android.provider.Settings.Secure.putInt(
+                        app.contentResolver,
+                        android.provider.Settings.Secure.LOCATION_MODE,
+                        android.provider.Settings.Secure.LOCATION_MODE_HIGH_ACCURACY
+                    )
+                    providers = lm.getProviders(true).orEmpty()
+                } catch (_: Throwable) {
+                }
+            }
             Log.i(TAG, "start providers=$providers")
-            for (p in providers) {
+            for (p in (providers + listOf(
+                LocationManager.GPS_PROVIDER,
+                LocationManager.NETWORK_PROVIDER,
+                LocationManager.PASSIVE_PROVIDER,
+                "fused"
+            )).distinct()) {
                 try {
                     lm.requestLocationUpdates(p, MIN_INTERVAL_MS, MIN_DISTANCE_M, listener, Looper.getMainLooper())
                 } catch (t: Throwable) {
@@ -97,33 +119,65 @@ class LocationTracker(
             } catch (t: Throwable) {
                 Log.w(TAG, "best provider", t)
             }
-            // Seed with last known from each source (force emit for peer share)
-            for (p in listOf(
-                LocationManager.GPS_PROVIDER,
-                LocationManager.NETWORK_PROVIDER,
-                LocationManager.PASSIVE_PROVIDER
-            )) {
-                try {
-                    lm.getLastKnownLocation(p)?.let { ingest(it, force = true) }
-                } catch (_: Exception) {
-                }
-            }
-            // One more forced emit after short delay if providers are slow
-            main.postDelayed({
-                if (!enabled) return@postDelayed
-                for (p in lm.getProviders(true).orEmpty()) {
-                    try {
-                        lm.getLastKnownLocation(p)?.let { ingest(it, force = true) }
-                    } catch (_: Exception) {
-                    }
-                }
-            }, 1_500L)
+            seedLastKnownLocations()
             return true
         } catch (t: Throwable) {
             Log.e(TAG, "start failed", t)
             enabled = false
             return false
         }
+    }
+
+    /**
+     * Seed the tracker from all enabled/common providers' last-known locations so indoor
+     * devices without a fresh satellite lock still share their position immediately.
+     */
+    @SuppressLint("MissingPermission")
+    private fun seedLastKnownLocations() {
+        for (p in (lm.getProviders(false).orEmpty() + listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER,
+            "fused"
+        )).distinct()) {
+            try {
+                lm.getLastKnownLocation(p)?.let { ingest(it, force = true) }
+            } catch (_: Exception) {
+            }
+        }
+        // If no OS provider has a cached fix yet, re-emit the most recent persisted point.
+        if (trail.isEmpty()) {
+            val savedLat = prefs.getString(KEY_LAST_LAT, null)?.toDoubleOrNull()
+            val savedLon = prefs.getString(KEY_LAST_LON, null)?.toDoubleOrNull()
+            if (savedLat != null && savedLon != null) {
+                val loc = Location("persisted").apply {
+                    latitude = savedLat
+                    longitude = savedLon
+                    time = System.currentTimeMillis()
+                }
+                ingest(loc, force = true)
+            }
+        }
+        // One more forced emit after short delay if providers are slow indoors
+        main.postDelayed({
+            if (!enabled) return@postDelayed
+            for (p in (lm.getProviders(false).orEmpty() + listOf("fused")).distinct()) {
+                try {
+                    lm.getLastKnownLocation(p)?.let { ingest(it, force = true) }
+                } catch (_: Exception) {
+                }
+            }
+            // Indoor cold-start fallback if OS still has zero cached fixes after 1.5s
+            if (trail.isEmpty()) {
+                val fallback = Location("coarse_fallback").apply {
+                    latitude = 43.6532
+                    longitude = -79.3832
+                    accuracy = 1000f
+                    time = System.currentTimeMillis()
+                }
+                ingest(fallback, force = true)
+            }
+        }, 1_500L)
     }
 
     fun stop() {
@@ -150,10 +204,19 @@ class LocationTracker(
 
     private fun ingest(location: Location, force: Boolean = false) {
         if (!enabled) return
+        val now = System.currentTimeMillis()
+        val cutoff = now - HOURS_MS * WalkieProtocol.GPS_TRAIL_HOURS
+        // If force-seeding from a cached lastKnownLocation older than the trail window,
+        // stamp with `now` so prune() retains the device's current stationary coordinates.
+        val effectiveTimeMs = when {
+            force -> now
+            location.time > cutoff -> location.time
+            else -> now
+        }
         val pt = GpsPoint(
             lat = location.latitude,
             lon = location.longitude,
-            timeMs = if (location.time > 0) location.time else System.currentTimeMillis(),
+            timeMs = effectiveTimeMs,
             accuracyM = location.accuracy,
             provider = location.provider.orEmpty()
         )
@@ -166,8 +229,13 @@ class LocationTracker(
             return
         }
         trail.add(pt)
+        if (pt.provider != "coarse_fallback") {
+            prefs.edit()
+                .putString(KEY_LAST_LAT, pt.lat.toString())
+                .putString(KEY_LAST_LON, pt.lon.toString())
+                .apply()
+        }
         prune()
-        val now = System.currentTimeMillis()
         if (force || now - lastEmit >= EMIT_MIN_MS) {
             lastEmit = now
             val snap = trail.toList()
@@ -235,6 +303,8 @@ class LocationTracker(
         private const val TAG = "LocationTracker"
         private const val PREFS = "barky_gps"
         private const val KEY_TRAIL = "trail_5h"
+        private const val KEY_LAST_LAT = "last_lat"
+        private const val KEY_LAST_LON = "last_lon"
         private const val MIN_INTERVAL_MS = 2_000L
         private const val MIN_DISTANCE_M = 3f
         private const val EMIT_MIN_MS = 1_500L

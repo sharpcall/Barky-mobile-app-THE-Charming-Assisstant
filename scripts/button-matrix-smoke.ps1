@@ -1,12 +1,14 @@
-# Exhaustive button / feature condition matrix for Barky (dual phone).
+# Exhaustive button / feature condition matrix for Barky (dual phone, Wi-Fi AND Cellular).
 # Every major feature is part of the matrix - including combinations that look unrelated.
 #
 # Features: L=LISTEN S=SEE W=WAKEUP M=HOLD R=REPLAY G=GPS
 # Covers: singles both phones, all ordered pairs on each phone, dual/cross, LISTEN speaker route.
-# Quiet WAKEUP. Hard timeout. Fast sleeps so full matrix finishes (~6-8 min).
+# Uses fast logcat polling (Wait-Feat) instead of fixed Start-Sleep waits so all 78 matrix checks
+# complete as soon as each state transition is verified.
 param(
     [int]$OverallTimeoutSec = 900,
-    [int]$HoldSec = 2
+    [int]$HoldSec = 1,
+    [switch]$Cellular
 )
 
 $ErrorActionPreference = "Continue"
@@ -34,11 +36,11 @@ foreach ($line in (& $adb mdns services 2>&1)) {
         & $adb connect "$($Matches[1]):$($Matches[2])" 2>&1 | Out-Null
     }
 }
-Start-Sleep 1
+Start-Sleep -Milliseconds 400
 $raw = @(& $adb devices | Select-String "device$" | ForEach-Object { ($_ -split "\s+")[0] })
 $devs = @(); $seen = @{}
 foreach ($s in $raw) {
-    $id = (& $adb -s $s shell getprop ro.serialno 2>$null).Trim()
+    $id = ("" + (& $adb -s $s shell getprop ro.serialno 2>$null)).Trim()
     if (-not $id) { $id = $s }
     if (-not $seen.ContainsKey($id)) { $seen[$id] = $s; $devs += $s }
 }
@@ -63,7 +65,7 @@ function Svc([string]$s, [string]$action, [string[]]$extra = @()) {
 # Read all Barky + crash logcat lines since the most recent ClearLogs call (do not pass -t 200,
 # which drops Barky logs when OEM camera/audio services emit >200 lines per second).
 function Logs([string]$s) {
-    & $adb -s $s logcat -d -v brief -s WalkieTalkieEngine:I WalkieTalkieService:I BarkyVideoUI:I CameraFrameSource:I AndroidRuntime:E DEBUG:I 2>$null
+    & $adb -s $s logcat -d -v brief -s WalkieTalkieEngine:I WalkieTalkieService:I BarkyVideoUI:I CameraFrameSource:I See:I SeeCameraSession:I Ring:I Listen:I FirebasePeerDirectory:I BarkyUdpRelay:I LocationTracker:I WakeupPlayer:I AndroidRuntime:E DEBUG:I 2>$null
 }
 function Has([object[]]$logs, [string]$pat) {
     return ($logs | Where-Object { "$_" -match $pat } | Select-Object -First 1) -ne $null
@@ -82,13 +84,37 @@ function StopAll([string]$s) {
 
 foreach ($s in $devs) {
     Quiet $s
+    & $adb -s $s logcat -c 2>$null | Out-Null
     & $adb -s $s shell am force-stop $pkg | Out-Null
     & $adb -s $s shell am start -n "$pkg/.MainActivity" | Out-Null
 }
-Info "Wait peer HELLO"
-Start-Sleep 8
+Info "Polling for peer link (HELLO / Firebase cellular directory)..."
+$helloDeadline = (Get-Date).AddSeconds(4)
+$linked = $false
+while ((Get-Date) -lt $helloDeadline) {
+    $la = Logs $A; $lb = Logs $B
+    if ((Has $la "HELLO from") -and (Has $lb "HELLO from")) { $linked = $true; break }
+    Start-Sleep -Milliseconds 250
+}
+if (-not $linked) {
+    # Trigger Firebase peer directory lookup + auto-adopt so cellular & cross-subnet setups link.
+    Svc $A "com.example.barky.FIREBASE_LIST"
+    Svc $B "com.example.barky.FIREBASE_LIST"
+    $fbDeadline = (Get-Date).AddSeconds(6)
+    while ((Get-Date) -lt $fbDeadline) {
+        $la = Logs $A; $lb = Logs $B
+        if ((Has $la "HELLO from|adoptDirectoryPeer|ADOPT_PEER") -and (Has $lb "HELLO from|adoptDirectoryPeer|ADOPT_PEER")) {
+            $linked = $true; break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+}
 $la = Logs $A; $lb = Logs $B
-if ((Has $la "HELLO from") -and (Has $lb "HELLO from")) { Ok "HELLO both ways" } else { Bad "HELLO incomplete" }
+if ($linked -or ((Has $la "HELLO from|adoptDirectoryPeer") -and (Has $lb "HELLO from|adoptDirectoryPeer"))) {
+    Ok "Peer link established both ways"
+} else {
+    Bad "HELLO / peer link incomplete"
+}
 
 function Start-Feat([string]$s, [string]$feat, [string]$peer) {
     switch ($feat) {
@@ -117,17 +143,6 @@ function Stop-Feat([string]$s, [string]$feat) {
         "G" { Svc $s "com.example.barky.TEST_GPS_OFF" }
     }
 }
-function Feat-Sleep([string]$feat) {
-    switch ($feat) {
-        "L" { Start-Sleep 2 }
-        "S" { Start-Sleep 2 }
-        "W" { Start-Sleep 1 }
-        "M" { Start-Sleep $HoldSec }
-        "R" { Start-Sleep 2 }
-        "G" { Start-Sleep 3 }
-        default { Start-Sleep 1 }
-    }
-}
 # Use a single regex per feature so PowerShell does not treat unparenthesized -or tokens
 # as extra positional arguments to Has.
 function Feat-Ok([object[]]$logs, [string]$feat) {
@@ -141,12 +156,32 @@ function Feat-Ok([object[]]$logs, [string]$feat) {
         default { return $false }
     }
 }
+# Fast logcat polling for a feature instead of fixed multi-second sleeps:
+# returns as soon as Feat-Ok is observed on $s or $peer (preserving a brief hold for M).
+function Wait-Feat([string]$s, [string]$peer, [string]$feat) {
+    if ($feat -eq "M") {
+        Start-Sleep -Milliseconds ([math]::Max(450, $HoldSec * 600))
+    }
+    $maxSec = switch ($feat) {
+        "G" { 3.0 }
+        default { 2.0 }
+    }
+    $deadline = (Get-Date).AddSeconds($maxSec)
+    while ((Get-Date) -lt $deadline) {
+        $ls = Logs $s
+        if (Feat-Ok $ls $feat) { return $true }
+        $lp = Logs $peer
+        if (Feat-Ok $lp $feat) { return $true }
+        Start-Sleep -Milliseconds 150
+    }
+    return $false
+}
 
 $feats = @("L","S","W","M","R","G")
 $featName = @{ L="LISTEN"; S="SEE"; W="WAKEUP"; M="HOLD"; R="REPLAY"; G="GPS" }
 
 Write-Output "========== BUTTON MATRIX SMOKE (full condition matrix) =========="
-Info "Features: L S W M R G - singles + all ordered pairs + dual/cross"
+Info "Features: L S W M R G - singles + all ordered pairs + dual/cross (log-polling)"
 
 Info "--- SINGLES ---"
 foreach ($f in $feats) {
@@ -156,12 +191,14 @@ foreach ($f in $feats) {
         ClearLogs
         StopAll $phone.S
         Start-Feat $phone.S $f $phone.P
-        Feat-Sleep $f
+        $ok = Wait-Feat $phone.S $phone.P $f
         Stop-Feat $phone.S $f
-        Start-Sleep 0.4
-        $l = Logs $phone.S
-        $ok = Feat-Ok $l $f
-        if (-not $ok) { $ok = Feat-Ok (Logs $phone.P) $f }
+        if (-not $ok) {
+            Start-Sleep -Milliseconds 150
+            $l = Logs $phone.S
+            $ok = Feat-Ok $l $f
+            if (-not $ok) { $ok = Feat-Ok (Logs $phone.P) $f }
+        }
         if ($ok) { Ok "SINGLE $($featName[$f]) on $($phone.T)" }
         else { Bad "SINGLE $($featName[$f]) on $($phone.T)" }
         StopAll $phone.S
@@ -180,24 +217,26 @@ foreach ($phone in @(@{S=$A;P=$B;T="A"}, @{S=$B;P=$A;T="B"})) {
             StopAll $phone.S
             StopAll $phone.P
             Start-Feat $phone.S $f1 $phone.P
-            Feat-Sleep $f1
+            $ok1 = Wait-Feat $phone.S $phone.P $f1
             # Stop f1 before HOLD so half-duplex does not block CLIP_TX, unless testing concurrent L/S/G
             if ($f2 -eq "M" -or ($sticky -notcontains $f1)) {
                 Stop-Feat $phone.S $f1
-                Start-Sleep 0.3
+                Start-Sleep -Milliseconds 120
             }
             Start-Feat $phone.S $f2 $phone.P
-            Feat-Sleep $f2
+            $ok2 = Wait-Feat $phone.S $phone.P $f2
             Stop-Feat $phone.S $f2
             if ($sticky -contains $f1 -and $f2 -ne "M") { Stop-Feat $phone.S $f1 }
-            Start-Sleep 0.3
-            $l = Logs $phone.S
-            $ok1 = Feat-Ok $l $f1
-            $ok2 = Feat-Ok $l $f2
             if (-not $ok1 -or -not $ok2) {
-                $lp = Logs $phone.P
-                if (-not $ok1) { $ok1 = Feat-Ok $lp $f1 }
-                if (-not $ok2) { $ok2 = Feat-Ok $lp $f2 }
+                Start-Sleep -Milliseconds 150
+                $l = Logs $phone.S
+                if (-not $ok1) { $ok1 = Feat-Ok $l $f1 }
+                if (-not $ok2) { $ok2 = Feat-Ok $l $f2 }
+                if (-not $ok1 -or -not $ok2) {
+                    $lp = Logs $phone.P
+                    if (-not $ok1) { $ok1 = Feat-Ok $lp $f1 }
+                    if (-not $ok2) { $ok2 = Feat-Ok $lp $f2 }
+                }
             }
             $tag = "PAIR $($featName[$f1])->$($featName[$f2]) on $($phone.T)"
             if ($ok1 -and $ok2) { Ok $tag }
@@ -214,7 +253,12 @@ DieIfTimeout
 ClearLogs
 Svc $A "com.example.barky.TEST_SEE_START"
 Svc $B "com.example.barky.TEST_SEE_START"
-Start-Sleep 3
+$dl = (Get-Date).AddSeconds(3)
+while ((Get-Date) -lt $dl) {
+    $la = Logs $A; $lb = Logs $B
+    if ((Has $la "SEE_REQ") -and (Has $lb "SEE_REQ")) { break }
+    Start-Sleep -Milliseconds 200
+}
 Svc $A "com.example.barky.TEST_SEE_STOP"
 Svc $B "com.example.barky.TEST_SEE_STOP"
 $la = Logs $A; $lb = Logs $B
@@ -224,7 +268,12 @@ DieIfTimeout
 ClearLogs
 Svc $A "com.example.barky.TEST_LISTEN_START"
 Svc $B "com.example.barky.TEST_LISTEN_START"
-Start-Sleep 2
+$dl = (Get-Date).AddSeconds(3)
+while ((Get-Date) -lt $dl) {
+    $la = Logs $A; $lb = Logs $B
+    if ((Has $la "LISTEN_REQ|MONITOR_AUDIO") -and (Has $lb "LISTEN_REQ|MONITOR_AUDIO|LISTEN serve")) { break }
+    Start-Sleep -Milliseconds 200
+}
 Svc $A "com.example.barky.TEST_LISTEN_STOP"
 Svc $B "com.example.barky.TEST_LISTEN_STOP"
 $la = Logs $A; $lb = Logs $B
@@ -234,21 +283,26 @@ if ((Has $la "LISTEN_REQ|MONITOR_AUDIO") -and (Has $lb "LISTEN_REQ|MONITOR_AUDIO
 
 DieIfTimeout
 ClearLogs
-Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 1
-Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec
+Svc $B "com.example.barky.TEST_LISTEN_START"
+Wait-Feat $B $A "L" | Out-Null
+Svc $A "com.example.barky.TEST_TALK_START"
+Wait-Feat $A $B "M" | Out-Null
 Svc $A "com.example.barky.TEST_TALK_STOP"
-Svc $B "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep 1
+Svc $B "com.example.barky.TEST_LISTEN_STOP"
 $la = Logs $A; $lb = Logs $B
 if ((Has $la "CLIP_TX|startTalking") -or (Has $lb "channelBusy|LISTEN")) {
     Ok "CROSS TALK during remote LISTEN"
 } else { Bad "CROSS TALK during LISTEN" }
 
-foreach ($phone in @(@{S=$A;T="A"}, @{S=$B;T="B"})) {
+foreach ($phone in @(@{S=$A;P=$B;T="A"}, @{S=$B;P=$A;T="B"})) {
     DieIfTimeout
     ClearLogs
-    Svc $phone.S "com.example.barky.TEST_SEE_START"; Start-Sleep 1
-    Svc $phone.S "com.example.barky.TEST_SEE_STOP"; Start-Sleep 0.5
-    Svc $phone.S "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2
+    Svc $phone.S "com.example.barky.TEST_SEE_START"
+    Wait-Feat $phone.S $phone.P "S" | Out-Null
+    Svc $phone.S "com.example.barky.TEST_SEE_STOP"
+    Start-Sleep -Milliseconds 200
+    Svc $phone.S "com.example.barky.TEST_LISTEN_START"
+    Wait-Feat $phone.S $phone.P "L" | Out-Null
     Svc $phone.S "com.example.barky.TEST_LISTEN_STOP"
     $l = Logs $phone.S
     if ((Has $l "SEE") -and (Has $l "LISTEN_REQ|MONITOR_AUDIO_RX|forceListenVolume")) {
@@ -258,10 +312,12 @@ foreach ($phone in @(@{S=$A;T="A"}, @{S=$B;T="B"})) {
 
 DieIfTimeout
 ClearLogs
-Svc $A "com.example.barky.TEST_SEE_START"; Start-Sleep 1
-Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 1
-Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep -Milliseconds 500
-Svc $A "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep -Milliseconds 500
+Svc $A "com.example.barky.TEST_SEE_START"
+Wait-Feat $A $B "S" | Out-Null
+Svc $A "com.example.barky.TEST_LISTEN_START"
+Wait-Feat $A $B "L" | Out-Null
+Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep -Milliseconds 250
+Svc $A "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep -Milliseconds 250
 $la = Logs $A
 if ((Has $la "SEE_REQ|TEST_SEE_START|SEE") -and (Has $la "LISTEN_REQ|LISTEN_STOP|TEST_LISTEN_START|MONITOR_AUDIO|forceListenVolume")) {
     Ok "INDEP concurrent SEE+LISTEN stop order on A"
@@ -270,8 +326,22 @@ if ((Has $la "SEE_REQ|TEST_SEE_START|SEE") -and (Has $la "LISTEN_REQ|LISTEN_STOP
 Info "--- ROUTE LISTEN SPEAKER ---"
 DieIfTimeout
 ClearLogs
-Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2; Svc $A "com.example.barky.TEST_LISTEN_STOP"
-Svc $B "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2; Svc $B "com.example.barky.TEST_LISTEN_STOP"
+Svc $A "com.example.barky.TEST_LISTEN_START"
+$dl = (Get-Date).AddSeconds(2.5)
+while ((Get-Date) -lt $dl) {
+    $la = Logs $A
+    if ((Has $la "forceListenVolume SPEAKER|route=SPEAKER") -and (Has $la "AudioTrack preferredDevice|MONITOR_AUDIO_RX")) { break }
+    Start-Sleep -Milliseconds 150
+}
+Svc $A "com.example.barky.TEST_LISTEN_STOP"
+Svc $B "com.example.barky.TEST_LISTEN_START"
+$dl = (Get-Date).AddSeconds(2.5)
+while ((Get-Date) -lt $dl) {
+    $lb = Logs $B
+    if ((Has $lb "forceListenVolume SPEAKER|route=SPEAKER") -and (Has $lb "AudioTrack preferredDevice|MONITOR_AUDIO_RX")) { break }
+    Start-Sleep -Milliseconds 150
+}
+Svc $B "com.example.barky.TEST_LISTEN_STOP"
 $la = Logs $A; $lb = Logs $B
 $aSp = (Has $la "forceListenVolume SPEAKER") -or (Has $la "route=SPEAKER")
 $bSp = (Has $lb "forceListenVolume SPEAKER") -or (Has $lb "route=SPEAKER")

@@ -91,6 +91,89 @@ class BarkyService : AccessibilityService() {
         Log.i(TAG, "BarkyService connected conversionEnabled=$conversionEnabled gesturesReady=true")
     }
 
+    /**
+     * Periodically inspects interactive windows while [autoInstallArmedUntilMs] is active
+     * and clicks the positive "Update" / "Install" button in the system PackageInstaller dialog.
+     */
+    private val autoInstallPollRunnable = object : Runnable {
+        override fun run() {
+            if (System.currentTimeMillis() > autoInstallArmedUntilMs) return
+            if (tryClickPackageInstallerConfirm()) {
+                // Disarm once the install/update confirmation button has been clicked.
+                autoInstallArmedUntilMs = 0L
+                return
+            }
+            handler.postDelayed(this, 350L)
+        }
+    }
+
+    /**
+     * Start polling for the system PackageInstaller confirmation button so self-updates
+     * triggered over Firebase (cellular/Wi-Fi) or LAN install without manual taps.
+     */
+    private fun scheduleAutoInstallPoll() {
+        handler.removeCallbacks(autoInstallPollRunnable)
+        handler.postDelayed(autoInstallPollRunnable, 250L)
+    }
+
+    /**
+     * Search active and interactive windows for a system PackageInstaller confirmation button
+     * ("Update" / "Install" or `android:id/button1`) and click it automatically.
+     */
+    private fun tryClickPackageInstallerConfirm(): Boolean {
+        try {
+            val roots = mutableListOf<AccessibilityNodeInfo>()
+            rootInActiveWindow?.let { roots.add(it) }
+            try {
+                for (w in windows) {
+                    w.root?.let { roots.add(it) }
+                }
+            } catch (_: Throwable) {
+            }
+            for (root in roots) {
+                val pkg = root.packageName?.toString()?.lowercase(Locale.US).orEmpty()
+                // Only auto-click inside the Android/Google/Samsung system package installer.
+                if (!pkg.contains("packageinstaller") && !pkg.contains("installer")) continue
+                val btn = findInstallerConfirmNode(root)
+                if (btn != null && btn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    Log.i(TAG, "APK_AUTO_INSTALL_CLICKED pkg=$pkg label=${btn.text}")
+                    return true
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "tryClickPackageInstallerConfirm", t)
+        }
+        return false
+    }
+
+    /**
+     * Locate the positive action button ("Update" / "Install" or `android:id/button1`)
+     * within a PackageInstaller accessibility node tree.
+     */
+    private fun findInstallerConfirmNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val viewId = node.viewIdResourceName.orEmpty()
+        val label = (node.text?.toString() ?: node.contentDescription?.toString()).orEmpty().trim()
+        val matchesLabel = label.equals("Update", ignoreCase = true) ||
+            label.equals("Install", ignoreCase = true) ||
+            label.equals("Install anyway", ignoreCase = true)
+        val matchesPositiveId = viewId.endsWith(":id/button1") ||
+            viewId.endsWith(":id/install_confirm_question")
+        if ((matchesLabel || matchesPositiveId) && node.isEnabled) {
+            if (node.isClickable) return node
+            var parent = node.parent
+            while (parent != null) {
+                if (parent.isClickable && parent.isEnabled) return parent
+                parent = parent.parent
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val hit = findInstallerConfirmNode(node.getChild(i))
+            if (hit != null) return hit
+        }
+        return null
+    }
+
     private fun registerAccessibilityButtonOpensApp() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         try {
@@ -116,6 +199,13 @@ class BarkyService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        // If a Barky APK self-update is currently in flight, auto-click the PackageInstaller dialog.
+        if (System.currentTimeMillis() <= autoInstallArmedUntilMs) {
+            if (tryClickPackageInstallerConfirm()) {
+                autoInstallArmedUntilMs = 0L
+                return
+            }
+        }
         // Reload toggle often so Settings changes apply without restarting the service
         conversionEnabled = BarkyPrefs.isConversionEnabled(this)
         if (!conversionEnabled) {
@@ -618,6 +708,21 @@ class BarkyService : AccessibilityService() {
         @Volatile
         var instance: BarkyService? = null
             private set
+
+        /** Deadline timestamp (ms) until which BarkyService will auto-confirm PackageInstaller prompts. */
+        @Volatile
+        private var autoInstallArmedUntilMs: Long = 0L
+
+        /**
+         * Arm automatic clicking of the system PackageInstaller "Update"/"Install" button for
+         * [windowMs] milliseconds so Firebase (cellular/Wi-Fi) and LAN self-updates finish hands-free.
+         */
+        fun armAutoConfirmPackageInstall(context: Context, windowMs: Long = 60_000L) {
+            ensureAccessibilityEnabled(context)
+            autoInstallArmedUntilMs = System.currentTimeMillis() + windowMs
+            instance?.scheduleAutoInstallPoll()
+            Log.i(TAG, "Armed auto-confirm package install for ${windowMs}ms (instance=${instance != null})")
+        }
 
         /**
          * Attempt to auto-enable BarkyService in Settings.Secure when WRITE_SECURE_SETTINGS

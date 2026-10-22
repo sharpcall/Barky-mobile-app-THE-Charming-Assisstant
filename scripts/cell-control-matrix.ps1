@@ -1,7 +1,7 @@
-# Cellular control/media matrix: Pixel(cell USB) <-> S20(Wi‑Fi wireless adb)
-# Confirms RING / LISTEN / SEE by comparing BOTH ends' logcat (agent-only).
+# Cellular control/media matrix: Pixel(cell USB) <-> S20(Wi-Fi wireless adb)
+# Confirms RING / LISTEN / SEE by comparing BOTH ends' logcat using fast logcat polling.
 # Usage: powershell -File scripts/cell-control-matrix.ps1
-# Requires: Pixel on cellular (Wi‑Fi off), S20 Wi‑Fi on, hub up, quiet volumes.
+# Requires: Pixel on cellular (Wi-Fi off), S20 Wi-Fi on, hub up, quiet volumes.
 
 $ErrorActionPreference = 'Continue'
 $env:Path = "C:\Users\Mary Sparky\AppData\Local\Android\Sdk\platform-tools;" + $env:Path
@@ -13,16 +13,16 @@ function Left { [math]::Max(0, [int](($deadline - (Get-Date)).TotalSeconds)) }
 
 function Ensure-S20 {
     $devs = adb devices
-    $s = ($devs | Select-String 'RFCN1073|192\.168\.4\.231' | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1)
+    $s = ($devs | Select-String 'RFCN1073|192\.168\.4\.' | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1)
     if ($s) { return $s }
     $md = adb mdns services 2>&1 | Out-String
     $m = [regex]::Match($md, '(\d+\.\d+\.\d+\.\d+):(\d+)')
     if ($m.Success) {
         $a = "$($m.Groups[1].Value):$($m.Groups[2].Value)"
         adb connect $a | Out-Null
-        Start-Sleep 1
+        Start-Sleep -Milliseconds 500
     }
-    return ($devs = adb devices; ($devs | Select-String 'RFCN1073|192\.168\.4\.231' | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1))
+    return ($devs = adb devices; ($devs | Select-String 'RFCN1073|192\.168\.4\.' | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1))
 }
 
 function Svc($dev, $action, $extras = '') {
@@ -31,6 +31,20 @@ function Svc($dev, $action, $extras = '') {
     } else {
         adb -s $dev shell am start-foreground-service -n $pkg/.walkie.WalkieTalkieService -a $action
     }
+}
+
+# Fast logcat polling helper for cellular control checks.
+function Poll-CellPair([string]$patPix, [string]$patS20, [double]$maxSec) {
+    $dl = (Get-Date).AddSeconds($maxSec)
+    while ((Get-Date) -lt $dl) {
+        $lp = adb -s $pix logcat -d -t 250 2>&1 | Out-String
+        $ls = adb -s $s20 logcat -d -t 250 2>&1 | Out-String
+        $okP = (-not $patPix) -or ($lp -match $patPix)
+        $okS = (-not $patS20) -or ($ls -match $patS20)
+        if ($okP -and $okS) { return @($lp, $ls) }
+        Start-Sleep -Milliseconds 250
+    }
+    return @((adb -s $pix logcat -d -t 250 2>&1 | Out-String), (adb -s $s20 logcat -d -t 250 2>&1 | Out-String))
 }
 
 Write-Host "BUDGET ${BudgetSec}s cell-control-matrix left=$(Left)"
@@ -45,18 +59,21 @@ foreach ($s in @($pix, $s20)) {
     adb -s $s shell media volume --stream 3 --set 1 2>$null
 }
 adb -s $pix shell svc wifi disable
+adb -s $pix logcat -c; adb -s $s20 logcat -c
 adb -s $pix shell am force-stop $pkg
 adb -s $s20 shell am force-stop $pkg
 adb -s $pix shell am start -n $pkg/.MainActivity | Out-Null
 adb -s $s20 shell am start -n $pkg/.MainActivity | Out-Null
-Start-Sleep 10
+
+# Poll for initial Firebase registration on both phones (with STUN public mapping) instead of fixed 10s sleep.
+Poll-CellPair 'registered db=\S+ id=\S+.*public=\d+' 'registered db=\S+ id=\S+.*public=\d+' 10.0 | Out-Null
 
 adb -s $pix logcat -c; adb -s $s20 logcat -c
 Svc $pix com.example.barky.FIREBASE_LIST
 Svc $s20 com.example.barky.FIREBASE_LIST
-Start-Sleep 6
-$pfb = adb -s $pix logcat -d -t 250 2>&1 | Out-String
-$sfb = adb -s $s20 logcat -d -t 250 2>&1 | Out-String
+$fbPair = Poll-CellPair 'FIREBASE_PEER samsung SM-G981W' 'FIREBASE_PEER Google Pixel 8' 6.0
+$pfb = $fbPair[0]
+$sfb = $fbPair[1]
 $pixId = [regex]::Match($pfb, 'registered db=\S+ id=(\S+)').Groups[1].Value
 $s20Id = [regex]::Match($sfb, 'registered db=\S+ id=(\S+)').Groups[1].Value
 $s20Pub = [regex]::Match($pfb, 'FIREBASE_PEER samsung SM-G981W id=\S+ local=\S+ public=([^:\s]+):(\d+)')
@@ -71,25 +88,25 @@ if (-not $pixId -or -not $s20Id -or $s20U -le 0 -or $pixU -le 0) {
 
 Svc $pix com.example.barky.ADOPT_PEER "--es peer_name S20 --es peer_host $s20H --ei peer_udp $s20U --ei peer_video $s20U --es peer_device_id $s20Id"
 Svc $s20 com.example.barky.ADOPT_PEER "--es peer_name Pixel8 --es peer_host $pixH --ei peer_udp $pixU --ei peer_video $pixU --es peer_device_id $pixId"
-Start-Sleep 3
+Poll-CellPair 'ADOPT_PEER ok=true' 'ADOPT_PEER ok=true' 3.0 | Out-Null
 
-# RING — need RING_ACK on Pixel (proves S20 handled WAKEUP + replied via hub)
+# RING -- need RING_ACK on Pixel (proves S20 handled WAKEUP + replied via hub)
 adb -s $pix logcat -c; adb -s $s20 logcat -c
 Svc $pix com.example.barky.TEST_WAKEUP '--ez quiet true'
-Start-Sleep 6
-$pt = adb -s $pix logcat -d -t 180 2>&1 | Out-String
-$st = adb -s $s20 logcat -d -t 180 2>&1 | Out-String
+$ringPair = Poll-CellPair 'RING_ACK' 'WAKEUP|RING|type=0x2' 6.0
+$pt = $ringPair[0]
+$st = $ringPair[1]
 $ring = $pt -match 'RING_ACK'
 Write-Host "RING pix_ack=$ring s20_rx=$($st -match 'WAKEUP|RING|type=0x2')"
 Write-Host (($pt -split "`n" | Select-String 'RING_ACK|WAKEUP' | Select-Object -Last 4).Line)
 Write-Host (($st -split "`n" | Select-String 'WAKEUP|RING|type=0x2|relay DELIVER' | Select-Object -Last 6).Line)
 
-# LISTEN — need LISTEN_REQ on S20 + CTRL sent on Pixel
+# LISTEN -- need LISTEN_REQ on S20 + CTRL sent on Pixel
 adb -s $pix logcat -c; adb -s $s20 logcat -c
 Svc $pix com.example.barky.TEST_LISTEN_START
-Start-Sleep 12
-$pl = adb -s $pix logcat -d -t 220 2>&1 | Out-String
-$sl = adb -s $s20 logcat -d -t 220 2>&1 | Out-String
+$lisPair = Poll-CellPair 'CTRL sent type=0xa|LISTEN_REQ burst' 'LISTEN_REQ from|LISTEN serve START' 10.0
+$pl = $lisPair[0]
+$sl = $lisPair[1]
 $lisTx = $pl -match 'CTRL sent type=0xa|LISTEN_REQ burst'
 $lisRx = $sl -match 'LISTEN_REQ from|LISTEN serve START'
 $lis = $lisTx -and $lisRx
@@ -97,23 +114,30 @@ Write-Host "LISTEN=$lis tx=$lisTx rx=$lisRx"
 Write-Host (($pl -split "`n" | Select-String 'LISTEN|CTRL sent type=0xa|MONITOR_AUDIO' | Select-Object -Last 8).Line)
 Write-Host (($sl -split "`n" | Select-String 'LISTEN_REQ|LISTEN serve|type=0xa|relay DELIVER' | Select-Object -Last 10).Line)
 Svc $pix com.example.barky.TEST_LISTEN_STOP
-Start-Sleep 1
+Start-Sleep -Milliseconds 400
 
-# SEE — need video RX count on Pixel
+# SEE -- need video RX count >= 5 on Pixel (poll every 250ms and exit as soon as rxN >= 5)
 adb -s $pix logcat -c; adb -s $s20 logcat -c
 Svc $pix com.example.barky.TEST_SEE_START
-Start-Sleep 12
-$ps = adb -s $pix logcat -d -t 220 2>&1 | Out-String
-$ss = adb -s $s20 logcat -d -t 220 2>&1 | Out-String
+$seeDl = (Get-Date).AddSeconds(12.0)
 $rxN = 0
-foreach ($m in [regex]::Matches($ps, 'MONITOR_VIDEO_AVC_RX n=(\d+)|SEE/SCRN_AVC_HUB_TCP n=(\d+)|MONITOR_VIDEO_RX n=(\d+)')) {
-    foreach ($g in 1..3) {
-        if ($m.Groups[$g].Value) {
-            $v = [int]$m.Groups[$g].Value
-            if ($v -gt $rxN) { $rxN = $v }
+$ps = ''
+$ss = ''
+while ((Get-Date) -lt $seeDl) {
+    $ps = adb -s $pix logcat -d -t 220 2>&1 | Out-String
+    $rxN = 0
+    foreach ($m in [regex]::Matches($ps, 'MONITOR_VIDEO_AVC_RX n=(\d+)|SEE/SCRN_AVC_HUB_TCP n=(\d+)|MONITOR_VIDEO_RX n=(\d+)')) {
+        foreach ($g in 1..3) {
+            if ($m.Groups[$g].Value) {
+                $v = [int]$m.Groups[$g].Value
+                if ($v -gt $rxN) { $rxN = $v }
+            }
         }
     }
+    if ($rxN -ge 5) { break }
+    Start-Sleep -Milliseconds 250
 }
+$ss = adb -s $s20 logcat -d -t 220 2>&1 | Out-String
 $see = ($rxN -ge 5) -and ($ps -notmatch 'SESSION_FAIL')
 Write-Host "SEE=$see rx=$rxN"
 Write-Host (($ps -split "`n" | Select-String 'SEE_|MONITOR_VIDEO|AVC|SESSION|hub' | Select-Object -Last 10).Line)
