@@ -13,7 +13,8 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipSmoke,
     [switch]$UploadFirebase,
-    [switch]$CellularSmoke
+    [switch]$CellularSmoke,
+    [string]$CommitMessage = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -210,6 +211,18 @@ if (-not $SkipSmoke) {
     } else {
         Write-Output "WARN: only $($devices.Count) device(s) -- skipped dual-phone smoke (not hung; insufficient devices)"
     }
+}
+
+if ($CommitMessage) {
+    Write-Output "Committing and pushing to GitHub... t=$(Elapsed)s"
+    Push-Location $root
+    & git -c "safe.directory=F:/To sort/Delete/barky" add -u
+    & git -c "safe.directory=F:/To sort/Delete/barky" commit -m $CommitMessage 2>&1 | ForEach-Object { Write-Output "  [git] $_" }
+    $pushScript = Join-Path $PSScriptRoot "push-github.mjs"
+    if (Test-Path $pushScript) {
+        & node $pushScript 2>&1 | ForEach-Object { Write-Output "  [push] $_" }
+    }
+    Pop-Location
 }
 
 Write-Output "========== PUBLISH DONE t=$(Elapsed)s =========="

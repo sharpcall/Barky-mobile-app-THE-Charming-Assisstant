@@ -8,6 +8,14 @@ data class PeerEndpoint(
     val deviceId: String,
     val phoneNumber: String,
     val displayName: String,
+    /** Build.MODEL */
+    val phoneModel: String = "",
+    /** Build.MANUFACTURER */
+    val manufacturer: String = "",
+    /** e.g. "14" from Build.VERSION.RELEASE */
+    val androidVersion: String = "",
+    /** Build.VERSION.SDK_INT */
+    val androidSdk: Int = 0,
     val localIp: String?,
     val localUdpPort: Int,
     val localVideoPort: Int,
@@ -17,7 +25,10 @@ data class PeerEndpoint(
     val lat: Double?,
     val lon: Double?,
     val updatedAtMs: Long,
-    val appVersion: String
+    val appVersion: String,
+    /** HTTP port serving APK for peer/internet updates (0 = not serving). */
+    val updateHttpPort: Int = 0,
+    val versionCode: Int = 0
 ) {
     fun preferredHost(preferLan: Boolean): String? {
         if (preferLan && !localIp.isNullOrBlank() && isPrivateIp(localIp)) return localIp

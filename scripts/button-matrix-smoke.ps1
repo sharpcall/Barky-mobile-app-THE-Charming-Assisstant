@@ -360,6 +360,10 @@ foreach ($s in $devs) {
     $procId = (& $adb -s $s shell pidof $pkg).Trim()
     if ($fatal) { Bad "FATAL on $m" } else { Ok "no FATAL on $m" }
     if ($procId) { Ok "$m alive" } else { Bad "$m dead" }
+    # Restore loud, healthy media and voice call volumes after quiet matrix tests
+    & $adb -s $s shell media volume --show --stream 3 --set 13 2>$null | Out-Null
+    & $adb -s $s shell cmd media_session volume --stream 3 --set 13 2>$null | Out-Null
+    & $adb -s $s shell media volume --show --stream 0 --set 6 2>$null | Out-Null
 }
 
 Write-Output ("========== MATRIX RESULTS pass={0} fail={1} t={2}s ==========" -f $pass, $fail, (T))

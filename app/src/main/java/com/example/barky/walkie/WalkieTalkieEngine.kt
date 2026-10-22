@@ -1562,8 +1562,41 @@ class WalkieTalkieEngine(
                 else "BEST TX: TCP failed — ${lastVideoError.ifBlank { "unknown" }}"
             )
             if (!linked) {
-                postError("BEST send failed: no TCP video link")
+                Log.w(TAG, "BEST TX: no TCP video link — falling back to UDP/relay stream for ${peer.host}")
+                videoDebug("BEST TX: no TCP link — streaming recorded clip via UDP/relay")
+                // Stream recorded audio chunks and video frames over UDP/relay so cellular/NAT peers still play!
+                val chunk = WalkieProtocol.BYTES_PER_FRAME
+                var off = 0
+                var fIdx = 0
+                val normalized = normalizeFrames(frames)
+                val t0 = android.os.SystemClock.elapsedRealtime()
+                while (off < audio.size || fIdx < normalized.size) {
+                    val elapsed = android.os.SystemClock.elapsedRealtime() - t0
+                    while (fIdx < normalized.size && normalized[fIdx].timeOffsetMs <= elapsed) {
+                        sendVideoFrameUdp(normalized[fIdx].jpeg, peer)
+                        fIdx++
+                    }
+                    if (off < audio.size) {
+                        val n = min(chunk, audio.size - off)
+                        val pkt = ByteArray(1 + n)
+                        pkt[0] = WalkieProtocol.TYPE_AUDIO
+                        System.arraycopy(audio, off, pkt, 1, n)
+                        sendUdp(DatagramPacket(pkt, pkt.size, InetAddress.getByName(peer.host), peer.port))
+                        off += n
+                        Thread.sleep(WalkieProtocol.FRAME_MS.toLong())
+                    } else {
+                        Thread.sleep(15L)
+                    }
+                }
                 sendTalkEnd(peer)
+                val metrics = clipMetrics(audio, normalized)
+                val dur = max(metrics.videoMs, metrics.audioMs)
+                storeLastMessage(WalkieMessage(audio, normalized, dur, "me"))
+                Log.i(
+                    TAG,
+                    "CLIP_TX mode=BEST_BUNDLE frames=${normalized.size} videoMs=${metrics.videoMs} " +
+                        "audioMs=${metrics.audioMs} audioBytes=${audio.size} singleFile=true"
+                )
                 return
             }
 
@@ -1871,7 +1904,9 @@ class WalkieTalkieEngine(
         active: () -> Boolean,
         label: String
     ) {
-        preparePlaybackAudio()
+        // Respect rxPlaybackMode (Private earpiece vs Speaker) for BEST_RX; default Replay to current mode.
+        val useHeadset = rxPlaybackMode == WalkieProtocol.AUDIO_MODE_HEADSET
+        preparePlaybackAudio(headset = useHeadset)
         val normalized = normalizeFrames(frames)
         val metrics = clipMetrics(audio, normalized)
         // Single duration: clip ends when the longer of A/V ends; frames after audio still
@@ -3586,15 +3621,26 @@ class WalkieTalkieEngine(
                         WalkieProtocol.TYPE_TALK_START -> {
                             // Optional 2nd byte = speaker vs headset for privacy playback
                             val mode = if (walkieBytes.size >= 2) walkieBytes[1] else WalkieProtocol.AUDIO_MODE_SPEAKER
+                            val modeChanged = mode != rxPlaybackMode
                             rxPlaybackMode = mode
-                            preparePlaybackAudio(headset = mode == WalkieProtocol.AUDIO_MODE_HEADSET)
-                            Log.i(TAG, "TALK_START from $from playbackMode=$mode")
-                            // New remote clip — unseal and clear any trailing junk from previous
-                            rxClipSealed = false
-                            stopLocalPreviewInternal() // avoid local/remote ImageView fight (flash)
-                            synchronized(incomingAudio) {
-                                incomingAudio.reset()
-                                incomingFrames.clear()
+                            val alreadyReceiving = receiving.get()
+                            if (!alreadyReceiving || modeChanged) {
+                                preparePlaybackAudio(headset = mode == WalkieProtocol.AUDIO_MODE_HEADSET)
+                            }
+                            Log.i(
+                                TAG,
+                                "TALK_START from $from playbackMode=$mode " +
+                                    "route=${if (mode == WalkieProtocol.AUDIO_MODE_HEADSET) "PRIVATE" else "SPEAKER"} " +
+                                    "alreadyReceiving=$alreadyReceiving"
+                            )
+                            // Only reset buffers when starting a fresh incoming clip, never on burst duplicates 2 & 3!
+                            if (!alreadyReceiving) {
+                                rxClipSealed = false
+                                stopLocalPreviewInternal() // avoid local/remote ImageView fight (flash)
+                                synchronized(incomingAudio) {
+                                    incomingAudio.reset()
+                                    incomingFrames.clear()
+                                }
                             }
                             if (!talking.get()) {
                                 setChannelBusy(true, "remote TALK_START from $from")
@@ -3655,7 +3701,7 @@ class WalkieTalkieEngine(
                     videoDebug("Receiving during Replay — will play next when Replay ends")
                     postStatus("Receiving new video (plays after Replay)…")
                 } else {
-                    preparePlaybackAudio()
+                    preparePlaybackAudio(headset = rxPlaybackMode == WalkieProtocol.AUDIO_MODE_HEADSET)
                     mainHandler.post { listener.onReceivingChanged(true) }
                     postStatus("Receiving message… (expecting video)")
                 }
@@ -4332,10 +4378,17 @@ class WalkieTalkieEngine(
         val buf = max(minBuf * 2, WalkieProtocol.BYTES_PER_FRAME * 16)
 
         fun build(lowLatency: Boolean): AudioTrack {
+            // Use USAGE_VOICE_COMMUNICATION in Private (headset/earpiece) mode so Android's
+            // AudioPolicyManager permits routing to TYPE_BUILTIN_EARPIECE, and USAGE_MEDIA in Speaker mode.
+            val usage = if (preferHeadsetPlayback) {
+                AudioAttributes.USAGE_VOICE_COMMUNICATION
+            } else {
+                AudioAttributes.USAGE_MEDIA
+            }
             val b = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(usage)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -4459,16 +4512,27 @@ class WalkieTalkieEngine(
             }
             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             val target = if (headset) {
-                max(1, (maxVol * 0.55f).toInt())
+                max(2, (maxVol * 0.60f).toInt())
             } else {
-                max(savedMusicVolume, (maxVol * 0.75f).toInt().coerceAtLeast(1))
+                // Loud walkie-talkie speaker level (~88% of max volume) so incoming HOLD audio is clearly heard.
+                max(savedMusicVolume, (maxVol * 0.88f).toInt().coerceAtLeast(2))
             }
             if (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) < target || headset) {
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
             }
-            // Force track rebuild so setPreferredDevice applies on next write
+            if (headset) {
+                try {
+                    val maxCallVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+                    val callTarget = (maxCallVol * 0.80f).toInt().coerceAtLeast(1)
+                    if (audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL) < callTarget) {
+                        audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, callTarget, 0)
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+            // Force track rebuild so setPreferredDevice and AudioAttributes usage apply on next write
             releaseAudioTrack()
-            Log.i(TAG, "preparePlaybackAudio headset=$headset")
+            Log.i(TAG, "preparePlaybackAudio headset=$headset targetVol=$target/$maxVol")
         } catch (t: Throwable) {
             Log.w(TAG, "preparePlaybackAudio", t)
         }
@@ -4484,7 +4548,13 @@ class WalkieTalkieEngine(
             audioManager.isSpeakerphoneOn = false
             audioManager.mode = AudioManager.MODE_NORMAL
             if (savedMusicVolume >= 0) {
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, savedMusicVolume, 0)
+                val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                val minHealthy = (maxVol * 0.65f).toInt().coerceAtLeast(2)
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    max(savedMusicVolume, minHealthy),
+                    0
+                )
                 savedMusicVolume = -1
             }
         } catch (_: Exception) {
@@ -5734,6 +5804,112 @@ class WalkieTalkieEngine(
         }
         postStatus("Sharing screen (smooth)…")
         Log.i(TAG, "SCREEN serve START → ${peer.host}:udp=${peer.port} video=${peer.videoPort}")
+    }
+
+    /**
+     * Stream the local device's screen to [peerHost] using [com.example.barky.BarkyService.captureScreenBitmap]
+     * (`AccessibilityService.takeScreenshot` on Android 11+ / API 30+).
+     * Requires **zero** MediaProjection dialog or manual user confirmation on this phone.
+     */
+    fun startServingScreenViaAccessibility(
+        peerHost: String,
+        peerUdp: Int,
+        peerVideo: Int
+    ) {
+        if (servingScreen.get()) {
+            Log.w(TAG, "already serving screen")
+            return
+        }
+        val vport = when {
+            peerVideo > 0 -> peerVideo
+            learnedVideoPorts[peerHost] != null -> learnedVideoPorts[peerHost]!!
+            else -> 0
+        }
+        val peer = resolvePeerForStream(peerHost, peerUdp).let {
+            if (vport > 0) it.copy(videoPort = vport) else it
+        }
+        monitorTarget = peer
+        servingScreen.set(true)
+        mainHandler.post { listener.onScreenStateChanged(requestingScreen.get(), true) }
+        stopLocalPreviewInternal()
+        screenShareThread = thread(name = "walkie-serve-screen-a11y", isDaemon = true) {
+            var frames = 0
+            try {
+                val publicPeer = !PeerEndpoint.isPrivateIp(peer.host)
+                var tcpOk = openVideoOut(peer)
+                var lastTcpRetry = 0L
+                val w = 720
+                val h = 1280
+                val quality = if (publicPeer) 65 else 72
+                var lastJpeg: ByteArray? = null
+                var lastCaptureMs = 0L
+                var captureInFlight = false
+                // Android 14+ allows faster takeScreenshot (~220ms); Android 11-13 enforces ~380ms.
+                var captureIntervalMs = if (Build.VERSION.SDK_INT >= 34) 220L else 380L
+
+                while (servingScreen.get() && running.get()) {
+                    val now = System.currentTimeMillis()
+                    val a11y = com.example.barky.BarkyService.instance
+                    if (a11y != null && !captureInFlight && now - lastCaptureMs >= captureIntervalMs) {
+                        captureInFlight = true
+                        lastCaptureMs = now
+                        a11y.captureScreenBitmap(w, h) { bmp, errCode ->
+                            try {
+                                if (bmp != null) {
+                                    val baos = ByteArrayOutputStream()
+                                    bmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                                    bmp.recycle()
+                                    val bytes = baos.toByteArray()
+                                    if (bytes.size >= 64) {
+                                        lastJpeg = bytes
+                                    }
+                                    captureIntervalMs = if (Build.VERSION.SDK_INT >= 34) 220L else 380L
+                                } else if (errCode == 3) {
+                                    // ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT: back off briefly
+                                    captureIntervalMs = 520L
+                                }
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "a11y screenshot encode", t)
+                            } finally {
+                                captureInFlight = false
+                            }
+                        }
+                    }
+
+                    val jpeg = lastJpeg
+                    if (jpeg != null) {
+                        if (!tcpOk && now - lastTcpRetry > 900L) {
+                            lastTcpRetry = now
+                            tcpOk = openVideoOut(peer)
+                        }
+                        val viaTcp = tcpOk && sendVideoFrameTcp(jpeg)
+                        if (!viaTcp) tcpOk = false
+                        val sent = viaTcp || sendMonitorVideoUdp(jpeg, peer)
+                        if (sent) {
+                            frames++
+                            if (frames == 1 || frames % 25 == 0) {
+                                Log.i(
+                                    TAG,
+                                    "SCREEN_TX n=$frames mode=A11Y tcp=$tcpOk " +
+                                        "public=$publicPeer → ${peer.host}:${peer.port}"
+                                )
+                            }
+                        }
+                    }
+                    Thread.sleep(160L)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "serve screen via accessibility failed", t)
+            } finally {
+                closeVideoOut()
+                servingScreen.set(false)
+                mainHandler.post { listener.onScreenStateChanged(requestingScreen.get(), false) }
+                if (!talking.get()) maybeResumeLocalPreview()
+                Log.i(TAG, "SCREEN serve end (A11Y) frames=$frames")
+            }
+        }
+        postStatus("Sharing screen (auto)…")
+        Log.i(TAG, "SCREEN serve START (A11Y zero-prompt) → ${peer.host}:udp=${peer.port} video=${peer.videoPort}")
     }
 
     fun stopServingScreen() {

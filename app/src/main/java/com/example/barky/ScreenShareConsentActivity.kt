@@ -64,6 +64,8 @@ class ScreenShareConsentActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.screen_share_prepare_prompt, Toast.LENGTH_LONG).show()
         }
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        // Arm BarkyService to automatically confirm the system MediaProjection dialog.
+        BarkyService.armAutoConfirmMediaProjection(this)
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
     }
 

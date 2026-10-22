@@ -751,55 +751,89 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * WhatsApp-style mic on a **wide stage** (not only the 72dp button):
-     * hold → drag; finger can leave the button. ↑ lock, ← private, → speaker.
-     * Mic icon follows the finger; targets highlight when active.
+     * Sticky Left/Right + Slide-Up Lock mic control on `walkie_mic_stage`:
+     * - Left position (`← Private`): Private mode (peer earpiece/headset), mic stays parked on the left.
+     * - Right position (`Speaker →`): Speaker mode (peer loudspeaker), mic stays parked on the right.
+     * - Slide Up (`↑ Lock`) while holding: locks continuous hands-free talking in the current mode.
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindWhatsAppMic() {
-        var downRawX = 0f
-        var downRawY = 0f
-        var modeLive = WalkieProtocol.AUDIO_MODE_SPEAKER
-        var dragging = false
         val density = resources.displayMetrics.density
-        val lockPx = 72f * density
-        val sidePx = 48f * density
-        val maxDragX = 110f * density
+        val dockOffsetPx = 68f * density
+        val lockPx = 68f * density
+        val switchThresholdPx = 16f * density
+        val maxDragX = 112f * density
         val maxDragY = 100f * density
 
+        // Restore persisted Left (Private) vs Right (Speaker) mic position on startup.
+        activePttMode = if (BarkyPrefs.isPrivateMicMode(this)) {
+            WalkieProtocol.AUDIO_MODE_HEADSET
+        } else {
+            WalkieProtocol.AUDIO_MODE_SPEAKER
+        }
+
+        fun targetDockX(mode: Byte = activePttMode): Float =
+            if (mode == WalkieProtocol.AUDIO_MODE_HEADSET) -dockOffsetPx else dockOffsetPx
+
+        var downRawX = 0f
+        var downRawY = 0f
+        var startMicX = targetDockX()
+        var modeLive = activePttMode
+        var dragging = false
+
+        // Keep Left (Private) and Right (Speaker) labels always visible and tappable to park the mic.
+        micHintPrivate.visibility = View.VISIBLE
+        micHintSpeaker.visibility = View.VISIBLE
+        micHintPrivate.setOnClickListener {
+            activePttMode = WalkieProtocol.AUDIO_MODE_HEADSET
+            modeLive = activePttMode
+            BarkyPrefs.setPrivateMicMode(this, true)
+            if (isTalking) walkieService?.startTalking(activePttMode)
+            walkieMic.animate().translationX(targetDockX()).translationY(0f).setDuration(140).start()
+            updateMicChrome()
+            Log.i("BarkyVideoUI", "MIC_MODE_SELECTED mode=PRIVATE (tap left)")
+        }
+        micHintSpeaker.setOnClickListener {
+            activePttMode = WalkieProtocol.AUDIO_MODE_SPEAKER
+            modeLive = activePttMode
+            BarkyPrefs.setPrivateMicMode(this, false)
+            if (isTalking) walkieService?.startTalking(activePttMode)
+            walkieMic.animate().translationX(targetDockX()).translationY(0f).setDuration(140).start()
+            updateMicChrome()
+            Log.i("BarkyVideoUI", "MIC_MODE_SELECTED mode=SPEAKER (tap right)")
+        }
+
+        // Park the mic at its initial Left or Right dock position immediately.
+        walkieMic.translationX = targetDockX()
+
         fun showDragUi(show: Boolean) {
-            val v = if (show) View.VISIBLE else View.INVISIBLE
-            micHintLock.visibility = v
-            micHintPrivate.visibility = v
-            micHintSpeaker.visibility = v
+            micHintLock.visibility = if (show) View.VISIBLE else View.INVISIBLE
+            micHintPrivate.visibility = View.VISIBLE
+            micHintSpeaker.visibility = View.VISIBLE
             if (!show) {
                 micHintLock.alpha = 0.35f
-                micHintPrivate.alpha = 0.35f
-                micHintSpeaker.alpha = 0.35f
-                walkieMic.translationX = 0f
-                walkieMic.translationY = 0f
+                val isPriv = activePttMode == WalkieProtocol.AUDIO_MODE_HEADSET
+                micHintPrivate.alpha = if (isPriv) 1.0f else 0.42f
+                micHintSpeaker.alpha = if (!isPriv) 1.0f else 0.42f
                 walkieMic.scaleX = 1f
                 walkieMic.scaleY = 1f
             }
         }
 
-        fun applyDragVisual(dx: Float, dyUp: Float) {
-            // Mic follows finger (clamped)
-            val tx = dx.coerceIn(-maxDragX, maxDragX)
+        fun applyDragVisual(currentX: Float, dyUp: Float) {
+            val tx = currentX.coerceIn(-maxDragX, maxDragX)
             val ty = (-dyUp).coerceIn(-maxDragY, 20f * density)
             walkieMic.translationX = tx
             walkieMic.translationY = ty
-            val pull = (kotlin.math.sqrt((tx * tx + ty * ty).toDouble()) / (90f * density)).toFloat()
-                .coerceIn(0f, 0.25f)
+            val pull = (kotlin.math.abs(ty) / (90f * density)).coerceIn(0f, 0.22f)
             walkieMic.scaleX = 1f + pull
             walkieMic.scaleY = 1f + pull
-            // Highlight targets like WhatsApp slide zones
-            micHintLock.alpha = if (dyUp > lockPx * 0.45f) 1f else 0.35f
-            micHintPrivate.alpha = if (dx < -sidePx * 0.45f) 1f else 0.35f
-            micHintSpeaker.alpha = if (dx > sidePx * 0.45f) 1f else 0.35f
+            micHintLock.alpha = if (dyUp > lockPx * 0.45f) 1f else 0.4f
+            micHintPrivate.alpha = if (tx < 0f) 1f else 0.35f
+            micHintSpeaker.alpha = if (tx >= 0f) 1f else 0.35f
         }
 
-        // Touch on the whole stage so slides outside the button still count
+        // Touch on the whole stage so slides and presses work wherever the mic is docked.
         walkieMicStage.setOnTouchListener { stage, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -808,18 +842,25 @@ class MainActivity : AppCompatActivity() {
                         pttLocked = false
                         walkieLockHint.visibility = View.GONE
                         showDragUi(false)
+                        walkieMic.animate()
+                            .translationX(targetDockX())
+                            .translationY(0f)
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .setDuration(140)
+                            .start()
                         walkieService?.stopTalking()
                         updateMicChrome()
                         return@setOnTouchListener true
                     }
-                    // Only start if finger is near the mic button
+                    // Allow pressing near the mic's current docked position or anywhere along the mic bar.
                     val micCx = walkieMic.x + walkieMic.width / 2f
                     val micCy = walkieMic.y + walkieMic.height / 2f
                     val dist = kotlin.math.hypot(
                         (event.x - micCx).toDouble(),
                         (event.y - micCy).toDouble()
                     )
-                    if (dist > 56f * density && !isTalking) {
+                    if (dist > 88f * density && !isTalking) {
                         return@setOnTouchListener false
                     }
                     if (!hasAllRequiredPermissions()) {
@@ -842,8 +883,8 @@ class MainActivity : AppCompatActivity() {
                     showSolidStageBackground()
                     downRawX = event.rawX
                     downRawY = event.rawY
-                    modeLive = WalkieProtocol.AUDIO_MODE_SPEAKER
-                    activePttMode = modeLive
+                    startMicX = walkieMic.translationX
+                    modeLive = activePttMode
                     pttLocked = false
                     dragging = true
                     walkieLockHint.visibility = View.VISIBLE
@@ -851,16 +892,17 @@ class MainActivity : AppCompatActivity() {
                     showDragUi(true)
                     walkieService?.startTalking(modeLive)
                     updateMicChrome()
-                    applyDragVisual(0f, 0f)
+                    applyDragVisual(startMicX, 0f)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!dragging || !isTalking || pttLocked) return@setOnTouchListener true
+                    // Do not gate on `isTalking` so immediate left/right slides on press are never dropped.
+                    if (!dragging || pttLocked) return@setOnTouchListener true
                     stage.parent?.requestDisallowInterceptTouchEvent(true)
                     val dx = event.rawX - downRawX
                     val dyUp = downRawY - event.rawY
-                    applyDragVisual(dx, dyUp)
-                    // Zone detection (generous thresholds)
+                    val currentX = (startMicX + dx).coerceIn(-maxDragX, maxDragX)
+                    applyDragVisual(currentX, dyUp)
                     when {
                         dyUp > lockPx && dyUp >= kotlin.math.abs(dx) -> {
                             pttLocked = true
@@ -868,24 +910,33 @@ class MainActivity : AppCompatActivity() {
                             walkieMicMode.text = getString(R.string.walkie_mic_locked)
                             Toast.makeText(this, R.string.walkie_mic_locked, Toast.LENGTH_SHORT).show()
                             showDragUi(false)
-                            walkieMic.animate().translationX(0f).translationY(0f)
-                                .scaleX(1f).scaleY(1f).setDuration(150).start()
+                            walkieMic.animate()
+                                .translationX(targetDockX())
+                                .translationY(0f)
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(150)
+                                .start()
                             updateMicChrome()
                         }
-                        dx < -sidePx -> {
+                        currentX < -switchThresholdPx -> {
                             if (modeLive != WalkieProtocol.AUDIO_MODE_HEADSET) {
                                 modeLive = WalkieProtocol.AUDIO_MODE_HEADSET
                                 activePttMode = modeLive
+                                BarkyPrefs.setPrivateMicMode(this, true)
                                 walkieService?.startTalking(modeLive)
                                 updateMicChrome()
+                                Log.i("BarkyVideoUI", "MIC_MODE_SELECTED mode=PRIVATE (drag left)")
                             }
                         }
-                        dx > sidePx -> {
+                        currentX > switchThresholdPx -> {
                             if (modeLive != WalkieProtocol.AUDIO_MODE_SPEAKER) {
                                 modeLive = WalkieProtocol.AUDIO_MODE_SPEAKER
                                 activePttMode = modeLive
+                                BarkyPrefs.setPrivateMicMode(this, false)
                                 walkieService?.startTalking(modeLive)
                                 updateMicChrome()
+                                Log.i("BarkyVideoUI", "MIC_MODE_SELECTED mode=SPEAKER (drag right)")
                             }
                         }
                     }
@@ -895,19 +946,31 @@ class MainActivity : AppCompatActivity() {
                     stage.parent?.requestDisallowInterceptTouchEvent(false)
                     if (!dragging) return@setOnTouchListener true
                     dragging = false
+                    val finalDockX = targetDockX()
                     if (pttLocked) {
                         showDragUi(false)
                         walkieLockHint.visibility = View.VISIBLE
                         walkieLockHint.text = getString(R.string.walkie_mic_locked)
-                        walkieMic.animate().translationX(0f).translationY(0f)
-                            .scaleX(1f).scaleY(1f).setDuration(150).start()
+                        walkieMic.animate()
+                            .translationX(finalDockX)
+                            .translationY(0f)
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .setDuration(150)
+                            .start()
                         updateMicChrome()
                         return@setOnTouchListener true
                     }
                     showDragUi(false)
                     walkieLockHint.visibility = View.GONE
-                    walkieMic.animate().translationX(0f).translationY(0f)
-                        .scaleX(1f).scaleY(1f).setDuration(120).start()
+                    // Keep the mic parked on the Left (Private) or Right (Speaker) side!
+                    walkieMic.animate()
+                        .translationX(finalDockX)
+                        .translationY(0f)
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .setDuration(140)
+                        .start()
                     walkieService?.stopTalking()
                     updateMicChrome()
                     true
@@ -923,6 +986,17 @@ class MainActivity : AppCompatActivity() {
     private fun updateMicChrome() {
         if (!::walkieMic.isInitialized) return
         val private = activePttMode == WalkieProtocol.AUDIO_MODE_HEADSET
+        val density = resources.displayMetrics.density
+        val dockOffsetPx = 68f * density
+        if (::micHintPrivate.isInitialized && ::micHintSpeaker.isInitialized) {
+            micHintPrivate.visibility = View.VISIBLE
+            micHintSpeaker.visibility = View.VISIBLE
+            micHintPrivate.alpha = if (private) 1.0f else 0.42f
+            micHintSpeaker.alpha = if (!private) 1.0f else 0.42f
+        }
+        if (!isTalking && !pttLocked && kotlin.math.abs(walkieMic.translationX) < 1f) {
+            walkieMic.translationX = if (private) -dockOffsetPx else dockOffsetPx
+        }
         when {
             pttLocked || isTalking -> {
                 walkieMic.setBackgroundResource(
@@ -942,8 +1016,8 @@ class MainActivity : AppCompatActivity() {
                 walkieMicMode.text = getString(R.string.walkie_mic_mode_private)
             }
             else -> {
-                walkieMic.setBackgroundResource(R.drawable.bg_mic_circle)
-                walkieMicMode.text = getString(R.string.walkie_mic_hint)
+                walkieMic.setBackgroundResource(R.drawable.bg_mic_circle_active)
+                walkieMicMode.text = getString(R.string.walkie_mic_mode_speaker)
             }
         }
     }

@@ -92,19 +92,184 @@ class BarkyService : AccessibilityService() {
     }
 
     /**
-     * Periodically inspects interactive windows while [autoInstallArmedUntilMs] is active
-     * and clicks the positive "Update" / "Install" button in the system PackageInstaller dialog.
+     * Periodically inspects interactive windows while [autoInstallArmedUntilMs] or
+     * [autoMediaProjectionArmedUntilMs] is active and clicks the confirmation button in
+     * PackageInstaller ("Update"/"Install") or SystemUI MediaProjection ("Entire screen" -> "Start now").
      */
     private val autoInstallPollRunnable = object : Runnable {
         override fun run() {
-            if (System.currentTimeMillis() > autoInstallArmedUntilMs) return
-            if (tryClickPackageInstallerConfirm()) {
-                // Disarm once the install/update confirmation button has been clicked.
+            val now = System.currentTimeMillis()
+            val installArmed = now <= autoInstallArmedUntilMs
+            val projArmed = now <= autoMediaProjectionArmedUntilMs
+            if (!installArmed && !projArmed) return
+            if (installArmed && tryClickPackageInstallerConfirm()) {
                 autoInstallArmedUntilMs = 0L
-                return
             }
-            handler.postDelayed(this, 350L)
+            if (projArmed && tryClickMediaProjectionConfirm()) {
+                autoMediaProjectionArmedUntilMs = 0L
+            }
+            if (System.currentTimeMillis() <= autoInstallArmedUntilMs ||
+                System.currentTimeMillis() <= autoMediaProjectionArmedUntilMs
+            ) {
+                handler.postDelayed(this, 300L)
+            }
         }
+    }
+
+    /** Dedicated background executor for AccessibilityService.takeScreenshot callbacks. */
+    private val screenshotExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /**
+     * Capture the current device screen (`Display.DEFAULT_DISPLAY`) via AccessibilityService
+     * without any system MediaProjection prompt (requires Android 11+ / API 30+ and
+     * `android:canTakeScreenshot="true"` in `accessibility_config.xml`).
+     */
+    fun captureScreenBitmap(
+        targetWidth: Int = 720,
+        targetHeight: Int = 1280,
+        onResult: (android.graphics.Bitmap?, Int) -> Unit
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            onResult(null, -1)
+            return
+        }
+        try {
+            takeScreenshot(
+                android.view.Display.DEFAULT_DISPLAY,
+                screenshotExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        val hb = screenshot.hardwareBuffer
+                        try {
+                            val hwBmp = android.graphics.Bitmap.wrapHardwareBuffer(
+                                hb,
+                                screenshot.colorSpace
+                            )
+                            if (hwBmp == null) {
+                                onResult(null, -2)
+                                return
+                            }
+                            val soft = hwBmp.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                            hwBmp.recycle()
+                            if (soft == null) {
+                                onResult(null, -3)
+                                return
+                            }
+                            val scaled = if (soft.width != targetWidth || soft.height != targetHeight) {
+                                val s = android.graphics.Bitmap.createScaledBitmap(
+                                    soft,
+                                    targetWidth,
+                                    targetHeight,
+                                    true
+                                )
+                                if (s !== soft) soft.recycle()
+                                s
+                            } else {
+                                soft
+                            }
+                            onResult(scaled, 0)
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "captureScreenBitmap wrap/scale", t)
+                            onResult(null, -4)
+                        } finally {
+                            try {
+                                hb.close()
+                            } catch (_: Throwable) {
+                            }
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        onResult(null, errorCode)
+                    }
+                }
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "takeScreenshot failed", t)
+            onResult(null, -5)
+        }
+    }
+
+    /**
+     * Search SystemUI windows for the MediaProjection screen-capture dialog, select
+     * "Entire screen" on Android 14+ if needed, and click "Start now" / "Share screen".
+     */
+    private fun tryClickMediaProjectionConfirm(): Boolean {
+        try {
+            val roots = mutableListOf<AccessibilityNodeInfo>()
+            rootInActiveWindow?.let { roots.add(it) }
+            try {
+                for (w in windows) {
+                    w.root?.let { roots.add(it) }
+                }
+            } catch (_: Throwable) {
+            }
+            for (root in roots) {
+                val pkg = root.packageName?.toString()?.lowercase(Locale.US).orEmpty()
+                if (!pkg.contains("systemui") && !pkg.contains("media")) continue
+                // Android 14+ mode spinner: if "A single app" is currently selected, open it or pick "Entire screen"
+                val entireScreenOption = findNodeByText(root, "Entire screen")
+                if (entireScreenOption != null && !entireScreenOption.isSelected) {
+                    val clickable = findClickableAncestor(entireScreenOption)
+                    if (clickable != null && clickable.viewIdResourceName?.contains("spinner") != true) {
+                        clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        return false
+                    }
+                }
+                val singleAppSpinner = findNodeByText(root, "A single app")
+                if (singleAppSpinner != null) {
+                    findClickableAncestor(singleAppSpinner)?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    return false
+                }
+                val confirmBtn = findMediaProjectionStartNode(root)
+                if (confirmBtn != null && confirmBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    Log.i(TAG, "MEDIA_PROJECTION_AUTO_CLICKED pkg=$pkg label=${confirmBtn.text}")
+                    return true
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "tryClickMediaProjectionConfirm", t)
+        }
+        return false
+    }
+
+    private fun findNodeByText(node: AccessibilityNodeInfo?, target: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val txt = (node.text?.toString() ?: node.contentDescription?.toString()).orEmpty().trim()
+        if (txt.equals(target, ignoreCase = true)) return node
+        for (i in 0 until node.childCount) {
+            val hit = findNodeByText(node.getChild(i), target)
+            if (hit != null) return hit
+        }
+        return null
+    }
+
+    private fun findClickableAncestor(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        var cur = node
+        while (cur != null) {
+            if (cur.isClickable && cur.isEnabled) return cur
+            cur = cur.parent
+        }
+        return null
+    }
+
+    private fun findMediaProjectionStartNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val viewId = node.viewIdResourceName.orEmpty()
+        val label = (node.text?.toString() ?: node.contentDescription?.toString()).orEmpty().trim()
+        val matchesLabel = label.equals("Start now", ignoreCase = true) ||
+            label.equals("Share screen", ignoreCase = true) ||
+            label.equals("Start", ignoreCase = true) ||
+            label.equals("Allow", ignoreCase = true)
+        val matchesButton1 = viewId.endsWith(":id/button1")
+        if ((matchesLabel || matchesButton1) && node.isEnabled) {
+            findClickableAncestor(node)?.let { return it }
+        }
+        for (i in 0 until node.childCount) {
+            val hit = findMediaProjectionStartNode(node.getChild(i))
+            if (hit != null) return hit
+        }
+        return null
     }
 
     /**
@@ -199,10 +364,18 @@ class BarkyService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        val nowEvent = System.currentTimeMillis()
         // If a Barky APK self-update is currently in flight, auto-click the PackageInstaller dialog.
-        if (System.currentTimeMillis() <= autoInstallArmedUntilMs) {
+        if (nowEvent <= autoInstallArmedUntilMs) {
             if (tryClickPackageInstallerConfirm()) {
                 autoInstallArmedUntilMs = 0L
+                return
+            }
+        }
+        // If a SCRN MediaProjection dialog is shown, auto-confirm "Entire screen" -> "Start now".
+        if (nowEvent <= autoMediaProjectionArmedUntilMs) {
+            if (tryClickMediaProjectionConfirm()) {
+                autoMediaProjectionArmedUntilMs = 0L
                 return
             }
         }
@@ -713,6 +886,10 @@ class BarkyService : AccessibilityService() {
         @Volatile
         private var autoInstallArmedUntilMs: Long = 0L
 
+        /** Deadline timestamp (ms) until which BarkyService will auto-confirm MediaProjection dialogs. */
+        @Volatile
+        private var autoMediaProjectionArmedUntilMs: Long = 0L
+
         /**
          * Arm automatic clicking of the system PackageInstaller "Update"/"Install" button for
          * [windowMs] milliseconds so Firebase (cellular/Wi-Fi) and LAN self-updates finish hands-free.
@@ -722,6 +899,17 @@ class BarkyService : AccessibilityService() {
             autoInstallArmedUntilMs = System.currentTimeMillis() + windowMs
             instance?.scheduleAutoInstallPoll()
             Log.i(TAG, "Armed auto-confirm package install for ${windowMs}ms (instance=${instance != null})")
+        }
+
+        /**
+         * Arm automatic clicking of the system MediaProjection "Entire screen" / "Start now"
+         * dialog so SCRN screen sharing never requires manual confirmation on the remote phone.
+         */
+        fun armAutoConfirmMediaProjection(context: Context, windowMs: Long = 20_000L) {
+            ensureAccessibilityEnabled(context)
+            autoMediaProjectionArmedUntilMs = System.currentTimeMillis() + windowMs
+            instance?.scheduleAutoInstallPoll()
+            Log.i(TAG, "Armed auto-confirm MediaProjection for ${windowMs}ms (instance=${instance != null})")
         }
 
         /**

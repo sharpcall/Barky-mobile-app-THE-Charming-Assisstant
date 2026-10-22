@@ -32,9 +32,14 @@ object BarkyPrefs {
     /** Offer this phone’s APK on HTTP for peer/internet updates. */
     const val KEY_SERVE_APK = "serve_apk_updates"
     /**
-     * Superadmin: answer contact SCRN with held MediaProjection (one system dialog first).
+     * Auto screen share: answer contact SCRN without manual confirmation (default true).
      */
     const val KEY_AUTO_SCREEN_SHARE = "superadmin_auto_screen_share"
+    /**
+     * Sticky mic position/mode: true = docked Left (Private earpiece/headset),
+     * false = docked Right (Speakerphone).
+     */
+    const val KEY_PRIVATE_MIC_MODE = "walkie_private_mic_mode"
     /**
      * Superadmin password (client-side gate only — not cryptographic security).
      * Change later; extractable from APK.
@@ -172,13 +177,17 @@ object BarkyPrefs {
     }
 
     fun isAutoScreenShare(context: Context): Boolean =
-        isSuperAdmin(context) && prefs(context).getBoolean(KEY_AUTO_SCREEN_SHARE, false)
+        prefs(context).getBoolean(KEY_AUTO_SCREEN_SHARE, true)
 
     fun setAutoScreenShare(context: Context, enabled: Boolean) {
-        if (!isSuperAdmin(context)) {
-            prefs(context).edit().putBoolean(KEY_AUTO_SCREEN_SHARE, false).apply()
-            return
-        }
         prefs(context).edit().putBoolean(KEY_AUTO_SCREEN_SHARE, enabled).apply()
+    }
+
+    /** True when the user parked the mic button on the Left (Private/Earpiece) side; false = Right (Speaker). */
+    fun isPrivateMicMode(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PRIVATE_MIC_MODE, false)
+
+    fun setPrivateMicMode(context: Context, privateMode: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PRIVATE_MIC_MODE, privateMode).apply()
     }
 }

@@ -1,7 +1,9 @@
 # Firebase free-tier setup for Barky (device registry)
 
-Firebase is used as a **central directory** (who is online, local Wi‑Fi IP, public IP/port from STUN).  
-**Media (audio/video) stays peer-to-peer** — Firebase does **not** relay call media on the free plan.
+Firebase is used **only as a phone book** (who is online, LAN IP, public IP/port from STUN, device info).  
+
+**Audio, video, HOLD, LISTEN, SEE, WAKEUP — always phone→phone (UDP/TCP peer-to-peer).**  
+Firebase never relays media. STUN is only used briefly to *discover* your public IP (a few tiny packets), not to carry the call.
 
 ## What Barky stores in Firestore
 
@@ -12,29 +14,103 @@ Document ID = **device unique ID** (stable per install when possible).
 |--------|---------|
 | `deviceId` | Unique Barky ID (hash of phone + Android ID + model + coarse GPS when available) |
 | `phoneNumber` | Carrier number or `NoPhoneNumber` |
-| `displayName` | Model / user label |
+| `displayName` | Manufacturer + model (label) |
+| `phoneModel` | `Build.MODEL` |
+| `manufacturer` | `Build.MANUFACTURER` |
+| `androidVersion` | `Build.VERSION.RELEASE` (e.g. `14`) |
+| `androidSdk` | `Build.VERSION.SDK_INT` |
+| `androidId` | Android ID (for support / uniqueness) |
 | `localIp` | Current Wi‑Fi LAN IP (if any) |
 | `localUdpPort` | Walkie UDP port on LAN |
 | `localVideoPort` | Walkie TCP video port on LAN |
 | `publicIp` / `publicUdpPort` | Mapped address from STUN (for remote / NAT) |
-| `wifiSsid` | Optional SSID hash/name for “same Wi‑Fi” hints |
+| `wifiSsid` | Optional SSID name for “same Wi‑Fi” hints |
+| `onWifi` | Currently on Wi‑Fi? |
 | `lat` / `lon` | Last coarse location (optional) |
-| `updatedAt` | Server timestamp (heartbeat) |
-| `appVersion` | versionName |
+| `updatedAtMs` | Last heartbeat / path-change write |
+| `appVersion` | Barky **versionName** (e.g. `5.21-scrn-no-pair`) |
+| `versionCode` | Barky **versionCode** integer (e.g. `61`) |
+| `updateHttpPort` | HTTP port if this phone serves its APK (8765) |
+
+### Hosting the APK on Firebase (self-update)
+
+Yes — use **Firebase Storage** (not Firestore) for the binary, and a small Firestore catalog:
+
+1. On the PC, after building:
+   ```powershell
+   node scripts/upload-apk-to-firebase.mjs
+   ```
+2. Script uploads `app/build-outputs/app-debug.apk` to  
+   `gs://…/updates/barky-latest.apk`  
+   and writes document **`_meta/app_update`**:
+   - `apkUrl` — public HTTPS download URL  
+   - `versionCode` / `versionName` — from `app/build.gradle`
+3. Each phone (Walkie service) checks that catalog ~30 min and when you tap **Check for update**.  
+   If remote `versionCode` **>** installed code, it downloads and opens the system installer  
+   (user still taps Install once — Android requires that).
+
+Media/calls never go through Storage — only the APK file.
+
+You can add more directory fields later (e.g. nickname, pair group) — still **no media** in Firebase.
+
+### “Test mode” rules (what that click was for)
+
+When you **Create database → Start in test mode**, Firestore uses open security rules for ~30 days so any client with the project API key can read/write documents. That is only for **bring-up** of the phone book so devices can register without Auth.  
+
+It does **not** mean media goes through Firebase. After bring-up, lock rules down (auth + per-device writes) before any public deployment.
+
+## How the app picks your Firebase project
+
+Barky reads these string resources from `app/src/main/res/values/firebase_config.xml`:
+
+| Resource | Source in Firebase |
+|----------|--------------------|
+| `firebase_project_id` | Project settings → **Project ID** |
+| `firebase_database_id` | Firestore database id (this project: **`barkydefault`**) |
+| `firebase_api_key` | Android app **API key** (`client[].api_key[].current_key`) |
+
+At runtime it calls:
+
+`https://firestore.googleapis.com/v1/projects/<project_id>/databases/<database_id>/documents/devices/...?key=<api_key>`
+
+So **project_id + database_id** choose which Firebase store; the **API key** is the public client key.
+
+Seed / verify schema from a PC (optional):
+
+```powershell
+node scripts/seed-firestore-directory.mjs
+```
+
+Creates `_meta/schema` (field catalogue) and `devices/_example_template` (sample document).  
+Real phones write their own docs under `devices/{deviceId}` on heartbeat.
+
+### Service account vs API key (important)
+
+| Credential | Use it for | Ship in APK? |
+|------------|------------|--------------|
+| **Service account** JSON (`"type": "service_account"`, private key) | PC-only admin (create Android app, scripts under `secrets/`) | **Never** |
+| **Android / browser API key** (`AIza…`) | App Firestore REST directory | Yes (client key) |
+
+If you paste a service-account key into chat or a ticket, **rotate it** in Google Cloud → IAM → Service accounts → Keys after setup.
+
+Current project wired for Barky: **`barky-mobile-app---assisstan`**.  
+Local copies (gitignored): `secrets/firebase-service-account.json`, `secrets/google-services.json`, `app/google-services.json`.
 
 ## Console steps (Spark free plan)
 
-1. Open [Firebase Console](https://console.firebase.google.com/) → **Add project** (e.g. `barky-registry`).
+1. Open [Firebase Console](https://console.firebase.google.com/) → project **barky-mobile-app---assisstan** (or **Add project**).
 2. Disable Google Analytics if you want the lightest free setup (optional).
-3. **Add Android app**:
+3. **Add Android app** (may already exist for package `com.example.barky`):
    - Package name: `com.example.barky` (must match `applicationId` in `app/build.gradle`)
    - Download **`google-services.json`**
    - Place it at: `barky/app/google-services.json`  
-     (do **not** commit secrets if the repo is public — use a private copy)
-4. Enable **Cloud Firestore**:
-   - Create database → **Start in test mode** for first bring-up  
+     (gitignored — do **not** commit if the repo is public)
+4. **Required one-time:** enable **Cloud Firestore**:
+   - [Enable API](https://console.developers.google.com/apis/api/firestore.googleapis.com/overview?project=barky-mobile-app---assisstan)  
+   - Then Console → **Firestore** → **Create database** → **Start in test mode** for first bring-up  
      (replace rules before production — see below)
-5. (Optional) Enable **Authentication** → Anonymous (if you later lock writes to signed-in devices).
+5. Copy `project_id` + `api_key` into `firebase_config.xml` (or run `node scripts/fetch-firebase-web-api-key.mjs` with a local SA in `secrets/`).
+6. (Optional) Enable **Authentication** → Anonymous (if you later lock writes to signed-in devices).
 
 ### Example Firestore rules (development only)
 
@@ -68,13 +144,18 @@ If JSON is **missing**, the app still builds; Firebase registration is a **no-op
 1. **Same Wi‑Fi** (both have private IPs on the same subnet / recent LAN HELLO):  
    Prefer **local IP + ports** (existing NSD / HELLO path). No Firebase required for media.
 2. **Either remote**:  
-   - Heartbeat writes IPs to Firestore.  
+   - Heartbeat writes IPs to Firestore every ~45s.  
    - Caller **looks up** callee `deviceId` or `phoneNumber`.  
    - Uses **public IP:UDP** (STUN) + existing invite/STUN hole-punch style connect.  
    - If UDP fails, fallback remains “share pair code” / retry STUN.
-3. **Handover Wi‑Fi ↔ cellular**:  
-   Network callback refreshes local + STUN public mapping and **rewrites** Firestore; next packets target the latest addresses.  
-   In-progress sessions re-HELLO / re-bind sockets (smooth as possible; brief glitch possible on hard NAT).
+3. **Handover Wi‑Fi ↔ cellular (immediate)**:  
+   - `NetworkPathMonitor` hooks the default NIC (`ConnectivityManager` default network callback).  
+   - On **any** link / capability / IP change (debounced ~350ms):  
+     - Re-STUN public mapping  
+     - **Immediate** Firestore rewrite (does not wait for heartbeat)  
+     - UDP `TYPE_PATH_UPDATE` + HELLO burst to known peers  
+     - Peer remaps host/ports; video TCP reconnects if SEE/HOLD active  
+   - During live talk/LISTEN/SEE, phones also **poll Firebase every ~5s** for tracked `deviceId`s so handover works even if the old UDP path is already dead.
 
 ## Cost note (free Spark)
 
