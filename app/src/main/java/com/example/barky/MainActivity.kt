@@ -81,6 +81,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var permissionGate: View
     private lateinit var permissionGateList: TextView
     private lateinit var permissionGateBtn: MaterialButton
+    /** HUD & SCRN full-screen overlay views (#3, #4, #5). */
+    private lateinit var topHud: View
+    private lateinit var footerActions: View
+    private lateinit var statusChipBox: View
+    private lateinit var scrnOverlayContainer: View
+    private lateinit var btnScrnKbd: TextView
+    private lateinit var btnScrnToggleUi: TextView
+    private lateinit var btnScrnExit: TextView
+    private lateinit var scrnKeyboardPanel: View
+    private lateinit var scrnKbdInput: android.widget.EditText
+    private lateinit var btnScrnKbdSend: MaterialButton
+    private lateinit var btnScrnKeyBack: android.widget.Button
+    private lateinit var btnScrnKeyHome: android.widget.Button
+    private lateinit var btnScrnKeyRecents: android.widget.Button
+    private lateinit var btnScrnKeyBksp: android.widget.Button
+    private lateinit var btnScrnKeyEnter: android.widget.Button
 
     private var walkieService: WalkieTalkieService? = null
     private var walkieBound = false
@@ -101,6 +117,10 @@ class MainActivity : AppCompatActivity() {
     private var mapReady = false
     private var isListening = false
     private var isSeeing = false
+    /** True while viewing the peer phone's screen via SCRN (independent of SEE, #3). */
+    private var isRequestingScreen = false
+    /** True when the user temporarily toggled the main HUD buttons back on during SCRN (#5). */
+    private var scrnHudExpanded = false
     /** True while peer is watching us (we are serving SEE). */
     private var isServingSee = false
     private var pttLocked = false
@@ -173,7 +193,7 @@ class MainActivity : AppCompatActivity() {
                 pttLocked = false
                 updatePttLabels()
                 updateReplayVisibility()
-                if (!isReceiving && !isReplaying && !isSeeing) {
+                if (!isReceiving && !isReplaying && !isSeeing && !isRequestingScreen) {
                     restoreIdleStage()
                 }
             }
@@ -196,7 +216,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (hasStickyFrame) walkieVideoHint.visibility = View.GONE
                 updateReplayVisibility()
-                if (!isTalking && !isReplaying && !isSeeing) {
+                if (!isTalking && !isReplaying && !isSeeing && !isRequestingScreen) {
                     restoreIdleStage()
                 }
             }
@@ -214,10 +234,23 @@ class MainActivity : AppCompatActivity() {
             hasStickyFrame = true
             walkieVideoHint.visibility = View.GONE
             showMap = false
-            val watching = isSeeing || (walkieService?.isRequestingScreen() == true)
-            if (watching && live && !isTalking) {
-                // Only first remote frame re-asserts PiP (every-frame layout added lag)
+            val scrnActive = isRequestingScreen || (walkieService?.isRequestingScreen() == true)
+            if (scrnActive && live && !isTalking) {
+                // SCRN mode (#3 & #5): show remote phone's entire screen (FIT_CENTER) and keep
+                // own-phone camera PiP window hidden until user switches back to SEE.
+                pipLayoutActive = false
+                if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
+                if (::walkiePreview.isInitialized) walkiePreview.visibility = View.GONE
+                if (::walkieFlipCamera.isInitialized) walkieFlipCamera.visibility = View.GONE
+                walkieVideo.scaleType = ImageView.ScaleType.FIT_CENTER
+                walkieVideo.elevation = 0f
+                setRemoteVideoBitmap(bitmap)
+                walkieVideo.visibility = View.VISIBLE
+                walkieMap.visibility = View.GONE
+            } else if (isSeeing && live && !isTalking) {
+                // SEE mode: only first remote frame re-asserts PiP (every-frame layout added lag)
                 if (!pipLayoutActive) applySeeSplitLayout(true)
+                walkieVideo.scaleType = ImageView.ScaleType.CENTER_CROP
                 walkieVideo.elevation = 0f
                 // Pixel: replace drawable carefully — recycling the previous bitmap while
                 // ImageView still holds it caused black flashes / flicker.
@@ -277,7 +310,7 @@ class MainActivity : AppCompatActivity() {
                 if (replaying) {
                     showMap = false
                     showLocalCameraSurface(false)
-                } else if (!isReceiving && !isTalking && !isSeeing) {
+                } else if (!isReceiving && !isTalking && !isSeeing && !isRequestingScreen) {
                     restoreIdleStage()
                 }
                 updateReplayButton()
@@ -308,7 +341,7 @@ class MainActivity : AppCompatActivity() {
                 this@MainActivity.myTrail = myTrail
                 this@MainActivity.peerTrail = peerTrail
                 this@MainActivity.gpsEnabled = gpsEnabled
-                if (gpsEnabled && !isTalking && !isReceiving && !isReplaying && !isSeeing) {
+                if (gpsEnabled && !isTalking && !isReceiving && !isReplaying && !isSeeing && !isRequestingScreen) {
                     if (!showMap || walkieMap.visibility != View.VISIBLE) {
                         showMap = true
                         applyStageVisibility()
@@ -333,6 +366,11 @@ class MainActivity : AppCompatActivity() {
                 isSeeing = seeing
                 isServingSee = serving
                 if (seeing) {
+                    // Moving to SEE exits SCRN full-screen mode and brings back own-camera PiP (#3).
+                    if (isRequestingScreen) {
+                        isRequestingScreen = false
+                        applyScrnFullscreenMode(false)
+                    }
                     showMap = false
                     // Remote fills stage; self only in small PiP (never full-bleed)
                     applySeeSplitLayout(true)
@@ -341,6 +379,10 @@ class MainActivity : AppCompatActivity() {
                     if (!isServingSee) {
                         walkieService?.startLocalPreview()
                     }
+                } else if (isRequestingScreen) {
+                    // When SCRN is active, keep own camera PiP off and keep SCRN full-screen stage.
+                    applySeeSplitLayout(false)
+                    applyScrnFullscreenMode(true)
                 } else if (!isTalking && !isReceiving && !isReplaying) {
                     applySeeSplitLayout(false)
                     restoreIdleStage()
@@ -348,6 +390,35 @@ class MainActivity : AppCompatActivity() {
                     applySeeSplitLayout(false)
                     if (!isSeeing) showSolidStageBackground()
                 }
+                updateListenSeeButtons()
+                updateControls()
+            }
+        }
+
+        override fun onScreenStateChanged(requesting: Boolean, serving: Boolean) {
+            runOnUiThread {
+                // Handle SCRN state independently of SEE (#3 & #5):
+                // - Hide own-phone camera PiP and stop local preview while SCRN is active.
+                // - Enter full-screen SCRN mode (hiding main buttons until toggled back).
+                isRequestingScreen = requesting
+                if (requesting) {
+                    showMap = false
+                    walkieService?.stopLocalPreview()
+                    pipLayoutActive = false
+                    if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
+                    if (::walkiePreview.isInitialized) walkiePreview.visibility = View.GONE
+                    if (::walkieFlipCamera.isInitialized) walkieFlipCamera.visibility = View.GONE
+                    applyScrnFullscreenMode(true)
+                } else {
+                    applyScrnFullscreenMode(false)
+                    if (isSeeing) {
+                        applySeeSplitLayout(true)
+                        if (!isServingSee) walkieService?.startLocalPreview()
+                    } else if (!isTalking && !isReceiving && !isReplaying) {
+                        restoreIdleStage()
+                    }
+                }
+                updateScrnButton()
                 updateListenSeeButtons()
                 updateControls()
             }
@@ -364,7 +435,7 @@ class MainActivity : AppCompatActivity() {
                 previewBufH = previewH
                 previewDisplayOrient = displayOrientation
                 // Geometry for aspect only — do not fight an in-progress drag
-                if (isSeeing && pipLayoutActive && !pipDragging) {
+                if (isSeeing && !isRequestingScreen && pipLayoutActive && !pipDragging) {
                     layoutFloatingPip(preservePosition = true)
                 }
                 if (!pipDragging) applyNaturalPreviewTransform()
@@ -386,6 +457,7 @@ class MainActivity : AppCompatActivity() {
             isTalking = walkieService?.isTalking == true
             isListening = walkieService?.isListeningRemote() == true
             isSeeing = walkieService?.isSeeingRemote() == true
+            isRequestingScreen = walkieService?.isRequestingScreen() == true
             gpsEnabled = walkieService?.isGpsEnabled() == true
             walkieGps.isChecked = gpsEnabled
             autoSelectPeer()
@@ -397,7 +469,10 @@ class MainActivity : AppCompatActivity() {
                 walkieService?.setUiPreviewTexture(walkiePreview.surfaceTexture)
             }
             // Default stage: solid color — never full-screen self camera
-            if (isSeeing) {
+            if (isRequestingScreen) {
+                walkieService?.stopLocalPreview()
+                applyScrnFullscreenMode(true)
+            } else if (isSeeing) {
                 applySeeSplitLayout(true)
                 if (!isServingSee) walkieService?.startLocalPreview()
             } else if (gpsEnabled) {
@@ -475,8 +550,29 @@ class MainActivity : AppCompatActivity() {
         permissionGate = findViewById(R.id.permission_gate)
         permissionGateList = findViewById(R.id.permission_gate_list)
         permissionGateBtn = findViewById(R.id.permission_gate_btn)
+        // Bind HUD & SCRN full-screen overlay controls (#3, #4, #5)
+        topHud = findViewById(R.id.top_hud)
+        footerActions = findViewById(R.id.footer_actions)
+        statusChipBox = findViewById(R.id.status_chip_box)
+        scrnOverlayContainer = findViewById(R.id.scrn_overlay_container)
+        btnScrnKbd = findViewById(R.id.btn_scrn_kbd)
+        btnScrnToggleUi = findViewById(R.id.btn_scrn_toggle_ui)
+        btnScrnExit = findViewById(R.id.btn_scrn_exit)
+        scrnKeyboardPanel = findViewById(R.id.scrn_keyboard_panel)
+        scrnKbdInput = findViewById(R.id.scrn_kbd_input)
+        btnScrnKbdSend = findViewById(R.id.btn_scrn_kbd_send)
+        btnScrnKeyBack = findViewById(R.id.btn_scrn_key_back)
+        btnScrnKeyHome = findViewById(R.id.btn_scrn_key_home)
+        btnScrnKeyRecents = findViewById(R.id.btn_scrn_key_recents)
+        btnScrnKeyBksp = findViewById(R.id.btn_scrn_key_bksp)
+        btnScrnKeyEnter = findViewById(R.id.btn_scrn_key_enter)
         // SOFTWARE layer avoids ImageView hardware-composite flicker on Pixel and some Samsungs
         walkieVideo.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        // Auto-enable BarkyService accessibility when WRITE_SECURE_SETTINGS is granted so SCRN
+        // remote touch/keyboard execution works out of the box (#4).
+        BarkyService.ensureAccessibilityEnabled(this)
+        bindScrnOverlayControls()
+        bindScrnRemoteTouch()
 
         permissionGateBtn.setOnClickListener { requestAllRequiredPermissions() }
 
@@ -929,8 +1025,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Map if GPS on, otherwise solid stage (never full-screen self cam). */
+    /** Map if GPS on, SCRN full-screen if SCRN on, SEE split if SEE on, otherwise solid stage. */
     private fun restoreIdleStage() {
+        if (isRequestingScreen) {
+            applyScrnFullscreenMode(true)
+            return
+        }
         if (isSeeing) {
             applySeeSplitLayout(true)
             return
@@ -1064,18 +1164,19 @@ class MainActivity : AppCompatActivity() {
         if (!BarkyPrefs.isWifiOnly(this)) {
             walkieService?.applyNetworkMode()
         }
-        // Self cam only while watching SEE (PiP); never idle full-screen preview
-        if (isSeeing && !isServingSee) walkieService?.startLocalPreview()
+        // Self cam only while watching SEE (PiP); never during SCRN or idle full-screen preview (#3)
+        if (isSeeing && !isRequestingScreen && !isServingSee) walkieService?.startLocalPreview()
     }
 
     override fun onResume() {
         super.onResume()
+        BarkyService.ensureAccessibilityEnabled(this)
         // Continuously re-check: missing any permission → block UI and re-prompt
         if (!hasAllRequiredPermissions()) {
             showPermissionGate()
         } else {
             if (::permissionGate.isInitialized) permissionGate.visibility = View.GONE
-            if (isSeeing && !isServingSee) walkieService?.startLocalPreview()
+            if (isSeeing && !isRequestingScreen && !isServingSee) walkieService?.startLocalPreview()
         }
         if (::walkieScrn.isInitialized) {
             updateScrnButton()
@@ -1092,10 +1193,14 @@ class MainActivity : AppCompatActivity() {
         popup.show()
     }
 
+    /**
+     * Update the SCRN button label ("SCRN" vs "Stop SCRN") and highlight state (#3, #5).
+     */
     private fun updateScrnButton() {
         if (!::walkieScrn.isInitialized) return
-        val on = walkieService?.isRequestingScreen() == true
+        val on = isRequestingScreen || (walkieService?.isRequestingScreen() == true)
         walkieScrn.isSelected = on
+        walkieScrn.text = getString(if (on) R.string.walkie_scrn_on else R.string.walkie_scrn)
         walkieScrn.backgroundTintList = ContextCompat.getColorStateList(
             this,
             if (on) R.color.barky_glass_btn_on else R.color.barky_glass_btn
@@ -1103,6 +1208,214 @@ class MainActivity : AppCompatActivity() {
         val ready = walkieRunning && (selectedPeer != null || peers.isNotEmpty()) &&
             hasAllRequiredPermissions()
         walkieScrn.isEnabled = ready || on
+    }
+
+    /**
+     * Enter or exit full-screen SCRN mode (#3 & #5):
+     * - When [enabled] is true: hides top HUD, footer buttons, status chip, and own-camera PiP
+     *   so the whole screen shows only the peer phone's screen, while displaying a compact
+     *   floating control pill (`scrn_overlay_container`) to toggle buttons back on, open the
+     *   remote keyboard drawer, or exit SCRN.
+     * - When [enabled] is false: restores top HUD, footer buttons, and status chip to visible
+     *   and hides the SCRN floating pill and remote keyboard drawer.
+     */
+    private fun applyScrnFullscreenMode(enabled: Boolean) {
+        if (!::scrnOverlayContainer.isInitialized) return
+        if (enabled) {
+            scrnHudExpanded = false
+            scrnOverlayContainer.visibility = View.VISIBLE
+            scrnOverlayContainer.bringToFront()
+            if (::walkiePipBox.isInitialized) walkiePipBox.visibility = View.GONE
+            if (::walkiePreview.isInitialized) walkiePreview.visibility = View.GONE
+            if (::walkieFlipCamera.isInitialized) walkieFlipCamera.visibility = View.GONE
+            walkieVideo.visibility = View.VISIBLE
+            walkieVideo.scaleType = ImageView.ScaleType.FIT_CENTER
+            updateScrnHudVisibility()
+            Log.i("BarkyVideoUI", "SCRN_FULLSCREEN enabled=true hudExpanded=$scrnHudExpanded")
+        } else {
+            scrnHudExpanded = false
+            scrnOverlayContainer.visibility = View.GONE
+            if (::scrnKeyboardPanel.isInitialized) scrnKeyboardPanel.visibility = View.GONE
+            hideLocalSoftKeyboard()
+            if (::topHud.isInitialized) topHud.visibility = View.VISIBLE
+            if (::footerActions.isInitialized) footerActions.visibility = View.VISIBLE
+            if (::statusChipBox.isInitialized) statusChipBox.visibility = View.VISIBLE
+            Log.i("BarkyVideoUI", "SCRN_FULLSCREEN enabled=false hudRestored=true")
+        }
+    }
+
+    /**
+     * Apply the current [scrnHudExpanded] visibility to the main HUD and footer buttons while
+     * in SCRN mode so the user can hide all buttons for an unobstructed view or bring them back
+     * whenever needed (#5).
+     */
+    private fun updateScrnHudVisibility() {
+        val hudVis = if (!isRequestingScreen || scrnHudExpanded) View.VISIBLE else View.GONE
+        if (::topHud.isInitialized) topHud.visibility = hudVis
+        if (::footerActions.isInitialized) footerActions.visibility = hudVis
+        if (::statusChipBox.isInitialized) statusChipBox.visibility = hudVis
+        if (::btnScrnToggleUi.isInitialized) {
+            btnScrnToggleUi.text = getString(
+                if (scrnHudExpanded) R.string.scrn_btn_hide_ui else R.string.scrn_btn_toggle_ui
+            )
+        }
+    }
+
+    /**
+     * Hide the local soft keyboard when closing the SCRN remote keyboard drawer.
+     */
+    private fun hideLocalSoftKeyboard() {
+        try {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+                as? android.view.inputmethod.InputMethodManager
+            imm?.hideSoftInputFromWindow(scrnKbdInput.windowToken, 0)
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * Wire the floating SCRN pill buttons (Keyboard drawer toggle, UI buttons toggle, Exit SCRN)
+     * and the remote keyboard text/navigation controls (#4 & #5).
+     */
+    private fun bindScrnOverlayControls() {
+        // Toggle remote keyboard & navigation drawer (#4)
+        btnScrnKbd.setOnClickListener {
+            val show = scrnKeyboardPanel.visibility != View.VISIBLE
+            scrnKeyboardPanel.visibility = if (show) View.VISIBLE else View.GONE
+            if (show) {
+                scrnKbdInput.requestFocus()
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+                    as? android.view.inputmethod.InputMethodManager
+                imm?.showSoftInput(scrnKbdInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            } else {
+                hideLocalSoftKeyboard()
+            }
+        }
+        // Toggle main HUD & footer buttons back on/off during SCRN (#5)
+        btnScrnToggleUi.setOnClickListener {
+            scrnHudExpanded = !scrnHudExpanded
+            updateScrnHudVisibility()
+            Log.i("BarkyVideoUI", "SCRN_HUD_TOGGLE expanded=$scrnHudExpanded")
+        }
+        // Exit SCRN immediately and restore all main buttons (#5)
+        btnScrnExit.setOnClickListener {
+            walkieService?.stopScreenRemote()
+            applyScrnFullscreenMode(false)
+            updateScrnButton()
+        }
+        // Send typed text to the peer phone's focused input field (#4)
+        val sendCurrentText = { pressEnter: Boolean ->
+            val text = scrnKbdInput.text?.toString().orEmpty()
+            if (text.isNotEmpty() || pressEnter) {
+                walkieService?.sendRemoteText(text, replaceExisting = false, pressEnter = pressEnter)
+                scrnKbdInput.setText("")
+            }
+        }
+        btnScrnKbdSend.setOnClickListener {
+            sendCurrentText(false)
+        }
+        scrnKbdInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND ||
+                actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            ) {
+                sendCurrentText(true)
+                true
+            } else {
+                false
+            }
+        }
+        // Quick remote navigation & editing keys (#4)
+        btnScrnKeyBack.setOnClickListener {
+            walkieService?.sendRemoteKey(BarkyService.REMOTE_KEY_BACK)
+        }
+        btnScrnKeyHome.setOnClickListener {
+            walkieService?.sendRemoteKey(BarkyService.REMOTE_KEY_HOME)
+        }
+        btnScrnKeyRecents.setOnClickListener {
+            walkieService?.sendRemoteKey(BarkyService.REMOTE_KEY_RECENTS)
+        }
+        btnScrnKeyBksp.setOnClickListener {
+            walkieService?.sendRemoteKey(BarkyService.REMOTE_KEY_BACKSPACE)
+        }
+        btnScrnKeyEnter.setOnClickListener {
+            val pending = scrnKbdInput.text?.toString().orEmpty()
+            if (pending.isNotEmpty()) {
+                sendCurrentText(true)
+            } else {
+                walkieService?.sendRemoteKey(BarkyService.REMOTE_KEY_ENTER)
+            }
+        }
+    }
+
+    /**
+     * Bind touch handling on [walkieVideo] while SCRN is active (#4):
+     * - Single tap sends a normalized remote tap (`sendRemoteTap`) to click on the peer phone.
+     * - Drag/swipe sends a normalized remote swipe (`sendRemoteSwipe`) to scroll/drag on the peer phone.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun bindScrnRemoteTouch() {
+        val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var downTimeMs = 0L
+        walkieVideo.setOnTouchListener { _, event ->
+            val scrnActive = isRequestingScreen || (walkieService?.isRequestingScreen() == true)
+            if (!scrnActive) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    downTimeMs = System.currentTimeMillis()
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val upX = event.x
+                    val upY = event.y
+                    val dist = kotlin.math.hypot((upX - downX).toDouble(), (upY - downY).toDouble())
+                    val startNorm = mapTouchToRemoteNormalized(downX, downY) ?: return@setOnTouchListener true
+                    val endNorm = mapTouchToRemoteNormalized(upX, upY) ?: return@setOnTouchListener true
+                    if (dist <= touchSlop * 1.5) {
+                        walkieService?.sendRemoteTap(endNorm.first, endNorm.second)
+                    } else {
+                        val dur = (System.currentTimeMillis() - downTimeMs).toInt().coerceIn(100, 1000)
+                        walkieService?.sendRemoteSwipe(
+                            startNorm.first,
+                            startNorm.second,
+                            endNorm.first,
+                            endNorm.second,
+                            dur
+                        )
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    /**
+     * Map a touch point ([viewX], [viewY]) on [walkieVideo] to normalized `[0f..1f]` coordinates
+     * within the rendered remote screen bitmap, accounting for FIT_CENTER letterboxing.
+     */
+    private fun mapTouchToRemoteNormalized(viewX: Float, viewY: Float): Pair<Float, Float>? {
+        val vw = walkieVideo.width.toFloat()
+        val vh = walkieVideo.height.toFloat()
+        if (vw <= 0f || vh <= 0f) return null
+        val d = walkieVideo.drawable
+        val dw = d?.intrinsicWidth ?: 0
+        val dh = d?.intrinsicHeight ?: 0
+        if (dw <= 0 || dh <= 0) {
+            return (viewX / vw).coerceIn(0f, 1f) to (viewY / vh).coerceIn(0f, 1f)
+        }
+        // Compute FIT_CENTER drawn bounds of the remote screen bitmap inside walkieVideo.
+        val scale = minOf(vw / dw.toFloat(), vh / dh.toFloat())
+        val drawnW = dw * scale
+        val drawnH = dh * scale
+        val left = (vw - drawnW) / 2f
+        val top = (vh - drawnH) / 2f
+        val nx = ((viewX - left) / drawnW.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val ny = ((viewY - top) / drawnH.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        return nx to ny
     }
 
     private fun updateGpsButtonChrome() {

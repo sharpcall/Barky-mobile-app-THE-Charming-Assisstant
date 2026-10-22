@@ -113,6 +113,10 @@ class WalkieTalkieService : Service() {
         l.onReplayStateChanged(isReplaying)
         l.onVideoDebug(lastVideoDebug)
         l.onInternetInviteChanged(internetInviteCode)
+        // Sync current LISTEN, SEE, and SCRN flags so MainActivity restores accurate UI state.
+        l.onListenStateChanged(isListeningRemote(), false)
+        l.onSeeStateChanged(isSeeingRemote(), false)
+        l.onScreenStateChanged(isRequestingScreen(), false)
     }
 
     fun removeListener(l: UiListener) {
@@ -235,6 +239,30 @@ class WalkieTalkieService : Service() {
     fun isListeningRemote(): Boolean = engine?.isListeningRemote() == true
     fun isSeeingRemote(): Boolean = engine?.isSeeingRemote() == true
     fun isRequestingScreen(): Boolean = engine?.isRequestingScreen() == true
+
+    /** Forward a normalized (0f..1f) remote SCRN tap to the screen-sharing peer. */
+    fun sendRemoteTap(normX: Float, normY: Float): Boolean =
+        engine?.sendRemoteTap(normX, normY) == true
+
+    /** Forward a normalized (0f..1f) remote SCRN swipe/drag gesture to the screen-sharing peer. */
+    fun sendRemoteSwipe(
+        normX1: Float,
+        normY1: Float,
+        normX2: Float,
+        normY2: Float,
+        durationMs: Int = 220
+    ): Boolean = engine?.sendRemoteSwipe(normX1, normY1, normX2, normY2, durationMs) == true
+
+    /** Forward UTF-8 keyboard text to the screen-sharing peer's focused input field. */
+    fun sendRemoteText(
+        text: String,
+        replaceExisting: Boolean = false,
+        pressEnter: Boolean = false
+    ): Boolean = engine?.sendRemoteText(text, replaceExisting, pressEnter) == true
+
+    /** Forward a remote navigation/editing key code to the screen-sharing peer. */
+    fun sendRemoteKey(keyCode: Int): Boolean =
+        engine?.sendRemoteKey(keyCode) == true
 
     /** Force Firebase directory heartbeat (Contacts refresh / first open). */
     fun forceFirebaseRegister() {
@@ -743,7 +771,8 @@ class WalkieTalkieService : Service() {
                     "TEST_SCRN host=$host udp=$udp video=$vport id=${deviceId?.take(14)}"
                 )
                 if (host.isBlank() || udp <= 0) {
-                    Log.w(TAG, "TEST_SCRN missing host/udp")
+                    // When host/udp are omitted, start SCRN against the currently selected peer.
+                    engine?.startScreenRemote()
                 } else {
                     // Force stop any prior SCRN so this is always a start (not toggle-off)
                     try {
@@ -762,6 +791,42 @@ class WalkieTalkieService : Service() {
                         engine?.startScreenRemote()
                     }, 120L)
                 }
+            }
+            ACTION_TEST_SCRN_START -> {
+                // Start SCRN against currently selected peer for automated smoke tests.
+                Log.i(TAG, "TEST_SCRN_START via adb")
+                if (engine?.isRequestingScreen() == true) {
+                    engine?.stopScreenRemote()
+                }
+                mainHandler.postDelayed({
+                    engine?.startScreenRemote()
+                }, 80L)
+            }
+            ACTION_TEST_SCRN_STOP -> {
+                // Stop active SCRN session for automated smoke tests.
+                Log.i(TAG, "TEST_SCRN_STOP via adb")
+                engine?.stopScreenRemote()
+            }
+            ACTION_TEST_REMOTE_TAP -> {
+                // Send normalized remote tap (defaults to screen center 0.5, 0.5) via adb test intent.
+                val nx = intent.getFloatExtra(EXTRA_REMOTE_X, 0.5f)
+                val ny = intent.getFloatExtra(EXTRA_REMOTE_Y, 0.5f)
+                Log.i(TAG, "TEST_REMOTE_TAP via adb nx=$nx ny=$ny")
+                engine?.sendRemoteTap(nx, ny)
+            }
+            ACTION_TEST_REMOTE_TEXT -> {
+                // Send remote keyboard text via adb test intent.
+                val text = intent.getStringExtra(EXTRA_REMOTE_TEXT).orEmpty()
+                val enter = intent.getBooleanExtra(EXTRA_REMOTE_ENTER, false)
+                val replace = intent.getBooleanExtra(EXTRA_REMOTE_REPLACE, false)
+                Log.i(TAG, "TEST_REMOTE_TEXT via adb text=$text enter=$enter replace=$replace")
+                engine?.sendRemoteText(text, replaceExisting = replace, pressEnter = enter)
+            }
+            ACTION_TEST_REMOTE_KEY -> {
+                // Send remote special key (Back=1, Home=2, Recents=3, Backspace=4, Enter=5, Clear=6).
+                val key = intent.getIntExtra(EXTRA_REMOTE_KEY, com.example.barky.BarkyService.REMOTE_KEY_BACK)
+                Log.i(TAG, "TEST_REMOTE_KEY via adb key=$key")
+                engine?.sendRemoteKey(key)
             }
             ACTION_SERVE_SCREEN -> handleServeScreenIntent(intent)
             ACTION_DUMP_PEERS -> {
@@ -942,6 +1007,12 @@ class WalkieTalkieService : Service() {
         const val ACTION_CONNECT_INVITE = "com.example.barky.CONNECT_INVITE"
         const val ACTION_FIREBASE_LIST = "com.example.barky.FIREBASE_LIST"
         const val ACTION_TEST_SCRN = "com.example.barky.TEST_SCRN"
+        /** Adb test actions for SCRN start/stop and remote touch/keyboard control verification. */
+        const val ACTION_TEST_SCRN_START = "com.example.barky.TEST_SCRN_START"
+        const val ACTION_TEST_SCRN_STOP = "com.example.barky.TEST_SCRN_STOP"
+        const val ACTION_TEST_REMOTE_TAP = "com.example.barky.TEST_REMOTE_TAP"
+        const val ACTION_TEST_REMOTE_TEXT = "com.example.barky.TEST_REMOTE_TEXT"
+        const val ACTION_TEST_REMOTE_KEY = "com.example.barky.TEST_REMOTE_KEY"
         /** Adb: adopt public/LAN peer with deviceId for hub FWD (cellular tests). */
         const val ACTION_ADOPT_PEER = "com.example.barky.ADOPT_PEER"
         /** Consent activity → FGS owns MediaProjection (API 34+ order). */
@@ -952,6 +1023,13 @@ class WalkieTalkieService : Service() {
         const val EXTRA_SCRN_VIDEO = "scrn_video"
         const val EXTRA_SCRN_NAME = "scrn_name"
         const val EXTRA_SCRN_DEVICE_ID = "scrn_device_id"
+        /** Extras for remote SCRN tap/text/key test intents. */
+        const val EXTRA_REMOTE_X = "remote_x"
+        const val EXTRA_REMOTE_Y = "remote_y"
+        const val EXTRA_REMOTE_TEXT = "remote_text"
+        const val EXTRA_REMOTE_ENTER = "remote_enter"
+        const val EXTRA_REMOTE_REPLACE = "remote_replace"
+        const val EXTRA_REMOTE_KEY = "remote_key"
         const val EXTRA_PEER_HOST = "peer_host"
         const val EXTRA_PEER_UDP = "peer_udp"
         const val EXTRA_PEER_VIDEO = "peer_video"

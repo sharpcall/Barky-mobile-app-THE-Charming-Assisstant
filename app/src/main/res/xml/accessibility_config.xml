@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Accessibility configuration for BarkyService:
+    - canRetrieveWindowContent + flagRetrieveInteractiveWindows: reads on-screen units and locates
+      focused input fields for remote SCRN keyboard text/key injection.
+    - canPerformGestures: dispatches remote SCRN touch clicks and swipe gestures on this device.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds|flagRequestAccessibilityButton"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds|flagRequestAccessibilityButton|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_desc"
     android:settingsActivity="com.example.barky.MainActivity" />

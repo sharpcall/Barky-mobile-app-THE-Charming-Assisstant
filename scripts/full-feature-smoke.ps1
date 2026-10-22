@@ -25,9 +25,10 @@ function Info([string]$msg) {
     Write-Output ("INFO [t={0}s]: {1}" -f $t, $msg)
 }
 function Assert-NotTimedOut {
+    # Use ASCII '--' so Windows PowerShell 5.1 (CP1252) does not treat UTF-8 em-dash bytes as a quote.
     $t = [int]((Get-Date) - $script:smokeStart).TotalSeconds
     if ($t -ge $OverallTimeoutSec) {
-        Bad ("OVERALL TIMEOUT after {0}s (limit {1}s) — aborting remaining steps" -f $t, $OverallTimeoutSec)
+        Bad ("OVERALL TIMEOUT after {0}s (limit {1}s) -- aborting remaining steps" -f $t, $OverallTimeoutSec)
         Write-Output ("========== RESULTS pass={0} fail={1} timeout=1 ==========" -f $pass, $fail)
         exit 3
     }
@@ -77,8 +78,20 @@ if (Test-Path $wifiList) {
     } catch {}
 }
 & $adb devices -l
+# Deduplicate ADB transports by hardware ro.serialno so a phone connected via both
+# mDNS (_adb-tls-connect) and IP:port is only counted once as a physical device.
+$rawDevices = @()
+& $adb devices | ForEach-Object { if ($_ -match "^(\S+)\s+device\s*$") { $rawDevices += $Matches[1] } }
 $devices = @()
-& $adb devices | ForEach-Object { if ($_ -match "^(\S+)\s+device\s*$") { $devices += $Matches[1] } }
+$seenHw = @{}
+foreach ($s in $rawDevices) {
+    $hw = (& $adb -s $s shell getprop ro.serialno 2>$null).Trim()
+    if (-not $hw) { $hw = $s }
+    if (-not $seenHw.ContainsKey($hw)) {
+        $seenHw[$hw] = $true
+        $devices += $s
+    }
+}
 if ($devices.Count -lt 2) {
     Bad ("Need 2 devices for full dual-phone smoke (found {0}). Keep Wireless debugging ON; use scripts/devices-wifi.json" -f $devices.Count)
     Write-Output ("========== RESULTS pass={0} fail={1} ==========" -f $pass, $fail)
@@ -266,6 +279,10 @@ if (Has-Line $rxLogs "onWakeupReceived" -or Has-Line $rxLogs "WAKEUP" -or Has-Li
 } elseif (Has-Line $rxLogs "Ringtone" -or Has-Line $rxLogs "ring") {
     Ok "F RX ring/wakeup signal"
 } else { Bad "F no WAKEUP evidence on RX logs" }
+# Stop wakeup alarm on both phones before starting section G LISTEN audio checks.
+Adb-Svc $tx "com.example.barky.STOP_WAKEUP"
+Adb-Svc $rx "com.example.barky.STOP_WAKEUP"
+Start-Sleep -Seconds 1
 
 Assert-NotTimedOut
 # --- G: LISTEN both directions (must work on Pixel and Samsung) ---
@@ -331,6 +348,40 @@ if (Has-Line $txLogs "GPS ON" -or Has-Line $txLogs "GPS_TX") { Ok "I TX GPS on/t
 if (Has-Line $rxLogs "GPS ON" -or Has-Line $rxLogs "GPS_TX") { Ok "I RX GPS on/tx" } else { Bad "I RX GPS not active" }
 if (Has-Line $txLogs "GPS_RX") { Ok "I TX received peer GPS" } else { Bad "I TX missing GPS_RX peer path" }
 if (Has-Line $rxLogs "GPS_RX") { Ok "I RX received peer GPS" } else { Bad "I RX missing GPS_RX peer path" }
+Adb-Svc $tx "com.example.barky.TEST_GPS_OFF"
+Adb-Svc $rx "com.example.barky.TEST_GPS_OFF"
+
+# --- I2: SCRN mode (decoupled from SEE, full-screen UI, remote tap & keyboard control) ---
+Info "I2 SCRN full-screen & remote touch/keyboard control"
+foreach ($s in $devices) {
+    & $adb -s $s shell settings put secure enabled_accessibility_services "$Package/$Package.BarkyService" 2>$null | Out-Null
+    & $adb -s $s shell settings put secure accessibility_enabled 1 2>$null | Out-Null
+    # Wake screen and foreground MainActivity so UI listener is bound for SCRN_FULLSCREEN check.
+    & $adb -s $s shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null
+    & $adb -s $s shell am start -n $Activity 2>$null | Out-Null
+}
+Start-Sleep -Seconds 1
+foreach ($s in $devices) {
+    & $adb -s $s logcat -c | Out-Null
+}
+Adb-Svc $tx "com.example.barky.TEST_SCRN_START"
+Start-Sleep -Seconds 2
+& $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_TAP" --ef remote_x 0.5 --ef remote_y 0.5 | Out-Null
+& $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_TEXT" --es remote_text "BarkyScrnTest" --ez remote_enter true | Out-Null
+& $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_KEY" --ei remote_key 1 | Out-Null
+Start-Sleep -Seconds 2
+$txLogs = Get-Logs $tx
+$rxLogs = Get-Logs $rx
+if (Has-Line $txLogs "SCREEN_REQ ONLY") { Ok "I2 TX started SCRN without enabling SEE" } else { Bad "I2 TX SCREEN_REQ ONLY missing" }
+if (-not (Has-Line $txLogs "SEE_REQ via")) { Ok "I2 SCRN did not trigger SEE_REQ" } else { Bad "I2 SCRN unexpectedly triggered SEE_REQ" }
+if (Has-Line $txLogs "SCRN_FULLSCREEN enabled=true") { Ok "I2 TX entered full-screen SCRN mode (buttons hidden)" } else { Bad "I2 TX SCRN_FULLSCREEN log missing" }
+if (Has-Line $txLogs "REMOTE_INPUT_TX cmd=TAP") { Ok "I2 TX sent remote TAP packet" } else { Bad "I2 TX REMOTE_INPUT_TX TAP missing" }
+if (Has-Line $rxLogs "REMOTE_INPUT_RX cmd=TAP") { Ok "I2 RX received remote TAP packet" } else { Bad "I2 RX REMOTE_INPUT_RX TAP missing" }
+if (Has-Line $txLogs "REMOTE_INPUT_TX cmd=TEXT") { Ok "I2 TX sent remote keyboard TEXT packet" } else { Bad "I2 TX REMOTE_INPUT_TX TEXT missing" }
+if (Has-Line $rxLogs "REMOTE_INPUT_RX cmd=TEXT") { Ok "I2 RX received remote keyboard TEXT packet" } else { Bad "I2 RX REMOTE_INPUT_RX TEXT missing" }
+if (Has-Line $rxLogs "REMOTE_INPUT_RX cmd=KEY") { Ok "I2 RX received remote KEY packet" } else { Bad "I2 RX REMOTE_INPUT_RX KEY missing" }
+Adb-Svc $tx "com.example.barky.TEST_SCRN_STOP"
+Start-Sleep -Seconds 1
 
 # --- J: Service alive / no fatal ---
 Info "J Stability"

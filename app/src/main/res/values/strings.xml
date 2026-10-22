@@ -141,6 +141,19 @@
     <string name="walkie_gps_short">GPS</string>
     <string name="walkie_gps_need_perm">Location permission is required for GPS tracking</string>
     <string name="walkie_scrn">SCRN</string>
+    <string name="walkie_scrn_on">Stop SCRN</string>
+    <!-- Strings for SCRN full-screen mode & remote touch/keyboard control (#4, #5) -->
+    <string name="scrn_btn_keyboard">⌨ Type</string>
+    <string name="scrn_btn_toggle_ui">☰ Buttons</string>
+    <string name="scrn_btn_hide_ui">✕ Hide UI</string>
+    <string name="scrn_btn_exit">✕ SCRN</string>
+    <string name="scrn_kbd_hint">Type to remote phone…</string>
+    <string name="scrn_kbd_send">Send</string>
+    <string name="scrn_key_back">◁ Back</string>
+    <string name="scrn_key_home">○ Home</string>
+    <string name="scrn_key_recents">▢ Apps</string>
+    <string name="scrn_key_bksp">⌫</string>
+    <string name="scrn_key_enter">↵</string>
     <string name="walkie_scrn_need_contact">Select a contact first (Contacts → Select), then SCRN views their screen</string>
     <string name="walkie_scrn_requesting">Requesting contact’s screen…</string>
     <string name="walkie_scrn_help">Views the other phone’s screen (not yours). They must accept the system screen-share prompt.</string>

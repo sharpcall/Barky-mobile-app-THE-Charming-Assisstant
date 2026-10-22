@@ -7,8 +7,9 @@
 #
 # Keep Wireless debugging ON on each phone (Developer options).
 # Pairing once (adb pair IP:PAIRPORT) is enough; after that adb connect IP:PORT works.
+# Default 360s budget covers mDNS discovery, Gradle assembleDebug, dual-phone install, and full-feature-smoke.
 param(
-    [int]$OverallTimeoutSec = 180,
+    [int]$OverallTimeoutSec = 360,
     [switch]$SkipBuild,
     [switch]$SkipSmoke
 )
@@ -16,26 +17,33 @@ param(
 $ErrorActionPreference = "Continue"
 $start = Get-Date
 function Elapsed { [int]((Get-Date) - $start).TotalSeconds }
+# Use ASCII punctuation in string literals so Windows PowerShell 5.1 (CP1252) does not
+# misparse UTF-8 em-dash bytes (0xE2 0x80 0x94) as a closing smart-quote.
 function DeadlineLeft {
     $left = $OverallTimeoutSec - (Elapsed)
-    if ($left -lt 5) { throw "TIMEOUT: publish-wifi exceeded ${OverallTimeoutSec}s — aborting and reporting" }
+    if ($left -lt 5) { throw "TIMEOUT: publish-wifi exceeded ${OverallTimeoutSec}s -- aborting and reporting" }
     return $left
 }
 
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) { $adb = "adb" }
 $root = "F:\To sort\Delete\barky"
-$javaHome = "C:\Program Files\Android\Android Studio\jbr"
+# Prefer Android Studio2 JBR (matches gradle.properties), fallback to Android Studio JBR.
+$javaHome = if (Test-Path "C:\Program Files\Android\Android Studio2\jbr") {
+    "C:\Program Files\Android\Android Studio2\jbr"
+} else {
+    "C:\Program Files\Android\Android Studio\jbr"
+}
 $env:JAVA_HOME = $javaHome
 $env:Path = "$javaHome\bin;$env:LOCALAPPDATA\Android\Sdk\platform-tools;" + $env:Path
 
 Write-Output "========== PUBLISH WIFI t=0s =========="
 Write-Output "Keep Wireless debugging ON on phones. Pairing is only needed once."
 
-# Discover / reconnect wireless endpoints (mdns first — ports change often)
+# Discover / reconnect wireless endpoints (mdns first -- ports change often)
 $discover = Join-Path $PSScriptRoot "discover-wifi-devices.ps1"
 if (Test-Path $discover) {
-    Write-Output "Discovering wireless adb via mdns…"
+    Write-Output "Discovering wireless adb via mdns..."
     & powershell -NoProfile -ExecutionPolicy Bypass -File $discover 2>&1 | ForEach-Object { Write-Output $_ }
 }
 $wifiList = Join-Path $PSScriptRoot "devices-wifi.json"
@@ -53,12 +61,23 @@ if (Test-Path $wifiList) {
         Write-Output "WARN: devices-wifi.json parse/connect: $_"
     }
 } else {
-    Write-Output "INFO: no devices-wifi.json yet — ran mdns discover; or leave Wireless debugging ON"
+    Write-Output "INFO: no devices-wifi.json yet -- ran mdns discover; or leave Wireless debugging ON"
 }
 
 & $adb devices -l
+# Deduplicate ADB transports by hardware ro.serialno so each physical phone is installed once.
+$rawDevices = @()
+& $adb devices | ForEach-Object { if ($_ -match "^(\S+)\s+device\s*$") { $rawDevices += $Matches[1] } }
 $devices = @()
-& $adb devices | ForEach-Object { if ($_ -match "^(\S+)\s+device\s*$") { $devices += $Matches[1] } }
+$seenHw = @{}
+foreach ($s in $rawDevices) {
+    $hw = (& $adb -s $s shell getprop ro.serialno 2>$null).Trim()
+    if (-not $hw) { $hw = $s }
+    if (-not $seenHw.ContainsKey($hw)) {
+        $seenHw[$hw] = $true
+        $devices += $s
+    }
+}
 if ($devices.Count -lt 1) {
     Write-Output "FAIL: no adb devices. Enable Wireless debugging, note IP:port, add to devices-wifi.json, or plug USB."
     exit 2
@@ -68,7 +87,7 @@ Write-Output "Devices: $($devices -join ', ')"
 $apk = Join-Path $root "app\build-outputs\app-debug.apk"
 if (-not $SkipBuild) {
     DeadlineLeft | Out-Null
-    Write-Output "Building… t=$(Elapsed)s"
+    Write-Output "Building... t=$(Elapsed)s"
     Push-Location $root
     & .\gradlew.bat assembleDebug -q
     $bc = $LASTEXITCODE
@@ -98,10 +117,16 @@ foreach ($s in $devices) {
         "android.permission.ACCESS_FINE_LOCATION","android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.POST_NOTIFICATIONS","android.permission.READ_CONTACTS",
         "android.permission.CALL_PHONE","android.permission.READ_PHONE_STATE",
-        "android.permission.READ_PHONE_NUMBERS"
+        "android.permission.READ_PHONE_NUMBERS","android.permission.WRITE_SECURE_SETTINGS"
     )) {
         & $adb -s $s shell pm grant $pkg $p 2>$null | Out-Null
     }
+    # Enable PROJECT_MEDIA appop and BarkyService accessibility so SCRN screen share and
+    # remote touch/keyboard control (#4) work automatically on both phones without manual prompts.
+    & $adb -s $s shell appops set $pkg PROJECT_MEDIA allow 2>$null | Out-Null
+    & $adb -s $s shell appops set $pkg SYSTEM_ALERT_WINDOW allow 2>$null | Out-Null
+    & $adb -s $s shell settings put secure enabled_accessibility_services "$pkg/$pkg.BarkyService" 2>$null | Out-Null
+    & $adb -s $s shell settings put secure accessibility_enabled 1 2>$null | Out-Null
     & $adb -s $s shell am force-stop $pkg | Out-Null
     & $adb -s $s shell am start -n "$pkg/.MainActivity" | Out-Null
     $ver = & $adb -s $s shell dumpsys package $pkg | Select-String "versionName"
@@ -111,7 +136,8 @@ foreach ($s in $devices) {
 if (-not $SkipSmoke) {
     DeadlineLeft | Out-Null
     if ($devices.Count -ge 2) {
-        Write-Output "Starting full-feature-smoke (max remaining $(DeadlineLeft)s)…"
+        # Run full-feature-smoke with ASCII messages for PowerShell 5.1 compatibility.
+        Write-Output "Starting full-feature-smoke (max remaining $(DeadlineLeft)s)..."
         $smoke = Join-Path $PSScriptRoot "full-feature-smoke.ps1"
         $job = Start-Job -ScriptBlock {
             param($script, $adbPath)
@@ -122,7 +148,7 @@ if (-not $SkipSmoke) {
         if (-not (Wait-Job $job -Timeout $wait)) {
             Stop-Job $job -ErrorAction SilentlyContinue
             Remove-Job $job -Force -ErrorAction SilentlyContinue
-            Write-Output "FAIL: smoke timed out after ${wait}s — see scripts/full-feature-smoke.ps1"
+            Write-Output "FAIL: smoke timed out after ${wait}s -- see scripts/full-feature-smoke.ps1"
             exit 3
         }
         $out = Receive-Job $job
@@ -130,7 +156,7 @@ if (-not $SkipSmoke) {
         $out | ForEach-Object { Write-Output $_ }
         if ($out -match "fail=[1-9]") { exit 1 }
     } else {
-        Write-Output "WARN: only $($devices.Count) device(s) — skipped dual-phone smoke (not hung; insufficient devices)"
+        Write-Output "WARN: only $($devices.Count) device(s) -- skipped dual-phone smoke (not hung; insufficient devices)"
     }
 }
 

@@ -80,6 +80,24 @@ object WalkieProtocol {
      */
     const val TYPE_SESSION_FAIL: Byte = 0x1B
 
+    /**
+     * Remote SCRN touch & keyboard control packet sent from the viewer phone to the screen-sharing
+     * phone.
+     * Layout:
+     * - Tap:   [TYPE_REMOTE_INPUT][REMOTE_CMD_TAP][seq:u16 BE][normX:u16 BE (0..10000)][normY:u16 BE (0..10000)]
+     * - Swipe: [TYPE_REMOTE_INPUT][REMOTE_CMD_SWIPE][seq:u16 BE][x1:u16][y1:u16][x2:u16][y2:u16][durMs:u16]
+     * - Text:  [TYPE_REMOTE_INPUT][REMOTE_CMD_TEXT][seq:u16 BE][flags:u8][utf8Len:u16 BE][utf8Bytes…]
+     * - Key:   [TYPE_REMOTE_INPUT][REMOTE_CMD_KEY][seq:u16 BE][keyCode:u8]
+     */
+    const val TYPE_REMOTE_INPUT: Byte = 0x1C
+    const val REMOTE_CMD_TAP: Byte = 0x01
+    const val REMOTE_CMD_SWIPE: Byte = 0x02
+    const val REMOTE_CMD_TEXT: Byte = 0x03
+    const val REMOTE_CMD_KEY: Byte = 0x04
+    /** Bit flags for REMOTE_CMD_TEXT payload. */
+    const val REMOTE_TEXT_FLAG_ENTER: Int = 0x01
+    const val REMOTE_TEXT_FLAG_REPLACE: Int = 0x02
+
     /** HELLO[3] capability flags (optional 4th byte). */
     const val CAP_OPUS: Int = 0x01
     const val CAP_AVC: Int = 0x02

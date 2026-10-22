@@ -65,28 +65,43 @@ object NetworkEndpoints {
         }
     }
 
+    /**
+     * Primary local IPv4 address, preferring Wi‑Fi (`wlan*` / `192.168.*`) over cellular (`rmnet*`)
+     * so dual-active SIM + Wi‑Fi phones (e.g. Samsung S20) always match LAN peers on Wi‑Fi.
+     */
     fun findLocalIpv4(): String? = findAllLocalIpv4().firstOrNull()
 
-    /** All non-loopback IPv4s (Wi‑Fi + cellular) — needed to hide self in Contacts. */
+    /**
+     * All non-loopback IPv4s (Wi‑Fi first, then other interfaces) — needed to hide self in
+     * Contacts and to match LAN subnets accurately when both SIM data and Wi‑Fi are active.
+     */
     fun findAllLocalIpv4(): List<String> {
-        val out = LinkedHashSet<String>()
+        val wifiAddrs = LinkedHashSet<String>()
+        val otherAddrs = LinkedHashSet<String>()
         try {
             val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
             for (ni in ifaces) {
                 if (!ni.isUp || ni.isLoopback) continue
+                val ifName = ni.name?.lowercase().orEmpty()
+                val isWifiIface = ifName.startsWith("wlan") || ifName.startsWith("wifi") ||
+                    ifName.startsWith("ap")
                 val addrs = ni.inetAddresses
                 while (addrs.hasMoreElements()) {
                     val a = addrs.nextElement()
                     if (a is Inet4Address && !a.isLoopbackAddress) {
                         val host = a.hostAddress ?: continue
-                        out.add(host)
+                        if (isWifiIface || host.startsWith("192.168.")) {
+                            wifiAddrs.add(host)
+                        } else {
+                            otherAddrs.add(host)
+                        }
                     }
                 }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "findAllLocalIpv4", t)
         }
-        return out.toList()
+        return (wifiAddrs + otherAddrs).toList()
     }
 
     @Suppress("DEPRECATION")
@@ -115,21 +130,23 @@ object NetworkEndpoints {
     ): Boolean {
         // Cellular / no Wi‑Fi: always public path (STUN)
         if (!self.onWifi) return false
-        val a = self.localIp
         val b = peerLocalIp
-        if (a.isNullOrBlank() || b.isNullOrBlank()) return false
-        if (!PeerEndpoint.isPrivateIp(a) || !PeerEndpoint.isPrivateIp(b)) return false
+        if (b.isNullOrBlank() || !PeerEndpoint.isPrivateIp(b)) return false
         // Stale Firebase localIp without live HELLO → do not force dead LAN route
         if (!liveLanHello) return false
-        // Same /16 or /24 family on home LAN is a strong hint
-        val aParts = a.split(".")
         val bParts = b.split(".")
-        if (aParts.size == 4 && bParts.size == 4) {
-            if (aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]) {
-                return true
+        // Check all local IPv4 interfaces (in case SIM rmnet is active alongside wlan0)
+        val candidates = (listOfNotNull(self.localIp) + findAllLocalIpv4()).distinct()
+        for (a in candidates) {
+            if (!PeerEndpoint.isPrivateIp(a)) continue
+            val aParts = a.split(".")
+            if (aParts.size == 4 && bParts.size == 4) {
+                if (aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]) {
+                    return true
+                }
+                // Same /16 + live HELLO is enough on home routers
+                if (aParts[0] == bParts[0] && aParts[1] == bParts[1]) return true
             }
-            // Same /16 + live HELLO is enough on home routers
-            if (aParts[0] == bParts[0] && aParts[1] == bParts[1]) return true
         }
         if (!self.wifiSsid.isNullOrBlank() && self.wifiSsid == peerWifiHint) return true
         return false

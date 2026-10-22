@@ -18,8 +18,10 @@ android {
         applicationId "com.example.barky"
         minSdk 26
         targetSdk 35
-        versionCode 107
-        versionName "5.67-see-lan-720"
+        // Release 108 (5.68-scrn-remote-ctrl): decouple SCRN from SEE, hide own camera PiP
+        // during SCRN, full-screen SCRN UI with toggleable buttons, and remote touch/keyboard control.
+        versionCode 108
+        versionName "5.68-scrn-remote-ctrl"
     }
 
     compileOptions {

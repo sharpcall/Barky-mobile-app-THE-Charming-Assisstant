@@ -343,6 +343,39 @@ class WalkieTalkieEngine(
         val existingHost = deviceId?.takeIf { it.isNotBlank() }?.let { peerHostByDeviceId[it] }
         val existing = existingHost?.let { h -> peers.values.find { it.host == h } }
             ?: peers.values.find { it.host == host }
+            ?: peers.values.find {
+                PeerEndpoint.isPrivateIp(it.host) &&
+                    (System.currentTimeMillis() - (peerLastHelloMs[it.host] ?: 0L)) < 25_000L
+            }
+        // When on Wi‑Fi and we have a recent (<25s) live LAN HELLO from this peer, keep the live
+        // LAN host and HELLO ports authoritative so a background Firebase poll never clobbers them
+        // with a stale public IP or pre-restart port.
+        val hasFreshLanHello = existing != null &&
+            NetworkEndpoints.isWifi(appContext) &&
+            PeerEndpoint.isPrivateIp(existing.host) &&
+            (System.currentTimeMillis() - (peerLastHelloMs[existing.host] ?: 0L)) < 25_000L
+        if (hasFreshLanHello && existing != null) {
+            val liveVport = learnedVideoPorts[existing.host]?.takeIf { it > 0 } ?: existing.videoPort
+            val renamed = existing.copy(
+                serviceName = "Barky-$cleanName",
+                videoPort = liveVport
+            )
+            peers.entries.removeIf { it.value.host == existing.host && it.key != key(renamed) }
+            peers[key(renamed)] = renamed
+            selectedPeerKey = key(renamed)
+            userLockedSelection.set(true)
+            if (!deviceId.isNullOrBlank()) {
+                peerHostByDeviceId[deviceId] = existing.host
+                hostToDeviceId[existing.host] = deviceId
+            }
+            postPeers()
+            Log.i(
+                TAG,
+                "adoptDirectoryPeer keep live LAN ${existing.host}:${existing.port} " +
+                    "vport=$liveVport (ignored Firebase $host:$udpPort)"
+            )
+            return true
+        }
         if (existing != null &&
             existing.host == host &&
             existing.port == udpPort &&
@@ -788,6 +821,12 @@ class WalkieTalkieEngine(
 
     /** Start local viewfinder so flip is instant (before HOLD). */
     fun startLocalPreview() {
+        // Never open own-phone camera preview while watching remote screen via SCRN (#3).
+        if (requestingScreen.get()) {
+            localPreviewWanted = false
+            stopLocalPreviewInternal()
+            return
+        }
         localPreviewWanted = true
         // Allow local PiP while SEE (watching peer) — WhatsApp-style dual view
         if (talking.get() || replaying.get()) return
@@ -803,7 +842,8 @@ class WalkieTalkieEngine(
     }
 
     private fun startLocalPreviewInternal() {
-        if (previewSource != null || talking.get()) return
+        // Skip local camera hardware while SCRN is active; own camera is only needed for SEE/HOLD.
+        if (previewSource != null || talking.get() || requestingScreen.get()) return
         if (!running.get()) return
         // Dual-SEE / serve-SEE already owns Camera1 — never open a second instance
         if (servingSee.get() || cameraSource != null) {
@@ -831,9 +871,11 @@ class WalkieTalkieEngine(
                 },
                 onError = { msg -> videoDebug("Preview camera: $msg") }
             ) { jpeg ->
-                // Never paint local JPEGs into the remote video surface during SEE
+                // Never paint local JPEGs into the remote video surface during SEE or SCRN
                 // (Pixel often has uiPreviewTexture null briefly → local frames filled walkie_video).
-                if (talking.get() || replaying.get() || receiving.get() || requestingSee.get()) {
+                if (talking.get() || replaying.get() || receiving.get() ||
+                    requestingSee.get() || requestingScreen.get()
+                ) {
                     return@CameraFrameSource
                 }
                 // Hardware TextureView already shows camera — skip JPEG UI (kills flicker)
@@ -1151,11 +1193,14 @@ class WalkieTalkieEngine(
     }
 
     fun selectPeer(peer: WalkiePeer?) {
-        selectedPeerKey = peer?.let { key(it) }
-        userLockedSelection.set(peer != null)
+        // Never allow selecting or locking this phone's own local IP as the target peer.
+        val selfIps = NetworkEndpoints.findAllLocalIpv4()
+        val validPeer = peer?.takeIf { it.host !in selfIps }
+        selectedPeerKey = validPeer?.let { key(it) }
+        userLockedSelection.set(validPeer != null)
         postStatus(
-            if (peer == null) "No peer selected"
-            else "Selected ${peer.displayName} (${peer.host})"
+            if (validPeer == null) "No peer selected"
+            else "Selected ${validPeer.displayName} (${validPeer.host})"
         )
     }
 
@@ -1609,7 +1654,10 @@ class WalkieTalkieEngine(
         mainHandler.post { listener.onRemoteWakeupActive(true) }
         thread(name = "walkie-ring", isDaemon = true) {
             try {
-                ensureSelfPublicPath()
+                // Skip STUN wait when the target peer is already a private LAN IP on Wi‑Fi.
+                if (!PeerEndpoint.isPrivateIp(peer.host)) {
+                    ensureSelfPublicPath()
+                }
                 val targets = resolveControlTargets(peer)
                 lastControlTargets = targets.all
                 applyPrimaryPeer(targets.primary)
@@ -2581,6 +2629,10 @@ class WalkieTalkieEngine(
                 }
             } else if (sel.host == fromHost) {
                 selectedPeerKey = key(peer)
+            } else if (PeerEndpoint.isPrivateIp(fromHost) && !PeerEndpoint.isPrivateIp(sel.host)) {
+                // Direct LAN HELLO on the same Wi-Fi supersedes a stale public/cellular IP selection.
+                selectedPeerKey = key(peer)
+                Log.i(TAG, "HELLO LAN upgrade ${sel.host} → $fromHost:$fromUdpPort")
             }
         }
         pruneStalePeers()
@@ -3260,9 +3312,15 @@ class WalkieTalkieEngine(
     }
 
     private fun currentPeer(): WalkiePeer? {
-        val base = selectedPeerKey?.let { peers[it] }
-            ?: peers.values.singleOrNull()
+        val selfIps = NetworkEndpoints.findAllLocalIpv4()
+        // Never return a self-IP entry if a stale NSD advertisement was cached by the OS.
+        peers.entries.removeIf { it.value.host in selfIps }
+        val base = selectedPeerKey?.let { peers[it] }?.takeIf { it.host !in selfIps }
+            ?: peers.values.firstOrNull { it.host !in selfIps }
             ?: return null
+        if (selectedPeerKey != key(base)) {
+            selectedPeerKey = key(base)
+        }
         val learned = learnedVideoPorts[base.host]
         return if (learned != null && learned > 0) base.copy(videoPort = learned) else base
     }
@@ -3340,6 +3398,13 @@ class WalkieTalkieEngine(
                 if (resolved.serviceName == registeredName) return
                 val host = resolveHost(resolved) ?: return
                 if (host == "0.0.0.0" || host.startsWith("127.")) return
+                // Ignore stale NSD registrations from this same phone (e.g. previous process port
+                // after force-stop/relaunch) so we never select our own IP as the peer.
+                val selfIps = NetworkEndpoints.findAllLocalIpv4()
+                if (host in selfIps) {
+                    Log.i(TAG, "NSD ignore self host=$host name=${resolved.serviceName}")
+                    return
+                }
                 val vport = learnedVideoPorts[host]
                     ?: resolveVideoPort(resolved)
                     ?: parseVideoPortFromName(resolved.serviceName)
@@ -3533,6 +3598,8 @@ class WalkieTalkieEngine(
                         WalkieProtocol.TYPE_SEE_STOP -> stopServingSee()
                         WalkieProtocol.TYPE_SCREEN_REQ -> handleScreenReq(walkieBytes, from, fromPort)
                         WalkieProtocol.TYPE_SCREEN_STOP -> stopServingScreen()
+                        // Remote SCRN touch/keyboard control packet from the viewing phone.
+                        WalkieProtocol.TYPE_REMOTE_INPUT -> handleRemoteInput(walkieBytes, from)
                         WalkieProtocol.TYPE_GPS -> handleGpsPacket(walkieBytes)
                         WalkieProtocol.TYPE_MONITOR_AUDIO -> handleMonitorAudio(walkieBytes)
                         WalkieProtocol.TYPE_MONITOR_AUDIO_OPUS -> handleMonitorAudioOpus(walkieBytes)
@@ -4037,13 +4104,11 @@ class WalkieTalkieEngine(
                 return
             }
             recorder.startRecording()
-            // Warm decoder for reply path
-            if ((localCaps and WalkieProtocol.CAP_OPUS) != 0) opusRx.startDecoder()
-            val useOpus = sendLive && peerWantsOpus(peer.host) && opusTx.startEncoder()
-            if (useOpus) {
-                videoDebug("TX audio codec=Opus ${OpusAudioCodec.BIT_RATE}bps")
-            } else if (sendLive) {
-                videoDebug("TX audio codec=PCM 16kHz (Opus unavailable or peer legacy)")
+            // Use PCM for LIVE hold audio (matches recordMonitorAudio: cross-OEM MediaCodec Opus
+            // between Pixel 8 and Samsung S20 drops live UDP frames and yields audioMs=0 on RX).
+            val useOpus = false
+            if (sendLive) {
+                videoDebug("TX audio codec=PCM 16kHz")
             }
             val frame = ByteArray(WalkieProtocol.BYTES_PER_FRAME)
             val packetBuf = ByteArray(1 + WalkieProtocol.BYTES_PER_FRAME)
@@ -4153,8 +4218,8 @@ class WalkieTalkieEngine(
 
     private fun decodeAndEmit(jpeg: ByteArray, live: Boolean, localPreview: Boolean = false) {
         try {
-            // Local idle preview must never feed the full-screen remote ImageView while SEE is on
-            if (localPreview && requestingSee.get()) return
+            // Local idle preview must never feed the full-screen remote ImageView while SEE or SCRN is on
+            if (localPreview && (requestingSee.get() || requestingScreen.get())) return
             // Never interrupt Replay UI with live/remote frames (crash + flicker source)
             if (live && replaying.get()) return
             if (live) {
@@ -4599,7 +4664,11 @@ class WalkieTalkieEngine(
         // All network off main thread (Pixel StrictMode) — resolve public path for cellular
         thread(name = "walkie-listen-req", isDaemon = true) {
             try {
-                ensureSelfPublicPath()
+                // Only block on STUN refresh when the peer is on a public/cellular IP;
+                // LAN peers on the same Wi-Fi should receive LISTEN_REQ immediately.
+                if (!PeerEndpoint.isPrivateIp(seed.host)) {
+                    ensureSelfPublicPath()
+                }
                 val targets = resolveControlTargets(seed)
                 lastControlTargets = targets.all
                 applyPrimaryPeer(targets.primary)
@@ -4679,10 +4748,14 @@ class WalkieTalkieEngine(
 
     fun startSeeRemote() {
         // Selected contact only — never bestLivePeer (mixed S20/S918/Pixel).
-        var peer = currentPeer() ?: seeWatchPeer
+        var peer = currentPeer() ?: seeWatchPeer ?: screenWatchPeer
         if (peer == null) {
             postError("No peer for SEE — Contacts → Select first")
             return
+        }
+        // If SCRN was active when transitioning to SEE, stop SCRN first so SEE owns the stage and PiP.
+        if (requestingScreen.get()) {
+            stopScreenRemote()
         }
         selectPeer(peer)
         userLockedSelection.set(true)
@@ -4717,7 +4790,10 @@ class WalkieTalkieEngine(
         cancelSeeWatchdog()
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
-                ensureSelfPublicPath()
+                // Skip STUN wait when the target peer is already a private LAN IP on Wi-Fi.
+                if (!PeerEndpoint.isPrivateIp(seed.host)) {
+                    ensureSelfPublicPath()
+                }
                 val targets = resolveControlTargets(seed)
                 lastControlTargets = targets.all
                 val primary = applyPrimaryPeer(targets.primary)
@@ -5102,14 +5178,23 @@ class WalkieTalkieEngine(
         selectPeer(peer)
         userLockedSelection.set(true)
         peer = currentPeer() ?: peer
+        // SCRN and SEE are independent modes: if SEE was running, stop it before starting SCRN
+        // so SCRN does not leave SEE turned on or keep the local camera PiP open (#3).
+        if (requestingSee.get()) {
+            stopSeeRemote()
+        }
         if (!requestingScreen.compareAndSet(false, true)) {
             stopScreenRemote()
             return
         }
+        // Explicitly turn off local camera preview so own-phone camera window is hidden during SCRN.
+        localPreviewWanted = false
+        stopLocalPreviewInternal()
         screenWatchPeer = peer
-        seeWatchPeer = peer // reuse SEE display path for remote frames
-        requestingSee.set(true)
-        monitorReceiving.set(true)
+        seeWatchPeer = peer // keep peer host pointer for video RX routing without enabling SEE state
+        if (requestingListen.get()) {
+            monitorReceiving.set(true)
+        }
         if (!PeerEndpoint.isPrivateIp(peer.host)) {
             thread(name = "hub-video-rx-scrn", isDaemon = true) {
                 ensureHubVideoRxLink()
@@ -5149,8 +5234,8 @@ class WalkieTalkieEngine(
                 Log.e(TAG, "SCREEN_REQ send", t)
             }
         }
+        // Only notify SCRN state — never turn on SEE state when starting SCRN (#3).
         mainHandler.post {
-            listener.onSeeStateChanged(true, servingSee.get() || servingScreen.get())
             listener.onScreenStateChanged(true, servingScreen.get())
         }
         postStatus("SCRN — ${peer.displayName} (${peer.host})")
@@ -5170,17 +5255,224 @@ class WalkieTalkieEngine(
         peer?.let { sendControl(it, WalkieProtocol.TYPE_SCREEN_STOP) }
         screenWatchPeer = null
         if (!requestingSee.get()) {
-            // If we only used SEE flags for display, clear carefully
+            seeWatchPeer = null
         }
-        // Stop treating as SEE receive if we set it for screen-only
-        requestingSee.set(false)
-        if (!requestingListen.get()) monitorReceiving.set(false)
+        if (!requestingListen.get() && !requestingSee.get()) {
+            monitorReceiving.set(false)
+        }
+        // Notify SCRN state change only; SEE state remains untouched unless SEE itself changes.
         mainHandler.post {
-            listener.onSeeStateChanged(false, servingSee.get() || servingScreen.get())
             listener.onScreenStateChanged(false, servingScreen.get())
         }
         postStatus("SCRN stopped")
         Log.i(TAG, "SCREEN_STOP sent")
+    }
+
+    /** Monotonic sequence counter for outbound remote SCRN touch/keyboard packets. */
+    private val remoteInputSeq = java.util.concurrent.atomic.AtomicInteger(1)
+    /** Last processed remote input sequence number per sender host to deduplicate UDP bursts. */
+    private val lastRemoteInputSeqByHost = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /**
+     * Resolve the peer phone currently sharing its screen (or selected peer) for remote input TX.
+     */
+    private fun resolveRemoteInputTarget(): WalkiePeer? {
+        return screenWatchPeer ?: currentPeer() ?: seeWatchPeer ?: getPeers().firstOrNull()
+    }
+
+    /**
+     * Send a reliable 3-packet UDP burst of a remote SCRN control payload to [peer].
+     */
+    private fun sendRemoteInputPayload(peer: WalkiePeer, payload: ByteArray, debugTag: String): Boolean {
+        thread(name = "walkie-rem-in", isDaemon = true) {
+            try {
+                val ports = linkedSetOf(peer.port)
+                peers.values.filter { it.host == peer.host }.forEach { ports.add(it.port) }
+                for (port in ports.filter { it > 0 }) {
+                    val target = peer.copy(port = port)
+                    val pkt = packetToPeer(target, payload)
+                    repeat(3) {
+                        sendUdp(pkt)
+                        if (it < 2) Thread.sleep(15)
+                    }
+                }
+                Log.i(TAG, "REMOTE_INPUT_TX $debugTag → ${peer.host}:${peer.port}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "sendRemoteInputPayload $debugTag", t)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Send a remote tap at normalized coordinates ([normX], [normY] in 0f..1f) to the screen-sharing peer.
+     */
+    fun sendRemoteTap(normX: Float, normY: Float): Boolean {
+        val peer = resolveRemoteInputTarget() ?: return false
+        val seq = remoteInputSeq.getAndIncrement() and 0xFFFF
+        val nx = (normX.coerceIn(0f, 1f) * 10000f).toInt().coerceIn(0, 10000)
+        val ny = (normY.coerceIn(0f, 1f) * 10000f).toInt().coerceIn(0, 10000)
+        val payload = byteArrayOf(
+            WalkieProtocol.TYPE_REMOTE_INPUT,
+            WalkieProtocol.REMOTE_CMD_TAP,
+            ((seq shr 8) and 0xFF).toByte(),
+            (seq and 0xFF).toByte(),
+            ((nx shr 8) and 0xFF).toByte(),
+            (nx and 0xFF).toByte(),
+            ((ny shr 8) and 0xFF).toByte(),
+            (ny and 0xFF).toByte()
+        )
+        return sendRemoteInputPayload(peer, payload, "cmd=TAP seq=$seq nx=$nx ny=$ny")
+    }
+
+    /**
+     * Send a remote swipe/drag gesture from normalized ([normX1], [normY1]) to ([normX2], [normY2])
+     * over [durationMs] milliseconds to the screen-sharing peer.
+     */
+    fun sendRemoteSwipe(
+        normX1: Float,
+        normY1: Float,
+        normX2: Float,
+        normY2: Float,
+        durationMs: Int = 220
+    ): Boolean {
+        val peer = resolveRemoteInputTarget() ?: return false
+        val seq = remoteInputSeq.getAndIncrement() and 0xFFFF
+        val x1 = (normX1.coerceIn(0f, 1f) * 10000f).toInt().coerceIn(0, 10000)
+        val y1 = (normY1.coerceIn(0f, 1f) * 10000f).toInt().coerceIn(0, 10000)
+        val x2 = (normX2.coerceIn(0f, 1f) * 10000f).toInt().coerceIn(0, 10000)
+        val y2 = (normY2.coerceIn(0f, 1f) * 10000f).toInt().coerceIn(0, 10000)
+        val dur = durationMs.coerceIn(80, 1500)
+        val payload = byteArrayOf(
+            WalkieProtocol.TYPE_REMOTE_INPUT,
+            WalkieProtocol.REMOTE_CMD_SWIPE,
+            ((seq shr 8) and 0xFF).toByte(),
+            (seq and 0xFF).toByte(),
+            ((x1 shr 8) and 0xFF).toByte(),
+            (x1 and 0xFF).toByte(),
+            ((y1 shr 8) and 0xFF).toByte(),
+            (y1 and 0xFF).toByte(),
+            ((x2 shr 8) and 0xFF).toByte(),
+            (x2 and 0xFF).toByte(),
+            ((y2 shr 8) and 0xFF).toByte(),
+            (y2 and 0xFF).toByte(),
+            ((dur shr 8) and 0xFF).toByte(),
+            (dur and 0xFF).toByte()
+        )
+        return sendRemoteInputPayload(
+            peer,
+            payload,
+            "cmd=SWIPE seq=$seq ($x1,$y1)->($x2,$y2) dur=$dur"
+        )
+    }
+
+    /**
+     * Send UTF-8 keyboard text to the screen-sharing peer to type into its focused input field.
+     */
+    fun sendRemoteText(
+        text: String,
+        replaceExisting: Boolean = false,
+        pressEnter: Boolean = false
+    ): Boolean {
+        if (text.isEmpty() && !pressEnter) return false
+        val peer = resolveRemoteInputTarget() ?: return false
+        val seq = remoteInputSeq.getAndIncrement() and 0xFFFF
+        val utf8 = text.toByteArray(Charsets.UTF_8).let {
+            if (it.size > 600) it.copyOf(600) else it
+        }
+        var flags = 0
+        if (pressEnter) flags = flags or WalkieProtocol.REMOTE_TEXT_FLAG_ENTER
+        if (replaceExisting) flags = flags or WalkieProtocol.REMOTE_TEXT_FLAG_REPLACE
+        val payload = ByteArray(7 + utf8.size)
+        payload[0] = WalkieProtocol.TYPE_REMOTE_INPUT
+        payload[1] = WalkieProtocol.REMOTE_CMD_TEXT
+        payload[2] = ((seq shr 8) and 0xFF).toByte()
+        payload[3] = (seq and 0xFF).toByte()
+        payload[4] = (flags and 0xFF).toByte()
+        payload[5] = ((utf8.size shr 8) and 0xFF).toByte()
+        payload[6] = (utf8.size and 0xFF).toByte()
+        System.arraycopy(utf8, 0, payload, 7, utf8.size)
+        return sendRemoteInputPayload(
+            peer,
+            payload,
+            "cmd=TEXT seq=$seq len=${utf8.size} flags=$flags"
+        )
+    }
+
+    /**
+     * Send a remote navigation or editing key (Back, Home, Recents, Backspace, Enter, Clear)
+     * to the screen-sharing peer.
+     */
+    fun sendRemoteKey(keyCode: Int): Boolean {
+        val peer = resolveRemoteInputTarget() ?: return false
+        val seq = remoteInputSeq.getAndIncrement() and 0xFFFF
+        val payload = byteArrayOf(
+            WalkieProtocol.TYPE_REMOTE_INPUT,
+            WalkieProtocol.REMOTE_CMD_KEY,
+            ((seq shr 8) and 0xFF).toByte(),
+            (seq and 0xFF).toByte(),
+            (keyCode and 0xFF).toByte()
+        )
+        return sendRemoteInputPayload(peer, payload, "cmd=KEY seq=$seq keyCode=$keyCode")
+    }
+
+    /**
+     * Handle incoming [WalkieProtocol.TYPE_REMOTE_INPUT] packet from the peer phone and execute
+     * the requested touch gesture or keyboard input via [com.example.barky.BarkyService].
+     */
+    private fun handleRemoteInput(data: ByteArray, from: String) {
+        if (data.size < 5) return
+        val cmd = data[1]
+        val seq = ((data[2].toInt() and 0xFF) shl 8) or (data[3].toInt() and 0xFF)
+        val prevSeq = lastRemoteInputSeqByHost.put(from, seq)
+        if (prevSeq != null && prevSeq == seq) {
+            // Ignore duplicate packet from reliable UDP burst.
+            return
+        }
+        // Ensure BarkyService accessibility is active if WRITE_SECURE_SETTINGS was granted.
+        com.example.barky.BarkyService.ensureAccessibilityEnabled(appContext)
+        val a11y = com.example.barky.BarkyService.instance
+        when (cmd) {
+            WalkieProtocol.REMOTE_CMD_TAP -> {
+                if (data.size < 8) return
+                val nx = (((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)) / 10000f
+                val ny = (((data[6].toInt() and 0xFF) shl 8) or (data[7].toInt() and 0xFF)) / 10000f
+                Log.i(TAG, "REMOTE_INPUT_RX cmd=TAP seq=$seq from=$from nx=$nx ny=$ny a11y=${a11y != null}")
+                a11y?.performRemoteTap(nx, ny)
+            }
+            WalkieProtocol.REMOTE_CMD_SWIPE -> {
+                if (data.size < 14) return
+                val x1 = (((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)) / 10000f
+                val y1 = (((data[6].toInt() and 0xFF) shl 8) or (data[7].toInt() and 0xFF)) / 10000f
+                val x2 = (((data[8].toInt() and 0xFF) shl 8) or (data[9].toInt() and 0xFF)) / 10000f
+                val y2 = (((data[10].toInt() and 0xFF) shl 8) or (data[11].toInt() and 0xFF)) / 10000f
+                val dur = (((data[12].toInt() and 0xFF) shl 8) or (data[13].toInt() and 0xFF)).toLong()
+                Log.i(
+                    TAG,
+                    "REMOTE_INPUT_RX cmd=SWIPE seq=$seq from=$from ($x1,$y1)->($x2,$y2) dur=$dur a11y=${a11y != null}"
+                )
+                a11y?.performRemoteSwipe(x1, y1, x2, y2, dur)
+            }
+            WalkieProtocol.REMOTE_CMD_TEXT -> {
+                if (data.size < 7) return
+                val flags = data[4].toInt() and 0xFF
+                val len = (((data[5].toInt() and 0xFF) shl 8) or (data[6].toInt() and 0xFF))
+                    .coerceIn(0, data.size - 7)
+                val text = String(data, 7, len, Charsets.UTF_8)
+                val pressEnter = (flags and WalkieProtocol.REMOTE_TEXT_FLAG_ENTER) != 0
+                val replace = (flags and WalkieProtocol.REMOTE_TEXT_FLAG_REPLACE) != 0
+                Log.i(
+                    TAG,
+                    "REMOTE_INPUT_RX cmd=TEXT seq=$seq from=$from len=$len flags=$flags a11y=${a11y != null}"
+                )
+                a11y?.performRemoteText(text, replaceExisting = replace, pressEnter = pressEnter)
+            }
+            WalkieProtocol.REMOTE_CMD_KEY -> {
+                val keyCode = data[4].toInt() and 0xFF
+                Log.i(TAG, "REMOTE_INPUT_RX cmd=KEY seq=$seq from=$from keyCode=$keyCode a11y=${a11y != null}")
+                a11y?.performRemoteKey(keyCode)
+            }
+        }
     }
 
     @Volatile private var lastScreenReqUiMs = 0L

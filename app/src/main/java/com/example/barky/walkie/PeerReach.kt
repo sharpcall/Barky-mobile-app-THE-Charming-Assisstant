@@ -67,8 +67,13 @@ object PeerReach {
             pubVideo = peer.videoPort
         }
 
-        // Fresh Firebase endpoints (critical after Wi‑Fi → cell)
-        if (!wifiOnly && FirebasePeerDirectory.isConfigured(context)) {
+        // Fresh Firebase endpoints (critical after Wi‑Fi → cell).
+        // When we already have a live LAN HELLO on Wi‑Fi (!mustPublic && liveLanHello),
+        // never overwrite the live HELLO UDP/video ports with a stale Firebase heartbeat port
+        // from before an app restart.
+        val hasLiveLanPeer = !mustPublic && liveLanHello &&
+            PeerEndpoint.isPrivateIp(peer.host) && peer.port > 0
+        if (!hasLiveLanPeer && !wifiOnly && FirebasePeerDirectory.isConfigured(context)) {
             val ep = resolveEndpoint(context, deviceId, peer.host)
             if (ep != null) {
                 name = com.example.barky.net.ContactLabels.fromEndpoint(ep).ifBlank { name }
@@ -80,7 +85,9 @@ object PeerReach {
                         else -> ep.publicUdpPort
                     }
                 }
-                if (!ep.localIp.isNullOrBlank() && ep.localUdpPort > 0) {
+                if (!ep.localIp.isNullOrBlank() && ep.localUdpPort > 0 &&
+                    (lanHost.isNullOrBlank() || !liveLanHello)
+                ) {
                     lanHost = ep.localIp
                     lanUdp = ep.localUdpPort
                     lanVideo = if (ep.localVideoPort > 0) ep.localVideoPort else ep.localUdpPort

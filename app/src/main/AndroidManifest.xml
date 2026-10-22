@@ -145,6 +145,12 @@
                 <action android:name="com.example.barky.CONNECT_INVITE" />
                 <action android:name="com.example.barky.FIREBASE_LIST" />
                 <action android:name="com.example.barky.TEST_SCRN" />
+                <!-- ADB smoke-test actions for SCRN mode & remote touch/keyboard control (#4, #6) -->
+                <action android:name="com.example.barky.TEST_SCRN_START" />
+                <action android:name="com.example.barky.TEST_SCRN_STOP" />
+                <action android:name="com.example.barky.TEST_REMOTE_TAP" />
+                <action android:name="com.example.barky.TEST_REMOTE_TEXT" />
+                <action android:name="com.example.barky.TEST_REMOTE_KEY" />
                 <action android:name="com.example.barky.SERVE_SCREEN" />
                 <action android:name="com.example.barky.DUMP_PEERS" />
             </intent-filter>

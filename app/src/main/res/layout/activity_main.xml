@@ -44,8 +44,9 @@
             android:textColor="@color/barky_on_surface_muted"
             android:textSize="14sp" />
 
-        <!-- Status chips over camera (below top HUD band) -->
+        <!-- Status chips over camera (below top HUD band); hidden during full-screen SCRN mode (#5) -->
         <LinearLayout
+            android:id="@+id/status_chip_box"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="top|start"
@@ -472,6 +473,209 @@
             android:visibility="gone"
             android:contentDescription="@string/walkie_flip_self_camera" />
     </FrameLayout>
+
+    <!--
+        Floating SCRN control pill and remote keyboard drawer (#4 & #5):
+        - Shown only when SCRN is active so the entire screen displays the peer phone's screen
+          without top/bottom HUD clutter or own-camera PiP.
+        - Allows bringing back all main buttons (☰ Buttons), opening remote keyboard/navigation
+          controls (⌨ Type), or exiting SCRN (✕ SCRN) at any time.
+    -->
+    <LinearLayout
+        android:id="@+id/scrn_overlay_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:elevation="44dp"
+        android:orientation="vertical"
+        android:paddingHorizontal="8dp"
+        android:paddingTop="6dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/scrn_floating_pill"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_gravity="end"
+            android:alpha="0.86"
+            android:background="@drawable/bg_status_chip"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="8dp">
+
+            <TextView
+                android:id="@+id/btn_scrn_kbd"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="@string/scrn_btn_keyboard"
+                android:textColor="@color/barky_on_surface"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btn_scrn_toggle_ui"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:layout_marginStart="4dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="@string/scrn_btn_toggle_ui"
+                android:textColor="@color/barky_accent"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btn_scrn_exit"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:layout_marginStart="4dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="@string/scrn_btn_exit"
+                android:textColor="#FFFF6B6B"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Remote keyboard & navigation bar toggled by ⌨ Type during SCRN (#4) -->
+        <LinearLayout
+            android:id="@+id/scrn_keyboard_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_status_chip"
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:visibility="gone">
+
+            <!-- Quick remote navigation and editing keys -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_scrn_key_back"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_weight="1"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:padding="0dp"
+                    android:text="@string/scrn_key_back"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_surface"
+                    android:textSize="11sp" />
+
+                <Button
+                    android:id="@+id/btn_scrn_key_home"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_weight="1"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:padding="0dp"
+                    android:text="@string/scrn_key_home"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_surface"
+                    android:textSize="11sp" />
+
+                <Button
+                    android:id="@+id/btn_scrn_key_recents"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_weight="1"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:padding="0dp"
+                    android:text="@string/scrn_key_recents"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_surface"
+                    android:textSize="11sp" />
+
+                <Button
+                    android:id="@+id/btn_scrn_key_bksp"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="44dp"
+                    android:layout_height="34dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:padding="0dp"
+                    android:text="@string/scrn_key_bksp"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_surface"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btn_scrn_key_enter"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="44dp"
+                    android:layout_height="34dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:padding="0dp"
+                    android:text="@string/scrn_key_enter"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_accent"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Text entry field sent to the focused input on the remote phone -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/scrn_kbd_input"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_weight="1"
+                    android:background="#33FFFFFF"
+                    android:hint="@string/scrn_kbd_hint"
+                    android:imeOptions="actionSend"
+                    android:importantForAutofill="no"
+                    android:inputType="text"
+                    android:paddingHorizontal="10dp"
+                    android:singleLine="true"
+                    android:textColor="@color/barky_on_surface"
+                    android:textColorHint="@color/barky_on_surface_muted"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_scrn_kbd_send"
+                    style="@style/Widget.MaterialComponents.Button"
+                    android:layout_width="wrap_content"
+                    android:layout_height="38dp"
+                    android:layout_marginStart="6dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="64dp"
+                    android:text="@string/scrn_kbd_send"
+                    android:textAllCaps="false"
+                    android:textColor="@color/barky_on_primary"
+                    android:textSize="12sp"
+                    app:backgroundTint="@color/barky_accent"
+                    app:cornerRadius="10dp" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
 
     <!-- Blocks the whole app until every required permission is granted -->
     <FrameLayout

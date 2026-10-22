@@ -3,12 +3,17 @@ package com.example.barky
 import android.accessibilityservice.AccessibilityButtonController
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.ContextThemeWrapper
 import android.view.Gravity
@@ -22,6 +27,12 @@ import android.widget.TextView
 import java.util.Locale
 import java.util.regex.Pattern
 
+/**
+ * AccessibilityService for Barky:
+ * 1. Scans on-screen text for length units (cm, in, ft, m) and shows a conversion overlay.
+ * 2. Executes remote SCRN control commands (touch tap, swipe/drag, keyboard text entry, and
+ *    navigation/editing keys) sent by the peer phone watching this phone's screen.
+ */
 class BarkyService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var overlayView: View? = null
@@ -59,20 +70,25 @@ class BarkyService : AccessibilityService() {
         Pattern.compile("$num\\s*(?:meters|metres|meter|metre|m)\\b", Pattern.CASE_INSENSITIVE)
 
     override fun onServiceConnected() {
-        val info = AccessibilityServiceInfo().apply {
+        // Mutate existing serviceInfo from accessibility_config.xml so canPerformGestures="true" is preserved.
+        val info = (serviceInfo ?: AccessibilityServiceInfo()).apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
-                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+            flags = flags or
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
             notificationTimeout = 250
         }
         serviceInfo = info
+        // Expose singleton instance so WalkieTalkieEngine can dispatch remote SCRN gestures and keys.
+        instance = this
 
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         loadPrefs()
         registerAccessibilityButtonOpensApp()
-        Log.i(TAG, "BarkyService connected conversionEnabled=$conversionEnabled")
+        Log.i(TAG, "BarkyService connected conversionEnabled=$conversionEnabled gesturesReady=true")
     }
 
     private fun registerAccessibilityButtonOpensApp() {
@@ -292,9 +308,295 @@ class BarkyService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        // Clear static reference when accessibility service stops.
+        if (instance === this) {
+            instance = null
+        }
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
         super.onDestroy()
+    }
+
+    /**
+     * Resolve current physical screen dimensions in pixels so normalized [0f..1f] remote SCRN
+     * touch coordinates map accurately onto this phone's display.
+     */
+    private fun realDisplaySizePx(): Pair<Int, Int> {
+        val wm = windowManager ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealMetrics(dm)
+        val w = dm.widthPixels.coerceAtLeast(1)
+        val h = dm.heightPixels.coerceAtLeast(1)
+        return w to h
+    }
+
+    /**
+     * Dispatch a single tap gesture at normalized coordinates ([normX], [normY] in 0f..1f)
+     * received from the peer phone during SCRN remote control.
+     */
+    fun performRemoteTap(normX: Float, normY: Float): Boolean {
+        val (screenW, screenH) = realDisplaySizePx()
+        val x = (normX.coerceIn(0f, 1f) * screenW).coerceIn(1f, (screenW - 1).toFloat())
+        val y = (normY.coerceIn(0f, 1f) * screenH).coerceIn(1f, (screenH - 1).toFloat())
+        handler.post {
+            try {
+                val path = Path().apply { moveTo(x, y) }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, 65L))
+                    .build()
+                val dispatched = dispatchGesture(
+                    gesture,
+                    object : GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            Log.i(TAG, "REMOTE_INPUT_EXEC cmd=TAP status=completed x=${x.toInt()} y=${y.toInt()}")
+                        }
+
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
+                            Log.w(TAG, "REMOTE_INPUT_EXEC cmd=TAP status=cancelled x=${x.toInt()} y=${y.toInt()}")
+                            // Fallback: attempt accessibility node click at the target coordinates.
+                            clickNodeAt(x.toInt(), y.toInt())
+                        }
+                    },
+                    null
+                )
+                Log.i(TAG, "REMOTE_INPUT_EXEC cmd=TAP dispatched=$dispatched x=${x.toInt()} y=${y.toInt()}")
+                if (!dispatched) {
+                    clickNodeAt(x.toInt(), y.toInt())
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "performRemoteTap failed", t)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Dispatch a swipe/drag gesture from normalized ([normX1], [normY1]) to ([normX2], [normY2])
+     * over [durationMs] milliseconds for remote scrolling and dragging during SCRN.
+     */
+    fun performRemoteSwipe(
+        normX1: Float,
+        normY1: Float,
+        normX2: Float,
+        normY2: Float,
+        durationMs: Long
+    ): Boolean {
+        val (screenW, screenH) = realDisplaySizePx()
+        val x1 = (normX1.coerceIn(0f, 1f) * screenW).coerceIn(1f, (screenW - 1).toFloat())
+        val y1 = (normY1.coerceIn(0f, 1f) * screenH).coerceIn(1f, (screenH - 1).toFloat())
+        val x2 = (normX2.coerceIn(0f, 1f) * screenW).coerceIn(1f, (screenW - 1).toFloat())
+        val y2 = (normY2.coerceIn(0f, 1f) * screenH).coerceIn(1f, (screenH - 1).toFloat())
+        val dur = durationMs.coerceIn(80L, 1500L)
+        handler.post {
+            try {
+                val path = Path().apply {
+                    moveTo(x1, y1)
+                    lineTo(x2, y2)
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, dur))
+                    .build()
+                val dispatched = dispatchGesture(gesture, null, null)
+                Log.i(
+                    TAG,
+                    "REMOTE_INPUT_EXEC cmd=SWIPE dispatched=$dispatched " +
+                        "from=(${x1.toInt()},${y1.toInt()}) to=(${x2.toInt()},${y2.toInt()}) dur=$dur"
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "performRemoteSwipe failed", t)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Fallback node-level click when gesture dispatch is unavailable or cancelled.
+     * Finds the deepest clickable node containing ([px], [py]) and performs ACTION_CLICK.
+     */
+    private fun clickNodeAt(px: Int, py: Int): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val target = findClickableNodeAt(root, px, py) ?: return false
+        val ok = target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        Log.i(TAG, "REMOTE_INPUT_EXEC cmd=NODE_CLICK ok=$ok px=$px py=$py")
+        return ok
+    }
+
+    /**
+     * Recursively search the accessibility hierarchy for the deepest clickable/focusable node
+     * whose screen bounds contain ([px], [py]).
+     */
+    private fun findClickableNodeAt(
+        node: AccessibilityNodeInfo?,
+        px: Int,
+        py: Int
+    ): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        if (!rect.contains(px, py)) return null
+        for (i in 0 until node.childCount) {
+            val childHit = findClickableNodeAt(node.getChild(i), px, py)
+            if (childHit != null) return childHit
+        }
+        return if (node.isClickable || node.isEditable || node.isFocusable) node else null
+    }
+
+    /**
+     * Inject keyboard text into the currently focused (or first editable) input field on this
+     * phone when the remote SCRN viewer types and sends text.
+     *
+     * @param text UTF-8 text to append or set into the editable node.
+     * @param replaceExisting When true, replaces existing field content; when false, appends to it.
+     * @param pressEnter When true, triggers IME Enter action after setting the text.
+     */
+    fun performRemoteText(
+        text: String,
+        replaceExisting: Boolean = false,
+        pressEnter: Boolean = false
+    ): Boolean {
+        handler.post {
+            try {
+                val editable = findFocusedOrFirstEditableNode()
+                if (editable == null) {
+                    Log.w(TAG, "REMOTE_INPUT_EXEC cmd=TEXT no editable node found for len=${text.length}")
+                    return@post
+                }
+                editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                val current = editable.text?.toString().orEmpty()
+                // Ignore hint text when reading current value so we don't prepend placeholder hints.
+                val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    editable.hintText?.toString().orEmpty()
+                } else ""
+                val base = if (replaceExisting || current == hint) "" else current
+                val updated = base + text
+                val args = Bundle().apply {
+                    putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                        updated
+                    )
+                }
+                val setOk = editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                if (pressEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    editable.performAction(
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                    )
+                }
+                Log.i(
+                    TAG,
+                    "REMOTE_INPUT_EXEC cmd=TEXT ok=$setOk len=${text.length} " +
+                        "enter=$pressEnter totalLen=${updated.length}"
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "performRemoteText failed", t)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Execute a remote special key command (Back, Home, Recents, Backspace, Enter, Clear)
+     * sent from the peer phone during SCRN control.
+     */
+    fun performRemoteKey(keyCode: Int): Boolean {
+        handler.post {
+            try {
+                val ok = when (keyCode) {
+                    REMOTE_KEY_BACK -> performGlobalAction(GLOBAL_ACTION_BACK)
+                    REMOTE_KEY_HOME -> performGlobalAction(GLOBAL_ACTION_HOME)
+                    REMOTE_KEY_RECENTS -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+                    REMOTE_KEY_BACKSPACE -> {
+                        val editable = findFocusedOrFirstEditableNode()
+                        if (editable != null) {
+                            val current = editable.text?.toString().orEmpty()
+                            val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                editable.hintText?.toString().orEmpty()
+                            } else ""
+                            val next = if (current.isNotEmpty() && current != hint) {
+                                current.dropLast(1)
+                            } else ""
+                            val args = Bundle().apply {
+                                putCharSequence(
+                                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                    next
+                                )
+                            }
+                            editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                        } else false
+                    }
+                    REMOTE_KEY_ENTER -> {
+                        val editable = findFocusedOrFirstEditableNode()
+                        if (editable != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            editable.performAction(
+                                AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                            )
+                        } else false
+                    }
+                    REMOTE_KEY_CLEAR -> {
+                        val editable = findFocusedOrFirstEditableNode()
+                        if (editable != null) {
+                            val args = Bundle().apply {
+                                putCharSequence(
+                                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                    ""
+                                )
+                            }
+                            editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                        } else false
+                    }
+                    else -> false
+                }
+                Log.i(TAG, "REMOTE_INPUT_EXEC cmd=KEY keyCode=$keyCode ok=$ok")
+            } catch (t: Throwable) {
+                Log.e(TAG, "performRemoteKey failed keyCode=$keyCode", t)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Find the currently input-focused editable node, or fallback to the first visible editable
+     * node across interactive windows so remote typing works right after tapping an input box.
+     */
+    private fun findFocusedOrFirstEditableNode(): AccessibilityNodeInfo? {
+        val activeRoot = rootInActiveWindow
+        activeRoot?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let { focused ->
+            if (focused.isEditable) return focused
+        }
+        activeRoot?.let { root ->
+            findEditableRecursive(root, requireFocused = true)?.let { return it }
+            findEditableRecursive(root, requireFocused = false)?.let { return it }
+        }
+        try {
+            for (win in windows) {
+                val r = win.root ?: continue
+                r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let { focused ->
+                    if (focused.isEditable) return focused
+                }
+                findEditableRecursive(r, requireFocused = true)?.let { return it }
+                findEditableRecursive(r, requireFocused = false)?.let { return it }
+            }
+        } catch (_: Throwable) {
+        }
+        return null
+    }
+
+    /**
+     * Depth-first search for an editable node in [node]'s subtree.
+     */
+    private fun findEditableRecursive(
+        node: AccessibilityNodeInfo?,
+        requireFocused: Boolean
+    ): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.isEditable && node.isVisibleToUser && (!requireFocused || node.isFocused)) {
+            return node
+        }
+        for (i in 0 until node.childCount) {
+            val hit = findEditableRecursive(node.getChild(i), requireFocused)
+            if (hit != null) return hit
+        }
+        return null
     }
 
     companion object {
@@ -303,5 +605,54 @@ class BarkyService : AccessibilityService() {
         private const val MAX_TREE_DEPTH = 25
         private const val MAX_TEXT_NODES = 200
         private const val MAX_LINES = 8
+
+        /** Remote key constants used by WalkieProtocol.TYPE_REMOTE_INPUT (CMD_KEY). */
+        const val REMOTE_KEY_BACK = 1
+        const val REMOTE_KEY_HOME = 2
+        const val REMOTE_KEY_RECENTS = 3
+        const val REMOTE_KEY_BACKSPACE = 4
+        const val REMOTE_KEY_ENTER = 5
+        const val REMOTE_KEY_CLEAR = 6
+
+        /** Active BarkyService singleton when Accessibility is enabled on this device. */
+        @Volatile
+        var instance: BarkyService? = null
+            private set
+
+        /**
+         * Attempt to auto-enable BarkyService in Settings.Secure when WRITE_SECURE_SETTINGS
+         * has been granted via ADB, ensuring SCRN remote click/keyboard works without manual setup.
+         */
+        fun ensureAccessibilityEnabled(context: Context): Boolean {
+            if (instance != null) return true
+            return try {
+                val cr = context.contentResolver
+                val component = "${context.packageName}/${BarkyService::class.java.name}"
+                val current = Settings.Secure.getString(
+                    cr,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                ).orEmpty()
+                val updated = if (current.isBlank()) {
+                    component
+                } else if (!current.split(':').any { it.equals(component, ignoreCase = true) }) {
+                    "$current:$component"
+                } else {
+                    current
+                }
+                Settings.Secure.putString(
+                    cr,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    updated
+                )
+                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                Log.i(TAG, "Auto-enabled BarkyService accessibility via Settings.Secure")
+                true
+            } catch (_: SecurityException) {
+                false
+            } catch (t: Throwable) {
+                Log.w(TAG, "ensureAccessibilityEnabled", t)
+                false
+            }
+        }
     }
 }
