@@ -60,7 +60,11 @@ function Svc([string]$s, [string]$action, [string[]]$extra = @()) {
     $args = @("-s", $s, "shell", "am", "start-foreground-service", "-n", $svc, "-a", $action) + $extra
     & $adb @args 2>$null | Out-Null
 }
-function Logs([string]$s) { & $adb -s $s logcat -d -v brief -t 200 2>$null }
+# Read all Barky + crash logcat lines since the most recent ClearLogs call (do not pass -t 200,
+# which drops Barky logs when OEM camera/audio services emit >200 lines per second).
+function Logs([string]$s) {
+    & $adb -s $s logcat -d -v brief -s WalkieTalkieEngine:I WalkieTalkieService:I BarkyVideoUI:I CameraFrameSource:I AndroidRuntime:E DEBUG:I 2>$null
+}
 function Has([object[]]$logs, [string]$pat) {
     return ($logs | Where-Object { "$_" -match $pat } | Select-Object -First 1) -ne $null
 }
@@ -84,7 +88,7 @@ foreach ($s in $devs) {
 Info "Wait peer HELLO"
 Start-Sleep 8
 $la = Logs $A; $lb = Logs $B
-if (Has $la "HELLO from" -and Has $lb "HELLO from") { Ok "HELLO both ways" } else { Bad "HELLO incomplete" }
+if ((Has $la "HELLO from") -and (Has $lb "HELLO from")) { Ok "HELLO both ways" } else { Bad "HELLO incomplete" }
 
 function Start-Feat([string]$s, [string]$feat, [string]$peer) {
     switch ($feat) {
@@ -124,14 +128,16 @@ function Feat-Sleep([string]$feat) {
         default { Start-Sleep 1 }
     }
 }
+# Use a single regex per feature so PowerShell does not treat unparenthesized -or tokens
+# as extra positional arguments to Has.
 function Feat-Ok([object[]]$logs, [string]$feat) {
     switch ($feat) {
-        "L" { return (Has $logs "LISTEN_REQ" -or Has $logs "MONITOR_AUDIO" -or Has $logs "LISTEN serve" -or Has $logs "forceListenVolume") }
-        "S" { return (Has $logs "SEE_REQ" -or Has $logs "serve see" -or Has $logs "SEE") }
-        "W" { return (Has $logs "WAKEUP" -or Has $logs "TEST_WAKEUP" -or Has $logs "quiet=") }
-        "M" { return (Has $logs "CLIP_TX" -or Has $logs "startTalking" -or Has $logs "TX OK" -or Has $logs "TALK" -or Has $logs "TEST_TALK" -or Has $logs "channelBusy") }
-        "R" { return (Has $logs "Replay start" -or Has $logs "Replay") }
-        "G" { return (Has $logs "GPS ON" -or Has $logs "GPS_TX" -or Has $logs "GPS_RX" -or Has $logs "GPS") }
+        "L" { return (Has $logs "LISTEN_REQ|MONITOR_AUDIO|LISTEN serve|forceListenVolume") }
+        "S" { return (Has $logs "SEE_REQ|serve see|SEE") }
+        "W" { return (Has $logs "WAKEUP|TEST_WAKEUP|quiet=") }
+        "M" { return (Has $logs "CLIP_TX|startTalking|TX OK|TALK_START|TEST_TALK_START|channelBusy") }
+        "R" { return (Has $logs "Replay start|Replay") }
+        "G" { return (Has $logs "GPS ON|GPS_TX|GPS_RX|GPS") }
         default { return $false }
     }
 }
@@ -222,7 +228,7 @@ Start-Sleep 2
 Svc $A "com.example.barky.TEST_LISTEN_STOP"
 Svc $B "com.example.barky.TEST_LISTEN_STOP"
 $la = Logs $A; $lb = Logs $B
-if ((Has $la "LISTEN_REQ" -or Has $la "MONITOR_AUDIO") -and (Has $lb "LISTEN_REQ" -or Has $lb "MONITOR_AUDIO" -or Has $lb "LISTEN serve")) {
+if ((Has $la "LISTEN_REQ|MONITOR_AUDIO") -and (Has $lb "LISTEN_REQ|MONITOR_AUDIO|LISTEN serve")) {
     Ok "DUAL LISTEN both phones"
 } else { Bad "DUAL LISTEN" }
 
@@ -233,7 +239,7 @@ Svc $A "com.example.barky.TEST_TALK_START"; Start-Sleep $HoldSec
 Svc $A "com.example.barky.TEST_TALK_STOP"
 Svc $B "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep 1
 $la = Logs $A; $lb = Logs $B
-if (Has $la "CLIP_TX" -or Has $la "startTalking" -or Has $lb "channelBusy" -or Has $lb "LISTEN") {
+if ((Has $la "CLIP_TX|startTalking") -or (Has $lb "channelBusy|LISTEN")) {
     Ok "CROSS TALK during remote LISTEN"
 } else { Bad "CROSS TALK during LISTEN" }
 
@@ -245,7 +251,7 @@ foreach ($phone in @(@{S=$A;T="A"}, @{S=$B;T="B"})) {
     Svc $phone.S "com.example.barky.TEST_LISTEN_START"; Start-Sleep 2
     Svc $phone.S "com.example.barky.TEST_LISTEN_STOP"
     $l = Logs $phone.S
-    if ((Has $l "SEE") -and (Has $l "LISTEN_REQ" -or Has $l "MONITOR_AUDIO_RX" -or Has $l "forceListenVolume")) {
+    if ((Has $l "SEE") -and (Has $l "LISTEN_REQ|MONITOR_AUDIO_RX|forceListenVolume")) {
         Ok "INDEP SEE-stop then LISTEN on $($phone.T)"
     } else { Bad "INDEP SEE-stop then LISTEN on $($phone.T)" }
 }
@@ -254,10 +260,10 @@ DieIfTimeout
 ClearLogs
 Svc $A "com.example.barky.TEST_SEE_START"; Start-Sleep 1
 Svc $A "com.example.barky.TEST_LISTEN_START"; Start-Sleep 1
-Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep 0.5
-Svc $A "com.example.barky.TEST_LISTEN_STOP"
+Svc $A "com.example.barky.TEST_SEE_STOP"; Start-Sleep -Milliseconds 500
+Svc $A "com.example.barky.TEST_LISTEN_STOP"; Start-Sleep -Milliseconds 500
 $la = Logs $A
-if ((Has $la "SEE_REQ") -and (Has $la "LISTEN_REQ" -or Has $la "LISTEN_STOP" -or Has $la "MONITOR_AUDIO" -or Has $la "forceListenVolume")) {
+if ((Has $la "SEE_REQ|TEST_SEE_START|SEE") -and (Has $la "LISTEN_REQ|LISTEN_STOP|TEST_LISTEN_START|MONITOR_AUDIO|forceListenVolume")) {
     Ok "INDEP concurrent SEE+LISTEN stop order on A"
 } else { Bad "INDEP concurrent SEE+LISTEN on A" }
 

@@ -214,7 +214,7 @@
         android:paddingTop="8dp"
         android:paddingBottom="10dp">
 
-        <!-- Toggle row: BEST · GPS (Private is mic-drag mode, not a footer control) -->
+        <!-- Toggle row: BEST quality video toggle (GPS checkbox removed; Row 2 GPS button is the sole GPS control) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -229,16 +229,6 @@
                 android:buttonTint="@color/barky_secondary"
                 android:minHeight="36dp"
                 android:text="@string/walkie_best_quality_short"
-                android:textColor="@color/barky_on_surface"
-                android:textSize="11sp" />
-
-            <com.google.android.material.checkbox.MaterialCheckBox
-                android:id="@+id/walkie_gps"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:buttonTint="@color/barky_accent"
-                android:minHeight="36dp"
-                android:text="@string/walkie_gps_short"
                 android:textColor="@color/barky_on_surface"
                 android:textSize="11sp" />
         </LinearLayout>

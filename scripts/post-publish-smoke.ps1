@@ -44,9 +44,21 @@ function Fmt-Dur([int]$ms) {
 
 Write-Output "=== adb devices ==="
 & $adb devices -l
-$devices = @()
+# Deduplicate ADB transports by hardware ro.serialno so a phone connected via both
+# mDNS (_adb-tls-connect) and IP:port is only counted once as a physical device.
+$rawDevices = @()
 & $adb devices | ForEach-Object {
-    if ($_ -match "^(\S+)\s+device\s*$") { $devices += $Matches[1] }
+    if ($_ -match "^(\S+)\s+device\s*$") { $rawDevices += $Matches[1] }
+}
+$devices = @()
+$seenHw = @{}
+foreach ($s in $rawDevices) {
+    $hw = (& $adb -s $s shell getprop ro.serialno 2>$null).Trim()
+    if (-not $hw) { $hw = $s }
+    if (-not $seenHw.ContainsKey($hw)) {
+        $seenHw[$hw] = $true
+        $devices += $s
+    }
 }
 if ($devices.Count -eq 0) {
     Write-Output "SMOKE_FAIL: no devices"

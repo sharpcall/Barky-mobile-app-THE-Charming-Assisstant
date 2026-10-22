@@ -51,8 +51,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieStatus: TextView
     private lateinit var walkiePeers: TextView
     private lateinit var walkieBestQuality: MaterialCheckBox
-    private lateinit var walkieGps: MaterialCheckBox
     private lateinit var walkieScrn: MaterialButton
+    /** Sole GPS map toggle button in Row 2 (duplicate GPS checkbox removed). */
     private lateinit var walkieGpsBtn: MaterialButton
     private lateinit var walkieMic: ImageButton
     private lateinit var walkieMicStage: android.widget.FrameLayout
@@ -341,6 +341,8 @@ class MainActivity : AppCompatActivity() {
                 this@MainActivity.myTrail = myTrail
                 this@MainActivity.peerTrail = peerTrail
                 this@MainActivity.gpsEnabled = gpsEnabled
+                // Keep Row 2 GPS button chrome synced with engine GPS state.
+                updateGpsButtonChrome()
                 if (gpsEnabled && !isTalking && !isReceiving && !isReplaying && !isSeeing && !isRequestingScreen) {
                     if (!showMap || walkieMap.visibility != View.VISIBLE) {
                         showMap = true
@@ -458,8 +460,9 @@ class MainActivity : AppCompatActivity() {
             isListening = walkieService?.isListeningRemote() == true
             isSeeing = walkieService?.isSeeingRemote() == true
             isRequestingScreen = walkieService?.isRequestingScreen() == true
+            // Sync GPS state from service to the Row 2 GPS button (duplicate checkbox removed).
             gpsEnabled = walkieService?.isGpsEnabled() == true
-            walkieGps.isChecked = gpsEnabled
+            updateGpsButtonChrome()
             autoSelectPeer()
             renderPeers()
             updateControls()
@@ -523,8 +526,8 @@ class MainActivity : AppCompatActivity() {
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
         walkieBestQuality = findViewById(R.id.walkie_best_quality)
-        walkieGps = findViewById(R.id.walkie_gps)
         walkieScrn = findViewById(R.id.walkie_scrn)
+        // Bind the single GPS button in Row 2 (duplicate GPS checkbox removed).
         walkieGpsBtn = findViewById(R.id.walkie_gps_btn)
         walkieMic = findViewById(R.id.walkie_mic)
         walkieMicStage = findViewById(R.id.walkie_mic_stage)
@@ -640,26 +643,8 @@ class MainActivity : AppCompatActivity() {
         }
         BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
 
-        walkieGps.isChecked = BarkyPrefs.isGpsEnabled(this)
-        walkieGps.setOnCheckedChangeListener { _, checked ->
-            if (checked) {
-                if (!hasLocationPermission()) {
-                    walkieGps.isChecked = false
-                    updateGpsButtonChrome()
-                    permissionLauncher.launch(
-                        arrayOf(
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                            Manifest.permission.ACCESS_COARSE_LOCATION
-                        )
-                    )
-                    return@setOnCheckedChangeListener
-                }
-                enableGps(true)
-            } else {
-                enableGps(false)
-            }
-            updateGpsButtonChrome()
-        }
+        // Initialize GPS enabled state from preferences for the Row 2 GPS button.
+        gpsEnabled = BarkyPrefs.isGpsEnabled(this)
 
         // SCRN = view **contact’s** screen (not our own). Peer gets MediaProjection consent.
         walkieScrn.setOnClickListener {
@@ -676,9 +661,25 @@ class MainActivity : AppCompatActivity() {
             }
             updateScrnButton()
         }
-        // GPS button mirrors the GPS checkbox (Mockup 3 second row)
+        // GPS button directly toggles GPS tracking and map stage visibility (duplicate checkbox removed).
         walkieGpsBtn.setOnClickListener {
-            walkieGps.isChecked = !walkieGps.isChecked
+            val targetOn = !gpsEnabled
+            if (targetOn) {
+                if (!hasLocationPermission()) {
+                    updateGpsButtonChrome()
+                    permissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                    return@setOnClickListener
+                }
+                enableGps(true)
+            } else {
+                enableGps(false)
+            }
+            updateGpsButtonChrome()
         }
         updateScrnButton()
         updateGpsButtonChrome()
@@ -1418,9 +1419,10 @@ class MainActivity : AppCompatActivity() {
         return nx to ny
     }
 
+    /** Updates the Row 2 GPS button visual state based on gpsEnabled. */
     private fun updateGpsButtonChrome() {
-        if (!::walkieGpsBtn.isInitialized || !::walkieGps.isInitialized) return
-        val on = walkieGps.isChecked
+        if (!::walkieGpsBtn.isInitialized) return
+        val on = gpsEnabled
         walkieGpsBtn.isSelected = on
         walkieGpsBtn.backgroundTintList = ContextCompat.getColorStateList(
             this,
