@@ -29,6 +29,13 @@ function Add-Found([string]$name, [string]$address) {
 Write-Host "=== 1) adb mdns services ==="
 try {
     $mdns = & $adb mdns services 2>&1 | Out-String
+    if ($mdns -notmatch "_adb-tls-connect") {
+        # Restart ADB server so Windows mDNS re-queries active _adb-tls-connect._tcp services on LAN.
+        & $adb kill-server 2>&1 | Out-Null
+        & $adb start-server 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+        $mdns = & $adb mdns services 2>&1 | Out-String
+    }
     Write-Host $mdns.Trim()
     foreach ($line in ($mdns -split "`r?`n")) {
         # Only connect to _adb-tls-connect._tcp endpoints, never _adb-tls-pairing._tcp.
@@ -141,14 +148,14 @@ foreach ($k in $found.Keys) {
 
 foreach ($ip in $KnownIps) {
     if ($connectedIps -contains $ip) { continue }
-    # Quick ping check first so we only port-scan reachable LAN hosts.
-    $pingOk = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
+    # Two ping attempts wake Wi-Fi power-save radios before deciding if host is reachable on LAN.
+    $pingOk = Test-Connection -ComputerName $ip -Count 2 -Quiet -ErrorAction SilentlyContinue
     if (-not $pingOk) {
-        Write-Host "Host $ip not responding to ping -- skipping port scan"
+        Write-Host "Host $ip not responding to ping (may be on cellular data) -- skipping port scan"
         continue
     }
     Write-Host "Fast scanning wireless ADB ports (30000..49999) on reachable host $ip..."
-    $openPorts = [FastPortScanner]::Scan($ip, 30000, 49999, $ProbeTimeoutMs, 512)
+    $openPorts = [FastPortScanner]::Scan($ip, 30000, 49999, 220, 192)
     foreach ($p in ($openPorts + @(5555))) {
         # Skip Barky's own LAN HTTP APK server port (8765) and walkie TCP video ports if ADB rejects them.
         $addr = "$ip`:$p"
