@@ -122,6 +122,27 @@ object NetworkEndpoints {
      * @param liveLanHello true only when we recently received HELLO from the peer's private IP.
      *   Without a live HELLO, never stick to a stale LAN address after Wi‑Fi↔cellular moves.
      */
+    /**
+     * Checks if two IPv4 addresses share the exact same local /24 subnet.
+     * When local subnets do not match, LAN routing fails across routers/hotspots;
+     * communication must route via public STUN / BarkyHub relay.
+     */
+    fun sameLocalSubnet(ipA: String?, ipB: String?): Boolean {
+        if (ipA.isNullOrBlank() || ipB.isNullOrBlank()) return false
+        if (!PeerEndpoint.isPrivateIp(ipA) || !PeerEndpoint.isPrivateIp(ipB)) return false
+        val aParts = ipA.split(".")
+        val bParts = ipB.split(".")
+        if (aParts.size != 4 || bParts.size != 4) return false
+        return aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]
+    }
+
+    /**
+     * Prefer private LAN IP when both devices share the exact same local subnet (/24)
+     * and a live HELLO was verified. If local subnets do not match, always returns false
+     * so public STUN/hub relay path is used.
+     *
+     * @param liveLanHello true only when we recently received HELLO from the peer's private IP.
+     */
     fun preferLanPath(
         self: Snapshot,
         peerLocalIp: String?,
@@ -134,21 +155,14 @@ object NetworkEndpoints {
         if (b.isNullOrBlank() || !PeerEndpoint.isPrivateIp(b)) return false
         // Stale Firebase localIp without live HELLO → do not force dead LAN route
         if (!liveLanHello) return false
-        val bParts = b.split(".")
-        // Check all local IPv4 interfaces (in case SIM rmnet is active alongside wlan0)
+        // Check all local IPv4 interfaces for an exact /24 subnet match
         val candidates = (listOfNotNull(self.localIp) + findAllLocalIpv4()).distinct()
         for (a in candidates) {
-            if (!PeerEndpoint.isPrivateIp(a)) continue
-            val aParts = a.split(".")
-            if (aParts.size == 4 && bParts.size == 4) {
-                if (aParts[0] == bParts[0] && aParts[1] == bParts[1] && aParts[2] == bParts[2]) {
-                    return true
-                }
-                // Same /16 + live HELLO is enough on home routers
-                if (aParts[0] == bParts[0] && aParts[1] == bParts[1]) return true
+            if (sameLocalSubnet(a, b)) {
+                return true
             }
         }
-        if (!self.wifiSsid.isNullOrBlank() && self.wifiSsid == peerWifiHint) return true
+        // Subnets do not match — always use public STUN / Hub path
         return false
     }
 }

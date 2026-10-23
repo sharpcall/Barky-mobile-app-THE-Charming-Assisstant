@@ -3,6 +3,7 @@ package com.example.barky.walkie
 import android.content.Context
 import android.util.Log
 import com.example.barky.BarkyPrefs
+import com.example.barky.net.BarkyHubConfig
 import com.example.barky.net.FirebasePeerDirectory
 import com.example.barky.net.NetworkEndpoints
 import com.example.barky.net.PeerEndpoint
@@ -108,8 +109,13 @@ object PeerReach {
             onWifi = selfOnWifi,
             wifiSsid = null
         )
-        // Only prefer LAN with a live HELLO (stale Firebase localIp breaks cellular SEE)
-        val preferLan = !mustPublic &&
+
+        // When local subnets do not match, LAN direct connection fails; force public STUN/hub path.
+        val sameSubnet = NetworkEndpoints.sameLocalSubnet(selfSnap.localIp, lanHost)
+        val mustPublicResolved = mustPublic || (!sameSubnet && !lanHost.isNullOrBlank())
+
+        // Only prefer LAN with a live HELLO and matching local subnet (/24)
+        val preferLan = !mustPublicResolved &&
             NetworkEndpoints.preferLanPath(
                 selfSnap,
                 lanHost,
@@ -122,19 +128,24 @@ object PeerReach {
                 WalkiePeer("Barky-$name", lanHost!!, lanUdp, if (lanVideo > 0) lanVideo else lanUdp)
             !pubHost.isNullOrBlank() && pubUdp > 0 ->
                 WalkiePeer("Barky-$name", pubHost!!, pubUdp, if (pubVideo > 0) pubVideo else pubUdp)
-            !lanHost.isNullOrBlank() && lanUdp > 0 && !mustPublic ->
+            !deviceId.isNullOrBlank() && (mustPublicResolved || !preferLan) ->
+                WalkiePeer("Barky-$name", "id:$deviceId", BarkyHubConfig.RELAY_UDP_PORT, BarkyHubConfig.VIDEO_TCP_PORT)
+            !lanHost.isNullOrBlank() && lanUdp > 0 && !mustPublicResolved ->
                 WalkiePeer("Barky-$name", lanHost!!, lanUdp, if (lanVideo > 0) lanVideo else lanUdp)
             else -> peer
         }
 
-        // Fan-out list: when off Wi‑Fi put public first; always include both if known
+        // Fan-out list: when off Wi‑Fi or subnets do not match, put public/hub first
         val ordered = LinkedHashSet<WalkiePeer>()
-        if (mustPublic || !preferLan) {
+        if (mustPublicResolved || !preferLan) {
             if (!pubHost.isNullOrBlank() && pubUdp > 0) {
                 ordered.add(WalkiePeer("Barky-$name", pubHost!!, pubUdp, if (pubVideo > 0) pubVideo else pubUdp))
             }
-            // Secondary: still try LAN only if caller is on Wi‑Fi (cell cannot reach 192.168)
-            if (selfOnWifi && !lanHost.isNullOrBlank() && lanUdp > 0) {
+            if (!deviceId.isNullOrBlank()) {
+                ordered.add(WalkiePeer("Barky-$name", "id:$deviceId", BarkyHubConfig.RELAY_UDP_PORT, BarkyHubConfig.VIDEO_TCP_PORT))
+            }
+            // Secondary: still try LAN only if caller is on Wi‑Fi and subnets match
+            if (selfOnWifi && sameSubnet && !lanHost.isNullOrBlank() && lanUdp > 0) {
                 ordered.add(WalkiePeer("Barky-$name", lanHost!!, lanUdp, if (lanVideo > 0) lanVideo else lanUdp))
             }
         } else {
@@ -147,11 +158,15 @@ object PeerReach {
         }
         if (ordered.isEmpty()) ordered.add(primary)
 
-        // Guard: never primary-target private IP from cellular
-        val safePrimary = if (mustPublic && PeerEndpoint.isPrivateIp(primary.host) &&
-            !pubHost.isNullOrBlank() && pubUdp > 0
-        ) {
-            WalkiePeer("Barky-$name", pubHost!!, pubUdp, if (pubVideo > 0) pubVideo else pubUdp)
+        // Guard: never primary-target private IP from cellular or across mismatched subnets
+        val safePrimary = if (mustPublicResolved && PeerEndpoint.isPrivateIp(primary.host)) {
+            when {
+                !pubHost.isNullOrBlank() && pubUdp > 0 ->
+                    WalkiePeer("Barky-$name", pubHost!!, pubUdp, if (pubVideo > 0) pubVideo else pubUdp)
+                !deviceId.isNullOrBlank() ->
+                    WalkiePeer("Barky-$name", "id:$deviceId", BarkyHubConfig.RELAY_UDP_PORT, BarkyHubConfig.VIDEO_TCP_PORT)
+                else -> primary
+            }
         } else {
             primary
         }

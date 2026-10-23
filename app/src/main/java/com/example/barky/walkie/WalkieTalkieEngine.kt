@@ -4866,8 +4866,9 @@ class WalkieTalkieEngine(
         seeWatchPeer = peer
         // SEE = video only. Audio is independent (LISTEN button). Same code path on every phone.
         monitorVideoRxCount = 0
-        // Cellular/public: open hub TCP so HD H.264 can arrive
-        if (!PeerEndpoint.isPrivateIp(peer.host)) {
+        // Cellular / public / mismatched subnets: open hub TCP so HD H.264 can arrive even across routers
+        val sameSubnet = NetworkEndpoints.sameLocalSubnet(NetworkEndpoints.findLocalIpv4(), peer.host)
+        if (!sameSubnet || !PeerEndpoint.isPrivateIp(peer.host)) {
             thread(name = "hub-video-rx", isDaemon = true) {
                 ensureHubVideoRxLink()
                 openVideoOut(peer) // sets dest for any return path
@@ -4889,8 +4890,8 @@ class WalkieTalkieEngine(
         cancelSeeWatchdog()
         thread(name = "walkie-see-req", isDaemon = true) {
             try {
-                // Skip STUN wait when the target peer is already a private LAN IP on Wi-Fi.
-                if (!PeerEndpoint.isPrivateIp(seed.host)) {
+                // Refresh STUN if peer is public or on a different local subnet
+                if (!sameSubnet || !PeerEndpoint.isPrivateIp(seed.host)) {
                     ensureSelfPublicPath()
                 }
                 val targets = resolveControlTargets(seed)

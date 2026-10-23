@@ -107,7 +107,9 @@ object InternalSmokeRunner {
                 val remoteEp: PeerEndpoint? = allPeers.firstOrNull()
                 if (remoteEp != null) {
                     val selfNet = NetworkEndpoints.snapshot(app)
-                    val preferLan = NetworkEndpoints.preferLanPath(
+                    // Prefer LAN only if local subnets match (/24); otherwise use public STUN / relay endpoint
+                    val sameSubnet = NetworkEndpoints.sameLocalSubnet(selfNet.localIp, remoteEp.localIp)
+                    val preferLan = sameSubnet && NetworkEndpoints.preferLanPath(
                         selfNet,
                         remoteEp.localIp,
                         remoteEp.wifiHint,
@@ -302,7 +304,9 @@ object InternalSmokeRunner {
 
                     // Restore optimal LAN/public peer endpoint after K
                     val selfNet = NetworkEndpoints.snapshot(app)
-                    val preferLan = NetworkEndpoints.preferLanPath(
+                    // Prefer LAN only if local subnets match (/24); otherwise use public STUN / relay endpoint
+                    val sameSubnet = NetworkEndpoints.sameLocalSubnet(selfNet.localIp, remoteEp.localIp)
+                    val preferLan = sameSubnet && NetworkEndpoints.preferLanPath(
                         selfNet,
                         remoteEp.localIp,
                         remoteEp.wifiHint,
