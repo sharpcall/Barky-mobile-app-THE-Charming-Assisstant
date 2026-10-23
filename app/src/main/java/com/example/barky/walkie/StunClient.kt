@@ -19,12 +19,14 @@ object StunClient {
 
     private const val TAG = "StunClient"
     private val SERVERS_FAST = listOf(
-        // High-speed public STUN servers first (returns mapped public IP:port in ~50ms without timeout stalls)
+        // Barky Google Cloud relay coturn STUN + Google/Cloudflare STUN
+        "34.45.33.226" to 3478,
         "stun.l.google.com" to 19302,
         "stun.cloudflare.com" to 3478,
         "stun1.l.google.com" to 19302
     )
     private val SERVERS_FULL = listOf(
+        "34.45.33.226" to 3478,
         "stun.l.google.com" to 19302,
         "stun.cloudflare.com" to 3478,
         "stun1.l.google.com" to 19302,
