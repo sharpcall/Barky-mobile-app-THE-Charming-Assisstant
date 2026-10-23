@@ -32,6 +32,17 @@ function DeadlineLeft {
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) { $adb = "adb" }
 $root = "F:\To sort\Delete\barky"
+
+# Free C:\ Temp space (old barky-android-build intermediates) and use F:\barky-tmp (no spaces) for TMP/TEMP.
+$oldCBuild = "$env:LOCALAPPDATA\Temp\barky-android-build"
+if (Test-Path $oldCBuild) {
+    Remove-Item -Path $oldCBuild -Recurse -Force -ErrorAction SilentlyContinue
+}
+$fTmp = "F:\barky-tmp"
+if (-not (Test-Path $fTmp)) { New-Item -ItemType Directory -Path $fTmp -Force | Out-Null }
+$env:TEMP = $fTmp
+$env:TMP = $fTmp
+$env:GRADLE_OPTS = "-Djava.io.tmpdir=$fTmp"
 # Prefer Android Studio2 JBR (matches gradle.properties), fallback to Android Studio JBR.
 $javaHome = if (Test-Path "C:\Program Files\Android\Android Studio2\jbr") {
     "C:\Program Files\Android\Android Studio2\jbr"

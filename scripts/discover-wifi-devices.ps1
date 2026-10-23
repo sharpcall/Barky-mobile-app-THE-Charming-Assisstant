@@ -100,46 +100,6 @@ foreach ($line in (& $adb devices)) {
     }
 }
 
-# Fast C#/.NET parallel port scanner for any known IP not yet connected via ADB.
-if (-not ("FastPortScanner" -as [type])) {
-    Add-Type -TypeDefinition @"
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Net.Sockets;
-using System.Threading;
-using System.Threading.Tasks;
-
-public static class FastPortScanner {
-    public static int[] Scan(string ip, int startPort, int endPort, int timeoutMs, int maxConcurrency) {
-        var open = new ConcurrentBag<int>();
-        using (var sem = new SemaphoreSlim(maxConcurrency)) {
-            var tasks = new List<Task>(endPort - startPort + 1);
-            for (int p = startPort; p <= endPort; p++) {
-                int port = p;
-                sem.Wait();
-                tasks.Add(Task.Run(async () => {
-                    try {
-                        using (var client = new TcpClient()) {
-                            var connectTask = client.ConnectAsync(ip, port);
-                            if (await Task.WhenAny(connectTask, Task.Delay(timeoutMs)) == connectTask && client.Connected) {
-                                open.Add(port);
-                            }
-                        }
-                    } catch {
-                    } finally {
-                        sem.Release();
-                    }
-                }));
-            }
-            Task.WaitAll(tasks.ToArray());
-        }
-        return open.ToArray();
-    }
-}
-"@
-}
-
 $connectedIps = @()
 foreach ($k in $found.Keys) {
     if ($k -match "^([\d.]+):") { $connectedIps += $Matches[1] }
@@ -147,9 +107,41 @@ foreach ($k in $found.Keys) {
 
 foreach ($ip in $KnownIps) {
     if ($connectedIps -contains $ip) { continue }
-    Write-Host "Scanning wireless ADB ports (30000..60999) on $ip..."
-    $openPorts = @([FastPortScanner]::Scan($ip, 30000, 60999, 140, 256) | Sort-Object -Descending)
-    if ($openPorts.Count -gt 0) {
+    Write-Host "Scanning wireless ADB ports (30000..60999) on $ip via Node..."
+    $scanJs = @"
+const net = require('net');
+const ip = process.argv[1];
+const open = [];
+let port = 30000;
+const end = 60999;
+let active = 0;
+const max = 400;
+function next() {
+  while (active < max && port <= end) {
+    const p = port++;
+    active++;
+    const s = new net.Socket();
+    s.setTimeout(160);
+    s.on('connect', () => { open.push(p); s.destroy(); });
+    s.on('timeout', () => s.destroy());
+    s.on('error', () => s.destroy());
+    s.on('close', () => {
+      active--;
+      if (port > end && active === 0) {
+        console.log(open.sort((a,b)=>b-a).join(','));
+      } else {
+        next();
+      }
+    });
+    s.connect(p, ip);
+  }
+}
+next();
+"@
+    $openStr = (& node -e $scanJs $ip 2>$null | Out-String).Trim()
+    $openPorts = @()
+    if ($openStr) {
+        $openPorts = @($openStr -split "," | Where-Object { $_ -match "^\d+$" } | ForEach-Object { [int]$_ })
         Write-Host "  Open TCP ports on $ip : $($openPorts -join ', ')"
     }
     foreach ($p in ($openPorts + @(5555))) {
@@ -162,7 +154,6 @@ foreach ($ip in $KnownIps) {
         $r = (& $adb connect $addr 2>&1 | Out-String).Trim()
         Write-Host "  adb connect $addr -> $r"
         if ($r -notmatch "cannot connect") {
-            # Wireless debugging TLS handshake starts as 'offline' or 'failed to authenticate' for ~1-3.5s before becoming 'device'.
             $isAdbDevice = $false
             for ($waitIdx = 0; $waitIdx -lt 10; $waitIdx++) {
                 Start-Sleep -Milliseconds 450
