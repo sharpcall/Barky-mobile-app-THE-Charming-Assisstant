@@ -93,6 +93,11 @@ if (Test-Path $wifiList) {
         foreach ($d in $cfg.devices) {
             $addr = [string]$d.address
             if (-not $addr) { continue }
+            if ($addr -match "^([\d.]+):") {
+                if (-not (Test-Connection -ComputerName $Matches[1] -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
+                    continue
+                }
+            }
             Write-Output "adb connect $addr ($($d.name))"
             & $adb connect $addr 2>&1 | ForEach-Object { Write-Output "  $_" }
         }
@@ -130,18 +135,20 @@ if ($devices.Count -lt 1 -and -not $UploadFirebase -and -not $CommitMessage) {
 Write-Output "Devices: $($devices -join ', ')"
 
 $apk = Join-Path $root "app\build-outputs\app-debug.apk"
-if ($VersionName) {
-    $gradleFile = Join-Path $root "app\build.gradle"
-    if (Test-Path $gradleFile) {
-        $g = Get-Content $gradleFile -Raw
-        if ($g -match "versionCode\s+(\d+)") {
+$gradleFile = Join-Path $root "app\build.gradle"
+if (Test-Path $gradleFile) {
+    $g = [System.IO.File]::ReadAllText($gradleFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+    if ($VersionName -and ($g -match "versionCode\s+(\d+)")) {
+        $nextVc = [math]::Max(112, ([int]$Matches[1]))
+        if ($g -notmatch [regex]::Escape($VersionName)) {
             $nextVc = ([int]$Matches[1]) + 1
-            $g = [regex]::Replace($g, "versionCode\s+\d+", "versionCode $nextVc")
-            $g = [regex]::Replace($g, 'versionName\s+"[^"]+"', "versionName `"$VersionName`"")
-            Set-Content -Path $gradleFile -Value $g -NoNewline -Encoding UTF8
-            Write-Output "Bumped app/build.gradle to versionCode=$nextVc versionName=$VersionName"
         }
+        $g = [regex]::Replace($g, "versionCode\s+\d+", "versionCode $nextVc")
+        $g = [regex]::Replace($g, 'versionName\s+"[^"]+"', "versionName `"$VersionName`"")
+        Write-Output "Bumped app/build.gradle to versionCode=$nextVc versionName=$VersionName"
     }
+    # Always write UTF-8 WITHOUT BOM so Groovy's Gradle parser never fails on \uFEFF.
+    [System.IO.File]::WriteAllText($gradleFile, $g, (New-Object System.Text.UTF8Encoding($false)))
 }
 if (-not $SkipBuild) {
     DeadlineLeft | Out-Null

@@ -29,13 +29,6 @@ function Add-Found([string]$name, [string]$address) {
 Write-Host "=== 1) adb mdns services ==="
 try {
     $mdns = & $adb mdns services 2>&1 | Out-String
-    if ($mdns -notmatch "_adb-tls-connect") {
-        # Restart ADB server so Windows mDNS re-queries active _adb-tls-connect._tcp services on LAN.
-        & $adb kill-server 2>&1 | Out-Null
-        & $adb start-server 2>&1 | Out-Null
-        Start-Sleep -Seconds 2
-        $mdns = & $adb mdns services 2>&1 | Out-String
-    }
     Write-Host $mdns.Trim()
     foreach ($line in ($mdns -split "`r?`n")) {
         # Only connect to _adb-tls-connect._tcp endpoints, never _adb-tls-pairing._tcp.
@@ -54,39 +47,43 @@ try {
     Write-Host "mdns failed: $_"
 }
 
-Write-Host "=== 2) devices-wifi.json last IPs + adb connect ==="
+Write-Host "=== 2) Firestore devices directory + ARP + devices-wifi.json ==="
 if (Test-Path $outFile) {
     try {
         $cfg = Get-Content $outFile -Raw | ConvertFrom-Json
         foreach ($d in $cfg.devices) {
-            if ($d.address -match "^([\d.]+):") { $KnownIps += $Matches[1] }
-            if ($d.address) {
-                $r = & $adb connect $d.address 2>&1 | Out-String
-                if (($r -match "connected to|already connected") -and ($r -notmatch "cannot connect|failed")) {
-                    Add-Found $d.name $d.address
-                }
+            if ($d.address -match "^([\d.]+):") {
+                $KnownIps += $Matches[1]
             }
         }
     } catch {}
 }
 
-# Also read latest localIp from Firestore `devices` collection if firebase_config.xml is present.
+# Read latest localIp, publicIp, and localVideoPort from Firestore `devices` collection.
+$barkyVideoPorts = @{}
 $fbCfg = Join-Path (Split-Path $PSScriptRoot -Parent) 'app\src\main\res\values\firebase_config.xml'
 if (Test-Path $fbCfg) {
     try {
         $xml = Get-Content $fbCfg -Raw
-        $pidMatch = [regex]::Match($xml, 'name="firebase_project_id">([^<]+)<')
-        $dbMatch  = [regex]::Match($xml, 'name="firebase_database_id">([^<]+)<')
-        $keyMatch = [regex]::Match($xml, 'name="firebase_api_key">([^<]+)<')
+        $pidMatch = [regex]::Match($xml, 'name="firebase_project_id"[^>]*>([^<]+)<')
+        $dbMatch  = [regex]::Match($xml, 'name="firebase_database_id"[^>]*>([^<]+)<')
+        $keyMatch = [regex]::Match($xml, 'name="firebase_api_key"[^>]*>([^<]+)<')
         if ($pidMatch.Success -and $dbMatch.Success -and $keyMatch.Success) {
             $url = "https://firestore.googleapis.com/v1/projects/$($pidMatch.Groups[1].Value)/databases/$($dbMatch.Groups[1].Value)/documents/devices?key=$($keyMatch.Groups[1].Value)"
-            $resp = Invoke-RestMethod -Uri $url -TimeoutSec 4 -ErrorAction SilentlyContinue
+            $resp = Invoke-RestMethod -Uri $url -TimeoutSec 5 -ErrorAction SilentlyContinue
+            $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             foreach ($doc in $resp.documents) {
                 $lip = $doc.fields.localIp.stringValue
+                $pip = $doc.fields.publicIp.stringValue
+                $vport = [int]$doc.fields.localVideoPort.integerValue
+                $vc  = $doc.fields.versionCode.integerValue
+                $upMs = [int64]$doc.fields.updatedAtMs.integerValue
+                $ageSec = [math]::Round(($nowMs - $upMs) / 1000)
                 $dname = $doc.fields.displayName.stringValue
+                Write-Host "Firestore peer: $dname | local=$lip (video=$vport) | public=$pip | vc=$vc | age=${ageSec}s"
                 if ($lip -and ($lip -match "^192\.168\.|^10\.|^172\.")) {
-                    $KnownIps += $lip
-                    Write-Host "Firestore peer $dname -> localIp=$lip"
+                    $KnownIps = @($lip) + $KnownIps
+                    if ($vport -gt 0) { $barkyVideoPorts["$lip`:$vport"] = $true }
                 }
             }
         }
@@ -148,24 +145,24 @@ foreach ($k in $found.Keys) {
 
 foreach ($ip in $KnownIps) {
     if ($connectedIps -contains $ip) { continue }
-    # Two ping attempts wake Wi-Fi power-save radios before deciding if host is reachable on LAN.
-    $pingOk = Test-Connection -ComputerName $ip -Count 2 -Quiet -ErrorAction SilentlyContinue
-    if (-not $pingOk) {
-        Write-Host "Host $ip not responding to ping (may be on cellular data) -- skipping port scan"
-        continue
+    Write-Host "Scanning wireless ADB ports (30000..60999) on $ip..."
+    $openPorts = [FastPortScanner]::Scan($ip, 30000, 60999, 150, 256)
+    if ($openPorts.Count -gt 0) {
+        Write-Host "  Open TCP ports on $ip : $($openPorts -join ', ')"
     }
-    Write-Host "Fast scanning wireless ADB ports (30000..49999) on reachable host $ip..."
-    $openPorts = [FastPortScanner]::Scan($ip, 30000, 49999, 220, 192)
     foreach ($p in ($openPorts + @(5555))) {
-        # Skip Barky's own LAN HTTP APK server port (8765) and walkie TCP video ports if ADB rejects them.
+        if ($p -eq 8765) { continue }
         $addr = "$ip`:$p"
+        if ($barkyVideoPorts.ContainsKey($addr)) {
+            Write-Host "  Skipping Barky TCP video port $addr"
+            continue
+        }
         $r = & $adb connect $addr 2>&1 | Out-String
-        if ($r -match "connected to|already connected") {
-            # Verify it is an active ADB daemon in `adb devices`.
-            Start-Sleep -Milliseconds 200
+        if (($r -match "connected to|already connected") -and ($r -notmatch "cannot connect|failed")) {
+            Start-Sleep -Milliseconds 350
             $devs = & $adb devices | Out-String
             if ($devs -match [regex]::Escape($addr) + "\s+device") {
-                $model = (& $adb -s $addr shell getprop ro.product.model 2>$null).Trim()
+                $model = ("" + (& $adb -s $addr shell getprop ro.product.model 2>$null)).Trim()
                 if (-not $model) { $model = "scan-$ip" }
                 Add-Found $model $addr
                 break

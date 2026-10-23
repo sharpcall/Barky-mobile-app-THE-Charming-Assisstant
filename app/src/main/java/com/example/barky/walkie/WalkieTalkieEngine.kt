@@ -5076,34 +5076,73 @@ class WalkieTalkieEngine(
 
     private fun handleSeeReq(data: ByteArray, from: String, fromPort: Int) {
         val payloadPort = parseControlPort(data, 0)
+        val payloadVideo = if (data.size >= 5) {
+            ((data[3].toInt() and 0xFF) shl 8) or (data[4].toInt() and 0xFF)
+        } else 0
+        // Hub DELIVER fromPort is 39000 (not the peer walkie port) — use payloadPort on relay packets!
         val replyPort = when {
-            fromPort in 1..65535 -> fromPort
+            from.startsWith("id:") || BarkyHubConfig.isHubAddress(from) ->
+                payloadPort.takeIf { it in 1..65535 }
+                    ?: peers.values.firstOrNull { it.host == from }?.port
+                    ?: 0
+            fromPort in 1..65535 && fromPort != BarkyHubConfig.RELAY_UDP_PORT -> fromPort
             payloadPort in 1..65535 -> payloadPort
-            else -> 0
+            else -> peers.values.firstOrNull { it.host == from }?.port ?: 0
         }
-        val peer = resolvePeerForStream(from, replyPort)
+        if (payloadVideo in 1..65535) {
+            learnedVideoPorts[from] = payloadVideo
+        }
+        var peer = resolvePeerForStream(from, replyPort).let {
+            if (payloadVideo in 1..65535) it.copy(videoPort = payloadVideo) else it
+        }
+        // Bind deviceId so SEE_ACK, hub TCP video, and UDP video fallback route via hub FWD on cellular.
+        val destId = hostToDeviceId[from]
+            ?: peerHostByDeviceId.entries.firstOrNull { it.value == from }?.key
+            ?: from.takeIf { it.startsWith("id:") }?.removePrefix("id:")
+        if (!destId.isNullOrBlank()) {
+            hostToDeviceId[peer.host] = destId
+            if (!peer.host.startsWith("id:")) {
+                peerHostByDeviceId[destId] = peer.host
+            }
+        }
+        if (peer.host.startsWith("id:")) {
+            val sel = currentPeer()
+            if (sel != null && !sel.host.startsWith("id:")) {
+                val idKeep = destId ?: hostToDeviceId[sel.host]
+                if (!idKeep.isNullOrBlank()) {
+                    hostToDeviceId[sel.host] = idKeep
+                    peerHostByDeviceId[idKeep] = sel.host
+                }
+                val vp = if (payloadVideo in 1..65535) payloadVideo else sel.videoPort
+                if (vp > 0) learnedVideoPorts[sel.host] = vp
+                peer = sel.copy(
+                    port = if (replyPort > 0) replyPort else sel.port,
+                    videoPort = vp
+                )
+                peers[key(peer)] = peer
+            }
+        }
         Log.i(
             TAG,
-            "SEE_REQ from $from fromPort=$fromPort payloadPort=$payloadPort " +
-                "usePort=${peer.port} vport=${peer.videoPort} (video-only serve)"
+            "SEE_REQ from $from fromPort=$fromPort payloadPort=$payloadPort payloadVideo=$payloadVideo " +
+                "usePort=${peer.port} vport=${peer.videoPort} host=${peer.host} destId=${destId?.take(12)} (video-only serve)"
         )
         // Tell requester we accepted (so they can show "no ack" if this never arrives)
+        val ackPeer = peer
         thread(name = "walkie-see-ack", isDaemon = true) {
             try {
-                // Prefer deviceId FWD path: ensure host maps to a known id when from relay
-                val destId = hostToDeviceId[peer.host]
-                    ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
+                val ackDestId = hostToDeviceId[ackPeer.host]
+                    ?: peerHostByDeviceId.entries.firstOrNull { it.value == ackPeer.host }?.key
                 Log.i(
                     TAG,
-                    "SEE_ACK → ${peer.host}:${peer.port} destId=${destId?.take(12)} " +
+                    "SEE_ACK → ${ackPeer.host}:${ackPeer.port} destId=${ackDestId?.take(12)} " +
                         "relayOn=${BarkyHubConfig.relayEnabled}"
                 )
-                sendSessionControl(peer, WalkieProtocol.TYPE_SEE_ACK)
-                // Extra burst for cellular
-                if (!PeerEndpoint.isPrivateIp(peer.host) || destId != null) {
+                sendSessionControl(ackPeer, WalkieProtocol.TYPE_SEE_ACK)
+                if (!PeerEndpoint.isPrivateIp(ackPeer.host) || ackDestId != null) {
                     repeat(3) {
                         Thread.sleep(40)
-                        sendSessionControl(peer, WalkieProtocol.TYPE_SEE_ACK)
+                        sendSessionControl(ackPeer, WalkieProtocol.TYPE_SEE_ACK)
                     }
                 }
             } catch (t: Throwable) {
@@ -5188,13 +5227,8 @@ class WalkieTalkieEngine(
     }
 
     private fun sendSessionControl(peer: WalkiePeer, type: Byte) {
-        if (peer.port <= 0) return
-        val packet = DatagramPacket(
-            byteArrayOf(type),
-            1,
-            InetAddress.getByName(peer.host),
-            peer.port
-        )
+        if (peer.port <= 0 && !peer.host.startsWith("id:")) return
+        val packet = packetToPeer(peer, byteArrayOf(type))
         repeat(4) {
             try {
                 sendUdp(packet)
@@ -5209,15 +5243,13 @@ class WalkieTalkieEngine(
     }
 
     private fun sendSessionFail(peer: WalkiePeer, reason: String) {
-        if (peer.port <= 0) return
+        if (peer.port <= 0 && !peer.host.startsWith("id:")) return
         val msg = reason.take(180).toByteArray(Charsets.UTF_8)
         val payload = ByteArray(2 + msg.size)
         payload[0] = WalkieProtocol.TYPE_SESSION_FAIL
         payload[1] = msg.size.coerceAtMost(255).toByte()
         System.arraycopy(msg, 0, payload, 2, msg.size.coerceAtMost(255))
-        val packet = DatagramPacket(
-            payload, payload.size, InetAddress.getByName(peer.host), peer.port
-        )
+        val packet = packetToPeer(peer, payload)
         repeat(5) {
             try {
                 sendUdp(packet)
@@ -5563,17 +5595,47 @@ class WalkieTalkieEngine(
             ((data[3].toInt() and 0xFF) shl 8) or (data[4].toInt() and 0xFF)
         } else 0
         val replyUdp = when {
-            fromPort in 1..65535 -> fromPort
+            from.startsWith("id:") || BarkyHubConfig.isHubAddress(from) ->
+                payloadUdp.takeIf { it in 1..65535 }
+                    ?: peers.values.firstOrNull { it.host == from }?.port
+                    ?: 0
+            fromPort in 1..65535 && fromPort != BarkyHubConfig.RELAY_UDP_PORT -> fromPort
             payloadUdp in 1..65535 -> payloadUdp
-            else -> 0
+            else -> peers.values.firstOrNull { it.host == from }?.port ?: 0
         }
         val replyVideo = when {
             payloadVideo in 1..65535 -> payloadVideo
             else -> learnedVideoPorts[from] ?: 0
         }
         if (replyVideo > 0) learnedVideoPorts[from] = replyVideo
-        val peer = resolvePeerForStream(from, replyUdp).let {
+        var peer = resolvePeerForStream(from, replyUdp).let {
             if (replyVideo > 0) it.copy(videoPort = replyVideo) else it
+        }
+        val destId = hostToDeviceId[from]
+            ?: peerHostByDeviceId.entries.firstOrNull { it.value == from }?.key
+            ?: from.takeIf { it.startsWith("id:") }?.removePrefix("id:")
+        if (!destId.isNullOrBlank()) {
+            hostToDeviceId[peer.host] = destId
+            if (!peer.host.startsWith("id:")) {
+                peerHostByDeviceId[destId] = peer.host
+            }
+        }
+        if (peer.host.startsWith("id:")) {
+            val sel = currentPeer()
+            if (sel != null && !sel.host.startsWith("id:")) {
+                val idKeep = destId ?: hostToDeviceId[sel.host]
+                if (!idKeep.isNullOrBlank()) {
+                    hostToDeviceId[sel.host] = idKeep
+                    peerHostByDeviceId[idKeep] = sel.host
+                }
+                val vp = if (replyVideo > 0) replyVideo else sel.videoPort
+                if (vp > 0) learnedVideoPorts[sel.host] = vp
+                peer = sel.copy(
+                    port = if (replyUdp > 0) replyUdp else sel.port,
+                    videoPort = vp
+                )
+                peers[key(peer)] = peer
+            }
         }
         // Burst SCRN sends many packets — only one consent dialog / auto-share attempt
         val now = System.currentTimeMillis()
@@ -6049,8 +6111,14 @@ class WalkieTalkieEngine(
         // Restart if flag stuck true but video thread already died (same on all OEMs)
         if (servingSee.get()) {
             if (monitorVideoThread?.isAlive == true) {
+                val prev = monitorTarget
                 target?.let { monitorTarget = it }
-                Log.i(TAG, "SEE serve already active → ${monitorTarget?.host}:${monitorTarget?.port}")
+                if (prev != null && target != null &&
+                    (prev.host != target.host || prev.videoPort != target.videoPort)
+                ) {
+                    closeVideoOut()
+                }
+                Log.i(TAG, "SEE serve already active → ${monitorTarget?.host}:${monitorTarget?.port} vport=${monitorTarget?.videoPort}")
                 return
             }
             Log.w(TAG, "SEE serve flag stuck without thread — restarting")
@@ -6424,9 +6492,7 @@ class WalkieTalkieEngine(
                 buf[3] = part.toByte()
                 buf[4] = parts.toByte()
                 System.arraycopy(payload, offset, buf, WalkieProtocol.VIDEO_HEADER, len)
-                val packet = DatagramPacket(
-                    buf, buf.size, InetAddress.getByName(peer.host), peer.port
-                )
+                val packet = packetToPeer(peer, buf, buf.size)
                 // Cellular/public: send each chunk twice (free reliability for H.264 multi-part)
                 val times = if (publicPeer) 2 else 1
                 repeat(times) { sendUdp(packet) }
@@ -6447,9 +6513,7 @@ class WalkieTalkieEngine(
     private fun sendControlOnce(peer: WalkiePeer, type: Byte) {
         try {
             val payload = byteArrayOf(type)
-            val packet = DatagramPacket(
-                payload, payload.size, InetAddress.getByName(peer.host), peer.port
-            )
+            val packet = packetToPeer(peer, payload)
             sendUdp(packet)
             Log.i(TAG, "CTRL once type=$type to ${peer.host}:${peer.port}")
         } catch (t: Throwable) {
@@ -6473,11 +6537,14 @@ class WalkieTalkieEngine(
                     BarkyUdpRelay.register(socket, DeviceIdentity.deviceId(appContext))
                 } catch (_: Throwable) {
                 }
+                val vport = localVideoPort
                 val payload = if (replyUdpPort > 0) {
                     byteArrayOf(
                         type,
                         ((replyUdpPort shr 8) and 0xFF).toByte(),
-                        (replyUdpPort and 0xFF).toByte()
+                        (replyUdpPort and 0xFF).toByte(),
+                        ((vport shr 8) and 0xFF).toByte(),
+                        (vport and 0xFF).toByte()
                     )
                 } else {
                     byteArrayOf(type)
@@ -6495,7 +6562,7 @@ class WalkieTalkieEngine(
                 Log.i(
                     TAG,
                     "CTRL sent type=0x${(type.toInt() and 0xFF).toString(16)} " +
-                        "to ${peer.host}:${peer.port} replyPort=$replyUdpPort n=$times " +
+                        "to ${peer.host}:${peer.port} replyPort=$replyUdpPort vport=$vport n=$times " +
                         "destId=${destId?.take(12)} public=${!PeerEndpoint.isPrivateIp(peer.host)}"
                 )
             } catch (t: Throwable) {
@@ -6514,9 +6581,7 @@ class WalkieTalkieEngine(
                 ((replyVideo shr 8) and 0xFF).toByte(),
                 (replyVideo and 0xFF).toByte()
             )
-            val packet = DatagramPacket(
-                payload, payload.size, InetAddress.getByName(peer.host), peer.port
-            )
+            val packet = packetToPeer(peer, payload)
             sendUdp(packet)
         } catch (t: Throwable) {
             Log.w(TAG, "sendScreenReq", t)

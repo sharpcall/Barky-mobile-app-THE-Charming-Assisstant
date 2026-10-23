@@ -435,26 +435,38 @@ if (Has-Line $txLogs "MONITOR_AUDIO_RX|MONITOR_AUDIO") { Ok "G2 TX got monitor a
 Adb-Svc $tx "com.example.barky.TEST_LISTEN_STOP"
 Start-Sleep -Milliseconds 300
 
-# --- H: SEE both directions ---
-Info "H SEE TX requests remote"
+# --- H: SEE both directions (must verify actual video frame TX and RX, not just SEE_REQ!) ---
+Info "H SEE TX requests remote camera video"
 foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
 Adb-Svc $tx "com.example.barky.TEST_SEE_START"
-$pairH = Wait-LogsBoth $tx "SEE_REQ" $rx "SEE_REQ from|serve see|Camera\+mic open" 6.0
+$pairH = Wait-LogsBoth $tx "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE_VIDEO_AVC_TCP|SEE/SCRN_AVC_HUB_TCP" $rx "SEE_TX_JPEG|SEE_TX_AVC" 8.0
 $txLogs = $pairH.Tx
 $rxLogs = $pairH.Rx
-if (Has-Line $txLogs "SEE_REQ") { Ok "H TX SEE_REQ" } else { Bad "H TX SEE_REQ missing" }
-if (Has-Line $rxLogs "SEE_REQ from|serve see|Camera\+mic open") { Ok "H RX serving SEE" } else { Bad "H RX not serving SEE" }
+if (Has-Line $txLogs "SEE_REQ|SEE via") { Ok "H TX SEE_REQ" } else { Bad "H TX SEE_REQ missing" }
+if (Has-Line $rxLogs "SEE_REQ from|serve see|Camera\+mic open|SEE_TX_JPEG|SEE_TX_AVC") { Ok "H RX serving SEE" } else { Bad "H RX not serving SEE" }
+if (Has-Line $rxLogs "SEE_TX_JPEG|SEE_TX_AVC") { Ok "H RX transmitted SEE video frames" } else { Bad "H RX transmitted 0 SEE video frames" }
+if (Has-Line $txLogs "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE_VIDEO_AVC_TCP|SEE/SCRN_AVC_HUB_TCP") {
+    Ok "H TX received & decoded live SEE video frames"
+} else {
+    Bad "H TX received 0 SEE video frames"
+}
 Adb-Svc $tx "com.example.barky.TEST_SEE_STOP"
 Start-Sleep -Milliseconds 300
 
-Info "H2 SEE reverse"
+Info "H2 SEE reverse (RX watches TX camera video)"
 foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
 Adb-Svc $rx "com.example.barky.TEST_SEE_START"
-$pairH2 = Wait-LogsBoth $tx "SEE_REQ from|serve see|Camera\+mic open" $rx "SEE_REQ" 6.0
+$pairH2 = Wait-LogsBoth $tx "SEE_TX_JPEG|SEE_TX_AVC" $rx "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE_VIDEO_AVC_TCP|SEE/SCRN_AVC_HUB_TCP" 8.0
 $txLogs = $pairH2.Tx
 $rxLogs = $pairH2.Rx
-if (Has-Line $rxLogs "SEE_REQ") { Ok "H2 RX SEE_REQ" } else { Bad "H2 RX SEE_REQ missing" }
-if (Has-Line $txLogs "SEE_REQ from|serve see|Camera\+mic open") { Ok "H2 TX serving SEE" } else { Bad "H2 TX not serving SEE" }
+if (Has-Line $rxLogs "SEE_REQ|SEE via") { Ok "H2 RX SEE_REQ" } else { Bad "H2 RX SEE_REQ missing" }
+if (Has-Line $txLogs "SEE_REQ from|serve see|Camera\+mic open|SEE_TX_JPEG|SEE_TX_AVC") { Ok "H2 TX serving SEE" } else { Bad "H2 TX not serving SEE" }
+if (Has-Line $txLogs "SEE_TX_JPEG|SEE_TX_AVC") { Ok "H2 TX transmitted SEE video frames" } else { Bad "H2 TX transmitted 0 SEE video frames" }
+if (Has-Line $rxLogs "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE_VIDEO_AVC_TCP|SEE/SCRN_AVC_HUB_TCP") {
+    Ok "H2 RX received & decoded live SEE video frames"
+} else {
+    Bad "H2 RX received 0 SEE video frames"
+}
 Adb-Svc $rx "com.example.barky.TEST_SEE_STOP"
 Start-Sleep -Milliseconds 300
 
@@ -489,17 +501,22 @@ foreach ($s in $devices) {
     & $adb -s $s logcat -c | Out-Null
 }
 Adb-Svc $tx "com.example.barky.TEST_SCRN_START"
-$pairScrnStart = Wait-LogsBoth $tx "SCRN_FULLSCREEN enabled=true" $rx "SCREEN serve START|SCREEN_TX" 5.0
+$pairScrnStart = Wait-LogsBoth $tx "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|SCRN_FULLSCREEN enabled=true" $rx "SCREEN_TX" 6.0
 & $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_TAP" --ef remote_x 0.5 --ef remote_y 0.5 | Out-Null
 & $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_TEXT" --es remote_text "BarkyScrnTest" --ez remote_enter true | Out-Null
 & $adb -s $tx shell am startservice -n $Service -a "com.example.barky.TEST_REMOTE_KEY" --ei remote_key 1 | Out-Null
-$pairI2 = Wait-LogsBoth $tx "REMOTE_INPUT_TX cmd=KEY" $rx "REMOTE_INPUT_RX cmd=KEY" 4.0
+$pairI2 = Wait-LogsBoth $tx "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX" $rx "REMOTE_INPUT_RX cmd=KEY" 5.0
 $txLogs = $pairI2.Tx
 $rxLogs = $pairI2.Rx
 if (Has-Line $txLogs "SCREEN_REQ ONLY") { Ok "I2 TX started SCRN without enabling SEE" } else { Bad "I2 TX SCREEN_REQ ONLY missing" }
 if (-not (Has-Line $txLogs "SEE_REQ via")) { Ok "I2 SCRN did not trigger SEE_REQ" } else { Bad "I2 SCRN unexpectedly triggered SEE_REQ" }
 if (Has-Line $txLogs "SCRN_FULLSCREEN enabled=true") { Ok "I2 TX entered full-screen SCRN mode (buttons hidden)" } else { Bad "I2 TX SCRN_FULLSCREEN log missing" }
-if (Has-Line $rxLogs "SCREEN serve START|SCREEN_TX") { Ok "I2 RX auto-shared screen with zero prompt" } else { Bad "I2 RX zero-prompt screen share missing" }
+if (Has-Line $rxLogs "SCREEN_TX") { Ok "I2 RX auto-shared screen frames (SCREEN_TX) with zero prompt" } else { Bad "I2 RX zero-prompt SCREEN_TX missing" }
+if (Has-Line $txLogs "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE/SCRN_AVC_HUB_TCP") {
+    Ok "I2 TX received live SCRN screen frames from RX"
+} else {
+    Bad "I2 TX received 0 SCRN screen frames"
+}
 if (Has-Line $txLogs "REMOTE_INPUT_TX cmd=TAP") { Ok "I2 TX sent remote TAP packet" } else { Bad "I2 TX REMOTE_INPUT_TX TAP missing" }
 if (Has-Line $rxLogs "REMOTE_INPUT_RX cmd=TAP") { Ok "I2 RX received remote TAP packet" } else { Bad "I2 RX REMOTE_INPUT_RX TAP missing" }
 if (Has-Line $txLogs "REMOTE_INPUT_TX cmd=TEXT") { Ok "I2 TX sent remote keyboard TEXT packet" } else { Bad "I2 TX REMOTE_INPUT_TX TEXT missing" }
@@ -545,14 +562,31 @@ if ($mOnTx.Success -and $mOnRx.Success -and ([int]$mOnTx.Groups[6].Value -gt 0) 
     Adb-Svc $tx "com.example.barky.TEST_LISTEN_STOP"
     Start-Sleep -Milliseconds 250
 
-    # K3: SEE over Cellular/Public Relay
+    # K3: SEE over Cellular/Public Relay (verifying actual video frames TX and RX!)
     foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
     Adb-Svc $tx "com.example.barky.TEST_SEE_START"
-    $kSee = Wait-LogsBoth $tx "SEE_REQ" $rx "SEE_REQ from|serve see|Camera\+mic open" 6.0
-    if (Has-Line $kSee.Rx "SEE_REQ from|serve see|Camera\+mic open") { Ok "K3 SEE active over cellular/public relay path" }
-    else { Bad "K3 SEE over cellular/public relay failed" }
+    $kSee = Wait-LogsBoth $tx "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE_VIDEO_AVC_TCP|SEE/SCRN_AVC_HUB_TCP" $rx "SEE_TX_JPEG|SEE_TX_AVC" 8.0
+    if ((Has-Line $kSee.Rx "SEE_TX_JPEG|SEE_TX_AVC") -and (Has-Line $kSee.Tx "SEE/SCRN_VIDEO_TCP_RX|MONITOR_VIDEO_RX|MONITOR_VIDEO_AVC_RX|SEE_VIDEO_AVC_TCP|SEE/SCRN_AVC_HUB_TCP")) {
+        Ok "K3 SEE video frames delivered over cellular/public relay path"
+    } else {
+        Bad "K3 SEE video frames over cellular/public relay failed"
+    }
     Adb-Svc $tx "com.example.barky.TEST_SEE_STOP"
     Start-Sleep -Milliseconds 250
+
+    # K4: HOLD (LIVE voice+video) over Cellular/Public Relay
+    foreach ($s in $devices) { & $adb -s $s logcat -c | Out-Null }
+    Adb-Svc $tx "com.example.barky.SET_BEST_QUALITY" @("--ez", "best", "false")
+    Wait-Log $tx "SET_BEST_QUALITY=false" 1.5 | Out-Null
+    Adb-Svc $tx "com.example.barky.TEST_TALK_START"
+    Start-Sleep -Seconds 2
+    Adb-Svc $tx "com.example.barky.TEST_TALK_STOP"
+    $kHold = Wait-LogsBoth $tx "CLIP_TX" $rx "CLIP_RX" 6.0
+    if ((Has-Line $kHold.Tx "CLIP_TX") -and (Has-Line $kHold.Rx "CLIP_RX")) {
+        Ok "K4 HOLD voice+video delivered over cellular/public relay path"
+    } else {
+        Bad "K4 HOLD over cellular/public relay failed"
+    }
 
     # Restore LAN/auto peer link after K
     $rxLocH = $mOnTx.Groups[3].Value; $rxLocU = [int]$mOnTx.Groups[4].Value; $rxVid = [int]$mOnTx.Groups[7].Value
