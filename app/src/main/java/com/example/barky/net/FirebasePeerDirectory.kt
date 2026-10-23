@@ -110,8 +110,55 @@ object FirebasePeerDirectory {
     data class UpdateCatalog(
         val apkUrl: String,
         val minVersionCode: Int,
-        val versionName: String
+        val versionName: String,
+        val smokeRunId: Long = 0L
     )
+
+    /**
+     * Publish the phone's internal Wi‑Fi + Cellular smoke test report to Firestore
+     * `_meta/smoke_report` so the dev PC can verify all features even over cellular without ADB.
+     */
+    fun publishSmokeReportBlocking(
+        context: Context,
+        deviceModel: String,
+        versionCode: Int,
+        versionName: String,
+        passCount: Int,
+        failCount: Int,
+        elapsedMs: Long,
+        details: String
+    ): Boolean {
+        val cfg = config(context) ?: return false
+        val safeModel = deviceModel.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val docPath = "${documentsBase(cfg)}/_meta/smoke_report_$safeModel?key=${cfg.apiKey}"
+        return try {
+            val fields = JSONObject()
+                .put("deviceModel", stringField(deviceModel))
+                .put("versionCode", intField(versionCode))
+                .put("versionName", stringField(versionName))
+                .put("passCount", intField(passCount))
+                .put("failCount", intField(failCount))
+                .put("elapsedMs", intField(elapsedMs))
+                .put("updatedAtMs", intField(System.currentTimeMillis()))
+                .put("details", stringField(details.take(12_000)))
+            val body = JSONObject().put("fields", fields)
+            val conn = (URL(docPath).openConnection() as HttpURLConnection).apply {
+                requestMethod = "PATCH"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                connectTimeout = 12_000
+                readTimeout = 12_000
+            }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body.toString()) }
+            val code = conn.responseCode
+            conn.disconnect()
+            Log.i(TAG, "publishSmokeReport HTTP $code model=$deviceModel vc=$versionCode pass=$passCount fail=$failCount")
+            code in 200..299
+        } catch (t: Throwable) {
+            Log.w(TAG, "publishSmokeReport failed", t)
+            false
+        }
+    }
 
     /** Read `_meta/app_update` for a public HTTP(S) APK URL (cellular-friendly). */
     fun fetchUpdateCatalogBlocking(context: Context): UpdateCatalog? {

@@ -96,6 +96,8 @@ $apk = Join-Path $root "app\build-outputs\app-debug.apk"
 $gradleFile = Join-Path $root "app\build.gradle"
 if (Test-Path $gradleFile) {
     $g = [System.IO.File]::ReadAllText($gradleFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+    # Place externalBuildRoot on F:/barky-android-build (no spaces, ample disk space) instead of C:\ Temp.
+    $g = $g.Replace('new File(System.getProperty("java.io.tmpdir"), "barky-android-build")', 'new File("F:/barky-android-build")')
     if ($VersionName -and ($g -match "versionCode\s+(\d+)")) {
         $nextVc = [math]::Max(112, ([int]$Matches[1]))
         if ($g -notmatch [regex]::Escape($VersionName)) {
@@ -143,7 +145,7 @@ $rawDevices = @()
 $devices = @()
 $seenHw = @{}
 foreach ($s in $rawDevices) {
-    $hw = (& $adb -s $s shell getprop ro.serialno 2>$null).Trim()
+    $hw = ("" + (& $adb -s $s shell getprop ro.serialno 2>$null)).Trim()
     if (-not $hw) { $hw = $s }
     if (-not $seenHw.ContainsKey($hw)) {
         $seenHw[$hw] = $true
@@ -244,6 +246,12 @@ if (-not $SkipSmoke) {
         Remove-Job $job -Force -ErrorAction SilentlyContinue
         $out | ForEach-Object { Write-Output $_ }
         if ($out -match "fail=[1-9]") { exit 1 }
+    } elseif ($UploadFirebase) {
+        Write-Output "Local ADB has $($devices.Count) device(s) -- polling Firestore for in-phone Wi-Fi + Cellular InternalSmokeRunner report..."
+        $uploadScript = Join-Path $PSScriptRoot "upload-apk-to-firebase.mjs"
+        Push-Location $root
+        & node $uploadScript --poll-smoke 2>&1 | ForEach-Object { Write-Output $_ }
+        Pop-Location
     } else {
         Write-Output "WARN: only $($devices.Count) device(s) -- skipped dual-phone smoke (not hung; insufficient devices)"
     }
@@ -252,7 +260,7 @@ if (-not $SkipSmoke) {
 if ($CommitMessage) {
     Write-Output "Committing and pushing to GitHub... t=$(Elapsed)s"
     Push-Location $root
-    & git -c "safe.directory=F:/To sort/Delete/barky" add -u
+    & git -c "safe.directory=F:/To sort/Delete/barky" add -A app/ scripts/ GEMINI.md
     & git -c "safe.directory=F:/To sort/Delete/barky" commit -m $CommitMessage 2>&1 | ForEach-Object { Write-Output "  [git] $_" }
     $pushScript = Join-Path $PSScriptRoot "push-github.mjs"
     if (Test-Path $pushScript) {

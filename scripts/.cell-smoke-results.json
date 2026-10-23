@@ -1,0 +1,8 @@
+﻿{
+    "LISTEN_S2P":  false,
+    "RING_P2S":  true,
+    "SEE_P2S":  false,
+    "SEE_P2S_rx":  0,
+    "RING_S2P":  true,
+    "LISTEN_P2S":  false
+}

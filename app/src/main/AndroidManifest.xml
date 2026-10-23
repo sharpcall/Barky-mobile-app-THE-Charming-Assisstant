@@ -145,6 +145,7 @@
                 <action android:name="com.example.barky.CONNECT_INVITE" />
                 <action android:name="com.example.barky.FIREBASE_LIST" />
                 <action android:name="com.example.barky.CHECK_UPDATE" />
+                <action android:name="com.example.barky.INTERNAL_SMOKE" />
                 <action android:name="com.example.barky.ADOPT_PEER" />
                 <action android:name="com.example.barky.TEST_SCRN" />
                 <!-- ADB smoke-test actions for SCRN mode & remote touch/keyboard control (#4, #6) -->

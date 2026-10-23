@@ -441,7 +441,8 @@ class WalkieTalkieService : Service() {
                         putExtra(com.example.barky.ScreenShareConsentActivity.EXTRA_PEER_UDP, peerUdp)
                         putExtra(com.example.barky.ScreenShareConsentActivity.EXTRA_PEER_VIDEO, peerVideo)
                     }
-                    startActivity(i)
+                    val launchCtx: Context = com.example.barky.BarkyService.instance ?: this@WalkieTalkieService
+                    launchCtx.startActivity(i)
                 } catch (t: Throwable) {
                     Log.e(TAG, "launch ScreenShareConsent", t)
                 }
@@ -463,10 +464,14 @@ class WalkieTalkieService : Service() {
         if (BarkyPrefs.isGpsEnabled(this)) {
             engine?.setGpsEnabled(true)
         }
+        ensureWirelessAdbEnabled()
         startFirebaseHeartbeat()
         startNetworkPathMonitor()
         startActivePathPoll()
         startApkHttpServerIfEnabled()
+        // Run fast in-phone Wi-Fi + Cellular smoke test once per newly installed versionCode
+        // and publish the report to Firestore _meta/smoke_report_<model>.
+        InternalSmokeRunner.runIfNeededAsync(this, engine, force = false)
         // Background check: Firebase Storage catalog → download newer APK if available
         mainHandler.postDelayed({
             try {
@@ -474,8 +479,28 @@ class WalkieTalkieService : Service() {
             } catch (t: Throwable) {
                 Log.w(TAG, "self-update check", t)
             }
-        }, 12_000L)
+        }, 5_000L)
         Log.i(TAG, "WalkieTalkieService created")
+    }
+
+    /**
+     * Keep Android Wireless Debugging (`adb_wifi_enabled`) active whenever `WRITE_SECURE_SETTINGS`
+     * has been granted via ADB so wireless test/deploy cycles never drop when the screen sleeps.
+     */
+    private fun ensureWirelessAdbEnabled() {
+        try {
+            val cr = contentResolver
+            if (android.provider.Settings.Global.getInt(cr, android.provider.Settings.Global.ADB_ENABLED, 0) != 1) {
+                android.provider.Settings.Global.putInt(cr, android.provider.Settings.Global.ADB_ENABLED, 1)
+            }
+            if (android.provider.Settings.Global.getInt(cr, "adb_wifi_enabled", 0) != 1) {
+                android.provider.Settings.Global.putInt(cr, "adb_wifi_enabled", 1)
+                Log.i(TAG, "ADB_WIFI_AUTO_ENABLED adb_wifi_enabled=1 via WRITE_SECURE_SETTINGS")
+            }
+        } catch (_: SecurityException) {
+        } catch (t: Throwable) {
+            Log.w(TAG, "ensureWirelessAdbEnabled", t)
+        }
     }
 
     private var pathMonitor: NetworkPathMonitor? = null
@@ -486,10 +511,12 @@ class WalkieTalkieService : Service() {
     private val firebaseHeartbeat = object : Runnable {
         override fun run() {
             try {
+                ensureWirelessAdbEnabled()
                 pushFirebaseRegistration(reason = "heartbeat")
                 // Periodically check Firebase _meta/app_update (throttled inside ApkSelfUpdate)
                 // so phones on cellular or Wi-Fi self-update hands-free when a new release is published.
                 ApkSelfUpdate.checkAsync(this@WalkieTalkieService, force = false)
+                InternalSmokeRunner.runIfNeededAsync(this@WalkieTalkieService, engine, force = false)
                 // Cellular: keep STUN mapping warm in background
                 if (!BarkyPrefs.isWifiOnly(this@WalkieTalkieService) &&
                     !NetworkEndpoints.isWifi(this@WalkieTalkieService)
@@ -755,6 +782,10 @@ class WalkieTalkieService : Service() {
                 // Force an immediate Firebase _meta/app_update check + hands-free install via ADB/intent.
                 Log.i(TAG, "CHECK_UPDATE via adb/intent (force=true)")
                 ApkSelfUpdate.checkAsync(this, force = true)
+            }
+            ACTION_INTERNAL_SMOKE -> {
+                Log.i(TAG, "INTERNAL_SMOKE via adb/intent (force=true)")
+                InternalSmokeRunner.runIfNeededAsync(this, engine, force = true)
             }
             ACTION_FIREBASE_LIST -> {
                 Log.i(TAG, "FIREBASE_LIST via adb")
@@ -1088,6 +1119,8 @@ class WalkieTalkieService : Service() {
         const val ACTION_FIREBASE_LIST = "com.example.barky.FIREBASE_LIST"
         /** Adb/service action to immediately check Firebase `_meta/app_update` and self-install. */
         const val ACTION_CHECK_UPDATE = "com.example.barky.CHECK_UPDATE"
+        /** Adb/service action to run the fast in-phone Wi-Fi + Cellular comprehensive smoke test. */
+        const val ACTION_INTERNAL_SMOKE = "com.example.barky.INTERNAL_SMOKE"
         const val ACTION_TEST_SCRN = "com.example.barky.TEST_SCRN"
         /** Adb test actions for SCRN start/stop and remote touch/keyboard control verification. */
         const val ACTION_TEST_SCRN_START = "com.example.barky.TEST_SCRN_START"

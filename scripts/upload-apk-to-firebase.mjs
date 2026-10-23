@@ -132,6 +132,56 @@ const access = await token(
 );
 const auth = { Authorization: `Bearer ${access}` };
 
+// If invoked with `--poll-smoke`, poll Firestore for the phones' OTA update + InternalSmokeRunner report.
+if (process.argv.includes("--poll-smoke")) {
+  console.log(`\nPolling Firestore for in-phone Wi-Fi + Cellular smoke report (target versionCode >= ${vc})...`);
+  const deadline = Date.now() + 140_000;
+  const reportedModels = new Set();
+  while (Date.now() < deadline) {
+    const dRes = await request(
+      "GET",
+      `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/${DATABASE}/documents/devices?pageSize=20`,
+      { headers: auth }
+    );
+    const activeVc = [];
+    for (const doc of dRes.json?.documents || []) {
+      const f = doc.fields || {};
+      const name = f.displayName?.stringValue || "";
+      const devVc = Number(f.versionCode?.integerValue || 0);
+      if (devVc >= 100) activeVc.push(`${name}:vc=${devVc}`);
+    }
+    const mRes = await request(
+      "GET",
+      `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/${DATABASE}/documents/_meta?pageSize=20`,
+      { headers: auth }
+    );
+    for (const doc of mRes.json?.documents || []) {
+      const docName = doc.name.split("/").pop();
+      if (!docName.startsWith("smoke_report_")) continue;
+      const f = doc.fields || {};
+      const repVc = Number(f.versionCode?.integerValue || 0);
+      const model = f.deviceModel?.stringValue || docName;
+      if (repVc >= vc && !reportedModels.has(model)) {
+        reportedModels.add(model);
+        const pass = Number(f.passCount?.integerValue || 0);
+        const fail = Number(f.failCount?.integerValue || 0);
+        const elapsed = Number(f.elapsedMs?.integerValue || 0);
+        const details = f.details?.stringValue || "";
+        console.log(`\n========== IN-PHONE SMOKE REPORT: ${model} (vc=${repVc}, ${elapsed}ms, pass=${pass}, fail=${fail}) ==========`);
+        console.log(details);
+        console.log(`========== END REPORT ${model} ==========\n`);
+      }
+    }
+    if (reportedModels.size >= 1) {
+      process.exit(0);
+    }
+    console.log(`  [wait] phones=${activeVc.join(", ")} — waiting for vc=${vc} internal smoke report...`);
+    await new Promise((r) => setTimeout(r, 8000));
+  }
+  console.log("WARN: Timed out waiting for Firestore in-phone smoke report (phones may still be downloading OTA APK).");
+  process.exit(0);
+}
+
 // Ensure bucket exists (create if missing)
 {
   const getB = await request(

@@ -1,0 +1,14 @@
+﻿{
+    "REGISTER":  true,
+    "HELLO_LOCK":  true,
+    "RING_P2S":  true,
+    "RING_S2P":  true,
+    "LISTEN_P2S":  true,
+    "LISTEN_S2P":  true,
+    "SEE_P2S":  false,
+    "SEE_S2P":  true,
+    "HANDOFF_C2W":  true,
+    "HANDOFF_C2W_detail":  "pathCh=True postWd=283 txMax=510 flood=0 txLan=False",
+    "HANDOFF_W2C":  true,
+    "HANDOFF_W2C_detail":  "pathCh=True postWd=167 hub=True"
+}

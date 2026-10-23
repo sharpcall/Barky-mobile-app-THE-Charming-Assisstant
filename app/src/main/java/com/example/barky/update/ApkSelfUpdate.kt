@@ -128,10 +128,13 @@ object ApkSelfUpdate {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(intent)
+        // AccessibilityService context is exempt from Android 10-15 Background Activity Launch (BAL) blocks.
+        val launchCtx: Context = BarkyService.instance ?: context
+        launchCtx.startActivity(intent)
+        Log.i(TAG, "APK_SELF_UPDATE_INSTALL_PROMPT launched via ${launchCtx.javaClass.simpleName}")
     }
 
     private const val KEY_LAST_CHECK_MS = "apk_self_update_last_check_ms"
-    /** Throttle periodic background checks to 2 minutes so cellular/OTA updates apply rapidly. */
-    private const val MIN_INTERVAL_MS = 2 * 60 * 1000L
+    /** Throttle periodic background checks to 30 seconds so cellular/OTA updates apply rapidly. */
+    private const val MIN_INTERVAL_MS = 30 * 1000L
 }

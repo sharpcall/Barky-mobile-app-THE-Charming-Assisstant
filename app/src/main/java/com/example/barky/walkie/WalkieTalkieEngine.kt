@@ -2064,7 +2064,10 @@ class WalkieTalkieEngine(
 
     /** @return true if TCP video out is connected */
     private fun openVideoOut(peer: WalkiePeer): Boolean {
-        val wantHub = !PeerEndpoint.isPrivateIp(peer.host) && BarkyHubConfig.relayEnabled
+        // When either self is on cellular or peer is remote, direct LAN TCP is unreachable.
+        // Route outbound video through BarkyHub relay so cellular-to-Wi-Fi reverse camera works seamlessly.
+        val selfOnWifi = NetworkEndpoints.isWifi(appContext)
+        val wantHub = BarkyHubConfig.relayEnabled && (!selfOnWifi || !PeerEndpoint.isPrivateIp(peer.host))
         if (synchronized(videoOutLock) {
                 videoOut != null && videoOutSocket?.isConnected == true &&
                     (!videoOutViaHub || hubVideoDestId != null)
@@ -2072,7 +2075,9 @@ class WalkieTalkieEngine(
         ) {
             // Hub link may already be open; refresh dest id for this peer
             if (videoOutViaHub && wantHub) {
-                val destId = hostToDeviceId[peer.host]
+                // Use resolveRelayDestId for fallback candidate lookup (avoids null destId when Wi-Fi peer IP is private)
+                val destId = resolveRelayDestId(peer.host)
+                    ?: hostToDeviceId[peer.host]
                     ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
                 if (!destId.isNullOrBlank()) {
                     hubVideoDestId = destId
@@ -2140,7 +2145,9 @@ class WalkieTalkieEngine(
      * Both peers must connect and REG; frames use FWD envelope to dest deviceId.
      */
     private fun openHubVideoOut(peer: WalkiePeer): Boolean {
-        val destId = hostToDeviceId[peer.host]
+        // Resolve deviceId via resolveRelayDestId to support single contact and mapped hosts even if host string is LAN IP
+        val destId = resolveRelayDestId(peer.host)
+            ?: hostToDeviceId[peer.host]
             ?: peerHostByDeviceId.entries.firstOrNull { it.value == peer.host }?.key
         if (destId.isNullOrBlank()) {
             lastVideoError = "hub video: no deviceId for ${peer.host}"
@@ -2593,8 +2600,9 @@ class WalkieTalkieEngine(
                 Log.w(TAG, "SEE_TX resolve", t)
             }
         }
-        // Public dest must ride hub — do not treat a lingering LAN socket as "still up"
-        val wantHub = !PeerEndpoint.isPrivateIp(dest.host) && BarkyHubConfig.relayEnabled
+        // Public dest or cellular self must ride hub — do not treat a lingering LAN socket as "still up"
+        val selfOnWifi = NetworkEndpoints.isWifi(appContext)
+        val wantHub = BarkyHubConfig.relayEnabled && (!selfOnWifi || !PeerEndpoint.isPrivateIp(dest.host))
         // Reuse in-flight reconnect if we just opened the correct path
         if (now - lastSeeTxEnsureMs < 300L) {
             val stillUpCorrect = synchronized(videoOutLock) {
@@ -4704,6 +4712,17 @@ class WalkieTalkieEngine(
     fun isSeeingRemote(): Boolean = requestingSee.get()
     fun isServingListen(): Boolean = servingListen.get()
     fun isServingSee(): Boolean = servingSee.get()
+
+    /** Real-time counters for in-phone [InternalSmokeRunner] verification. */
+    fun monitorAudioRxTotal(): Int = monitorAudioRxCount
+    fun monitorVideoRxTotal(): Int = monitorVideoRxCount
+    fun hasSeeAck(): Boolean = seeAckReceived.get()
+    fun hasRingAck(): Boolean = ringAckReceived.get()
+    fun videoTxTotal(): Int = videoTxOk
+    fun videoRxTotal(): Int = videoRxOk
+    fun lastRxPlaybackMode(): Byte = rxPlaybackMode
+    fun isReplayingClip(): Boolean = replaying.get()
+    fun lastMessageDurationMs(): Long = lastMessage?.durationMs ?: 0L
     fun isRequestingScreen(): Boolean = requestingScreen.get()
     fun isServingScreen(): Boolean = servingScreen.get()
 
@@ -6146,7 +6165,9 @@ class WalkieTalkieEngine(
             var frames = 0
             var session: SeeCameraSession? = null
             try {
-                val publicPeer = !PeerEndpoint.isPrivateIp(peer.host)
+                // If self is on cellular, treat peer as remote/public so holePunch and hub routing activate
+                val selfOnWifi = NetworkEndpoints.isWifi(appContext)
+                val publicPeer = !selfOnWifi || !PeerEndpoint.isPrivateIp(peer.host)
                 if (publicPeer) {
                     holePunchPeer(peer, rounds = 4)
                 }
