@@ -27,10 +27,17 @@ function Add-Found([string]$name, [string]$address) {
     Write-Host "FOUND $name -> $address"
 }
 
-# Disconnect any stale 'offline' ADB transports left over from previous scans.
-foreach ($line in (& $adb devices)) {
-    if ($line -match "^(\S+)\s+offline") {
-        & $adb disconnect $Matches[1] 2>&1 | Out-Null
+# If no ADB devices are currently attached, restart the ADB daemon once so stale TLS state is cleared.
+$existingActive = @(& $adb devices | Select-String "\s+device\s*$")
+if ($existingActive.Count -eq 0) {
+    & $adb kill-server 2>&1 | Out-Null
+    & $adb start-server 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+} else {
+    foreach ($line in (& $adb devices)) {
+        if ($line -match "^(\S+)\s+offline") {
+            & $adb disconnect $Matches[1] 2>&1 | Out-Null
+        }
     }
 }
 
@@ -67,14 +74,14 @@ if (Test-Path $outFile) {
     } catch {}
 }
 
-# Read latest localIp, publicIp, and localVideoPort from secrets/firestore-devices.json (written by upload-apk-to-firebase.mjs).
+# Read latest 192.168.4.x localIp and localVideoPort from secrets/firestore-devices.json.
 $barkyVideoPorts = @{}
 $fsJson = Join-Path (Split-Path $PSScriptRoot -Parent) 'secrets\firestore-devices.json'
 if (Test-Path $fsJson) {
     try {
         $peers = Get-Content $fsJson -Raw | ConvertFrom-Json
         foreach ($p in $peers) {
-            if ($p.localIp -and ($p.localIp -match "^192\.168\.|^10\.|^172\.")) {
+            if ($p.localIp -and ($p.localIp -match "^192\.168\.4\.")) {
                 $KnownIps = @($p.localIp) + $KnownIps
                 if ($p.localVideoPort -gt 0) {
                     $barkyVideoPorts["$($p.localIp):$($p.localVideoPort)"] = $true
@@ -83,7 +90,8 @@ if (Test-Path $fsJson) {
         }
     } catch {}
 }
-$KnownIps = $KnownIps | Where-Object { $_ } | Select-Object -Unique
+$KnownIps = $KnownIps | Where-Object { $_ -match "^192\.168\.4\." } | Select-Object -Unique
+Write-Host "Candidate LAN IPs: $($KnownIps -join ', ')"
 
 Write-Host "=== 3) adb devices (already linked) ==="
 foreach ($line in (& $adb devices)) {
@@ -140,7 +148,7 @@ foreach ($k in $found.Keys) {
 foreach ($ip in $KnownIps) {
     if ($connectedIps -contains $ip) { continue }
     Write-Host "Scanning wireless ADB ports (30000..60999) on $ip..."
-    $openPorts = [FastPortScanner]::Scan($ip, 30000, 60999, 150, 256)
+    $openPorts = @([FastPortScanner]::Scan($ip, 30000, 60999, 140, 256) | Sort-Object -Descending)
     if ($openPorts.Count -gt 0) {
         Write-Host "  Open TCP ports on $ip : $($openPorts -join ', ')"
     }
@@ -151,12 +159,13 @@ foreach ($ip in $KnownIps) {
             Write-Host "  Skipping Barky TCP video port $addr"
             continue
         }
-        $r = & $adb connect $addr 2>&1 | Out-String
-        if (($r -match "connected to|already connected") -and ($r -notmatch "cannot connect|failed")) {
-            # Wireless debugging TLS handshake starts as 'offline' for ~0.5-1.8s before becoming 'device'.
+        $r = (& $adb connect $addr 2>&1 | Out-String).Trim()
+        Write-Host "  adb connect $addr -> $r"
+        if ($r -notmatch "cannot connect") {
+            # Wireless debugging TLS handshake starts as 'offline' or 'failed to authenticate' for ~1-3.5s before becoming 'device'.
             $isAdbDevice = $false
-            for ($waitIdx = 0; $waitIdx -lt 6; $waitIdx++) {
-                Start-Sleep -Milliseconds 400
+            for ($waitIdx = 0; $waitIdx -lt 10; $waitIdx++) {
+                Start-Sleep -Milliseconds 450
                 $devs = & $adb devices | Out-String
                 if ($devs -match [regex]::Escape($addr) + "\s+device") {
                     $isAdbDevice = $true
