@@ -14,6 +14,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) { $adb = "adb" }
 $outFile = Join-Path $PSScriptRoot "devices-wifi.json"
@@ -159,9 +160,17 @@ foreach ($ip in $KnownIps) {
         }
         $r = & $adb connect $addr 2>&1 | Out-String
         if (($r -match "connected to|already connected") -and ($r -notmatch "cannot connect|failed")) {
-            Start-Sleep -Milliseconds 350
-            $devs = & $adb devices | Out-String
-            if ($devs -match [regex]::Escape($addr) + "\s+device") {
+            # Wireless debugging TLS handshake starts as 'offline' for ~0.5-1.8s before becoming 'device'.
+            $isAdbDevice = $false
+            for ($waitIdx = 0; $waitIdx -lt 6; $waitIdx++) {
+                Start-Sleep -Milliseconds 400
+                $devs = & $adb devices | Out-String
+                if ($devs -match [regex]::Escape($addr) + "\s+device") {
+                    $isAdbDevice = $true
+                    break
+                }
+            }
+            if ($isAdbDevice) {
                 $model = ("" + (& $adb -s $addr shell getprop ro.product.model 2>$null)).Trim()
                 if (-not $model) { $model = "scan-$ip" }
                 Add-Found $model $addr
