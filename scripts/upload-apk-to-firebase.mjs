@@ -26,7 +26,8 @@ const BUCKET =
   `${PROJECT}.firebasestorage.app`;
 const OBJECT = "updates/barky-latest.apk";
 
-const apkArg = process.argv[2];
+// Find positional APK path argument while ignoring flags (e.g. --poll-smoke)
+const apkArg = process.argv.slice(2).find((a) => !a.startsWith("--"));
 const apkPath = apkArg
   ? path.resolve(apkArg)
   : path.join(root, "app", "build-outputs", "app-debug.apk");
