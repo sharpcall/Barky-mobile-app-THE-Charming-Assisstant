@@ -226,6 +226,19 @@ async function uploadToGithubRelease() {
     throw new Error(`GitHub asset upload failed: ${upAsset.status} ${upAsset.text.slice(0, 200)}`);
   }
   console.log("github release asset uploaded:", upAsset.json.browser_download_url);
+  // Test unauthenticated GET on browser_download_url (as Android ApkSelfUpdate does)
+  const testUnauth = await request("GET", upAsset.json.browser_download_url, {
+    headers: { "User-Agent": "Android-Barky", Range: "bytes=0-15" },
+  });
+  console.log("unauth probe status:", testUnauth.status, "location:", testUnauth.location || "");
+  if (testUnauth.status === 404) {
+    console.log("Repo is private (404 unauth) — setting visibility=public so phones can OTA download...");
+    const vis = await request("PATCH", `https://api.github.com/repos/${owner}/${repo}`, {
+      headers: ghHeaders,
+      body: JSON.stringify({ private: false }),
+    });
+    console.log("repo visibility patch:", vis.status);
+  }
   return upAsset.json.browser_download_url;
 }
 
@@ -323,3 +336,37 @@ const out = {
 fs.writeFileSync(path.join(root, "secrets", "firebase-app-update.json"), JSON.stringify(out, null, 2));
 console.log("\nSUCCESS — phones will self-update when versionCode <", vc);
 console.log(JSON.stringify(out, null, 2));
+
+// Also query Firestore `devices` collection using the service-account bearer token
+// so we know each phone's current localIp, localVideoPort, publicIp, onWifi, and versionCode.
+const devRes = await request(
+  "GET",
+  `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/${DATABASE}/documents/devices?pageSize=20`,
+  { headers: auth }
+);
+if (devRes.status >= 200 && devRes.status < 300 && devRes.json.documents) {
+  const peers = [];
+  const nowMs = Date.now();
+  console.log("\n=== FIRESTORE DEVICES ===");
+  for (const doc of devRes.json.documents) {
+    const f = doc.fields || {};
+    const p = {
+      displayName: f.displayName?.stringValue || "",
+      deviceId: f.deviceId?.stringValue || "",
+      localIp: f.localIp?.stringValue || "",
+      localUdpPort: Number(f.localUdpPort?.integerValue || 0),
+      localVideoPort: Number(f.localVideoPort?.integerValue || 0),
+      publicIp: f.publicIp?.stringValue || "",
+      publicUdpPort: Number(f.publicUdpPort?.integerValue || 0),
+      onWifi: !!f.onWifi?.booleanValue,
+      versionCode: Number(f.versionCode?.integerValue || 0),
+      appVersion: f.appVersion?.stringValue || "",
+      ageSec: Math.round((nowMs - Number(f.updatedAtMs?.integerValue || 0)) / 1000),
+    };
+    peers.push(p);
+    console.log(
+      `  ${p.displayName} | vc=${p.versionCode} (${p.appVersion}) | wifi=${p.onWifi} | local=${p.localIp}:${p.localUdpPort} (v=${p.localVideoPort}) | pub=${p.publicIp}:${p.publicUdpPort} | age=${p.ageSec}s`
+    );
+  }
+  fs.writeFileSync(path.join(root, "secrets", "firestore-devices.json"), JSON.stringify(peers, null, 2));
+}

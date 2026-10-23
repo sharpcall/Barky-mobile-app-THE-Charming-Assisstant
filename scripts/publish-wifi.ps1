@@ -80,38 +80,49 @@ priority = 999
     } catch {}
 }
 
-# Discover / reconnect wireless endpoints (mdns first -- ports change often)
+# Build / bump version first so Firebase catalog and firestore-devices.json are fresh before ADB discovery.
+$apk = Join-Path $root "app\build-outputs\app-debug.apk"
+$gradleFile = Join-Path $root "app\build.gradle"
+if (Test-Path $gradleFile) {
+    $g = [System.IO.File]::ReadAllText($gradleFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+    if ($VersionName -and ($g -match "versionCode\s+(\d+)")) {
+        $nextVc = [math]::Max(112, ([int]$Matches[1]))
+        if ($g -notmatch [regex]::Escape($VersionName)) {
+            $nextVc = ([int]$Matches[1]) + 1
+        }
+        $g = [regex]::Replace($g, "versionCode\s+\d+", "versionCode $nextVc")
+        $g = [regex]::Replace($g, 'versionName\s+"[^"]+"', "versionName `"$VersionName`"")
+        Write-Output "Bumped app/build.gradle to versionCode=$nextVc versionName=$VersionName"
+    }
+    [System.IO.File]::WriteAllText($gradleFile, $g, (New-Object System.Text.UTF8Encoding($false)))
+}
+if (-not $SkipBuild) {
+    DeadlineLeft | Out-Null
+    Write-Output "Building... t=$(Elapsed)s"
+    Push-Location $root
+    & .\gradlew.bat assembleDebug -q
+    $bc = $LASTEXITCODE
+    Pop-Location
+    if ($bc -ne 0) {
+        Write-Output "FAIL: gradle assembleDebug exit $bc at t=$(Elapsed)s"
+        exit $bc
+    }
+}
+if ($UploadFirebase -and (Test-Path $apk)) {
+    $uploadScript = Join-Path $PSScriptRoot "upload-apk-to-firebase.mjs"
+    if (Test-Path $uploadScript) {
+        Write-Output "Uploading APK catalog to Firebase/GitHub & querying Firestore devices... t=$(Elapsed)s"
+        Push-Location $root
+        & node $uploadScript 2>&1 | ForEach-Object { Write-Output "  [firebase] $_" }
+        Pop-Location
+    }
+}
+
+# Discover / reconnect wireless endpoints (mdns + firestore-devices.json + TCP scan)
 $discover = Join-Path $PSScriptRoot "discover-wifi-devices.ps1"
 if (Test-Path $discover) {
-    Write-Output "Discovering wireless adb via mdns..."
+    Write-Output "Discovering wireless adb..."
     & powershell -NoProfile -ExecutionPolicy Bypass -File $discover 2>&1 | ForEach-Object { Write-Output $_ }
-}
-$wifiList = Join-Path $PSScriptRoot "devices-wifi.json"
-if (Test-Path $wifiList) {
-    try {
-        $cfg = Get-Content $wifiList -Raw | ConvertFrom-Json
-        foreach ($d in $cfg.devices) {
-            $addr = [string]$d.address
-            if (-not $addr) { continue }
-            if ($addr -match "^([\d.]+):") {
-                if (-not (Test-Connection -ComputerName $Matches[1] -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
-                    continue
-                }
-            }
-            Write-Output "adb connect $addr ($($d.name))"
-            & $adb connect $addr 2>&1 | ForEach-Object { Write-Output "  $_" }
-        }
-        # Poll briefly for connected devices instead of a long fixed sleep.
-        for ($i = 0; $i -lt 6; $i++) {
-            $cur = @(& $adb devices | Select-String "device$")
-            if ($cur.Count -ge 2) { break }
-            Start-Sleep -Milliseconds 300
-        }
-    } catch {
-        Write-Output "WARN: devices-wifi.json parse/connect: $_"
-    }
-} else {
-    Write-Output "INFO: no devices-wifi.json yet -- ran mdns discover; or leave Wireless debugging ON"
 }
 
 & $adb devices -l
@@ -134,52 +145,9 @@ if ($devices.Count -lt 1 -and -not $UploadFirebase -and -not $CommitMessage) {
 }
 Write-Output "Devices: $($devices -join ', ')"
 
-$apk = Join-Path $root "app\build-outputs\app-debug.apk"
-$gradleFile = Join-Path $root "app\build.gradle"
-if (Test-Path $gradleFile) {
-    $g = [System.IO.File]::ReadAllText($gradleFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
-    if ($VersionName -and ($g -match "versionCode\s+(\d+)")) {
-        $nextVc = [math]::Max(112, ([int]$Matches[1]))
-        if ($g -notmatch [regex]::Escape($VersionName)) {
-            $nextVc = ([int]$Matches[1]) + 1
-        }
-        $g = [regex]::Replace($g, "versionCode\s+\d+", "versionCode $nextVc")
-        $g = [regex]::Replace($g, 'versionName\s+"[^"]+"', "versionName `"$VersionName`"")
-        Write-Output "Bumped app/build.gradle to versionCode=$nextVc versionName=$VersionName"
-    }
-    # Always write UTF-8 WITHOUT BOM so Groovy's Gradle parser never fails on \uFEFF.
-    [System.IO.File]::WriteAllText($gradleFile, $g, (New-Object System.Text.UTF8Encoding($false)))
-}
-if (-not $SkipBuild) {
-    DeadlineLeft | Out-Null
-    Write-Output "Building... t=$(Elapsed)s"
-    Push-Location $root
-    & .\gradlew.bat assembleDebug -q
-    $bc = $LASTEXITCODE
-    Pop-Location
-    if ($bc -ne 0) {
-        Write-Output "FAIL: gradle assembleDebug exit $bc at t=$(Elapsed)s"
-        exit $bc
-    }
-}
 if (-not (Test-Path $apk)) {
     Write-Output "FAIL: APK missing at $apk"
     exit 1
-}
-
-# Optional: upload APK catalog to Firebase Storage/Firestore in parallel with ADB installs
-# so any phone on cellular data (without ADB) self-updates automatically via ApkSelfUpdate + BarkyService.
-$fbJob = $null
-if ($UploadFirebase) {
-    $uploadScript = Join-Path $PSScriptRoot "upload-apk-to-firebase.mjs"
-    if (Test-Path $uploadScript) {
-        Write-Output "Starting Firebase APK upload in parallel... t=$(Elapsed)s"
-        $fbJob = Start-Job -ScriptBlock {
-            param($rootDir, $scriptPath)
-            Set-Location $rootDir
-            & node $scriptPath 2>&1
-        } -ArgumentList $root, $uploadScript
-    }
 }
 
 $pkg = "com.example.barky"

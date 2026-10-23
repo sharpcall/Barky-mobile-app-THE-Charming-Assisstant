@@ -27,6 +27,13 @@ function Add-Found([string]$name, [string]$address) {
     Write-Host "FOUND $name -> $address"
 }
 
+# Disconnect any stale 'offline' ADB transports left over from previous scans.
+foreach ($line in (& $adb devices)) {
+    if ($line -match "^(\S+)\s+offline") {
+        & $adb disconnect $Matches[1] 2>&1 | Out-Null
+    }
+}
+
 Write-Host "=== 1) adb mdns services ==="
 try {
     $mdns = & $adb mdns services 2>&1 | Out-String
@@ -60,31 +67,17 @@ if (Test-Path $outFile) {
     } catch {}
 }
 
-# Read latest localIp, publicIp, and localVideoPort from Firestore `devices` collection.
+# Read latest localIp, publicIp, and localVideoPort from secrets/firestore-devices.json (written by upload-apk-to-firebase.mjs).
 $barkyVideoPorts = @{}
-$fbCfg = Join-Path (Split-Path $PSScriptRoot -Parent) 'app\src\main\res\values\firebase_config.xml'
-if (Test-Path $fbCfg) {
+$fsJson = Join-Path (Split-Path $PSScriptRoot -Parent) 'secrets\firestore-devices.json'
+if (Test-Path $fsJson) {
     try {
-        $xml = Get-Content $fbCfg -Raw
-        $pidMatch = [regex]::Match($xml, 'name="firebase_project_id"[^>]*>([^<]+)<')
-        $dbMatch  = [regex]::Match($xml, 'name="firebase_database_id"[^>]*>([^<]+)<')
-        $keyMatch = [regex]::Match($xml, 'name="firebase_api_key"[^>]*>([^<]+)<')
-        if ($pidMatch.Success -and $dbMatch.Success -and $keyMatch.Success) {
-            $url = "https://firestore.googleapis.com/v1/projects/$($pidMatch.Groups[1].Value)/databases/$($dbMatch.Groups[1].Value)/documents/devices?key=$($keyMatch.Groups[1].Value)"
-            $resp = Invoke-RestMethod -Uri $url -TimeoutSec 5 -ErrorAction SilentlyContinue
-            $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-            foreach ($doc in $resp.documents) {
-                $lip = $doc.fields.localIp.stringValue
-                $pip = $doc.fields.publicIp.stringValue
-                $vport = [int]$doc.fields.localVideoPort.integerValue
-                $vc  = $doc.fields.versionCode.integerValue
-                $upMs = [int64]$doc.fields.updatedAtMs.integerValue
-                $ageSec = [math]::Round(($nowMs - $upMs) / 1000)
-                $dname = $doc.fields.displayName.stringValue
-                Write-Host "Firestore peer: $dname | local=$lip (video=$vport) | public=$pip | vc=$vc | age=${ageSec}s"
-                if ($lip -and ($lip -match "^192\.168\.|^10\.|^172\.")) {
-                    $KnownIps = @($lip) + $KnownIps
-                    if ($vport -gt 0) { $barkyVideoPorts["$lip`:$vport"] = $true }
+        $peers = Get-Content $fsJson -Raw | ConvertFrom-Json
+        foreach ($p in $peers) {
+            if ($p.localIp -and ($p.localIp -match "^192\.168\.|^10\.|^172\.")) {
+                $KnownIps = @($p.localIp) + $KnownIps
+                if ($p.localVideoPort -gt 0) {
+                    $barkyVideoPorts["$($p.localIp):$($p.localVideoPort)"] = $true
                 }
             }
         }
