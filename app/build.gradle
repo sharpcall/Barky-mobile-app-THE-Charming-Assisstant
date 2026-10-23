@@ -21,8 +21,8 @@ android {
         // Release 111 (5.71-auto-scrn-sticky-mic-cell-smoke): zero-prompt SCRN screen mirroring
         // via AccessibilityService, sticky Left (Private) / Right (Speaker) mic position, louder
         // speaker playback, and mandatory Wi-Fi + cellular relay path testing.
-        versionCode 116
-        versionName "5.76-subnet-mismatch-public-path-fix"
+        versionCode 117
+        versionName "5.77-fast-stun-p2p-mismatched-subnets"
     }
 
     compileOptions {

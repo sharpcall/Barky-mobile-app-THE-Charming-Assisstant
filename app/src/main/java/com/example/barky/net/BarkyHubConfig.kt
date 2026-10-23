@@ -20,9 +20,9 @@ object BarkyHubConfig {
     /** Coturn STUN (same host). Prefer this before public STUN farms. */
     const val STUN_PORT: Int = 3478
 
-    /** Kill-switch if hub is down — hole-punch still attempted. */
+    /** Kill-switch if hub is down — when false, direct P2P STUN hole-punch is used without timeout stalls. */
     @Volatile
-    var relayEnabled: Boolean = true
+    var relayEnabled: Boolean = false
 
     fun isHubAddress(host: String?): Boolean {
         if (host.isNullOrBlank()) return false
