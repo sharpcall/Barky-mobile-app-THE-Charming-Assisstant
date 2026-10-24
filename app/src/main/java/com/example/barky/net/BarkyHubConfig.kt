@@ -1,12 +1,12 @@
 package com.example.barky.net
 
 /**
- * Barky cloud media relay (Google Cloud Free Tier e2-micro VM).
- * Bridges cellular and mismatched Wi-Fi subnets via UDP relay (39000), TCP video relay (39002), and STUN (3478).
+ * Barky cloud media relay on Oracle Cloud Always Free VM (150.136.164.242).
+ * 10 TB/month free bandwidth forever. Provides UDP relay (39000), TCP video relay (39002), and STUN (3478).
  */
 object BarkyHubConfig {
-    /** Public IP of barky-relay VM (us-central1). */
-    const val HOST: String = "34.45.33.226"
+    /** Public IP of Oracle Always Free relay VM (us-ashburn-1). */
+    const val HOST: String = "150.136.164.242"
 
     /** Barky custom UDP relay port (infra/barky-udp-relay). */
     const val RELAY_UDP_PORT: Int = 39000
