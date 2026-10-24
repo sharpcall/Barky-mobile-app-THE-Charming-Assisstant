@@ -455,13 +455,13 @@
     </LinearLayout>
 
     <!-- Self PiP must be a ROOT sibling AFTER footer so it receives touches (elevation alone
-         cannot beat a later sibling that covers the bottom of the screen). -->
+         cannot beat a later sibling that covers the bottom of the screen). Starts at bottom-right. -->
     <FrameLayout
         android:id="@+id/walkie_pip_box"
         android:layout_width="140dp"
         android:layout_height="186dp"
-        android:layout_gravity="top|end"
-        android:layout_marginTop="96dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginBottom="24dp"
         android:layout_marginEnd="12dp"
         android:background="#FF1A1228"
         android:clipChildren="true"

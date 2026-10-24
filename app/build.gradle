@@ -21,8 +21,8 @@ android {
         // Release 111 (5.71-auto-scrn-sticky-mic-cell-smoke): zero-prompt SCRN screen mirroring
         // via AccessibilityService, sticky Left (Private) / Right (Speaker) mic position, louder
         // speaker playback, and mandatory Wi-Fi + cellular relay path testing.
-        versionCode 121
-        versionName "5.81-fix-self-camera-pip-stay-in-place-on-click"
+        versionCode 122
+        versionName "5.82-on-demand-live-debug-and-bottom-right-pip"
     }
 
     compileOptions {

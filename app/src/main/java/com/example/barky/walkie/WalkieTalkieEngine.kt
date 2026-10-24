@@ -3213,8 +3213,14 @@ class WalkieTalkieEngine(
                     packet.offset,
                     packet.length
                 )
-                if (ok) return
-                Log.w(TAG, "relay FWD failed destId=${destId.take(12)}…")
+                // If destination is synthetic hub address, relay is the only valid delivery
+                if (BarkyHubConfig.isHubAddress(destHost)) {
+                    if (!ok) Log.w(TAG, "relay FWD failed destId=${destId.take(12)}…")
+                    return
+                }
+                // When destHost is a real public IP (e.g. STUN mapping), dual-send:
+                // Send via relay FWD AND continue below to send direct UDP to destHost:destPort.
+                // Dual-path ensures instant delivery even if NAT drops one path.
             } else {
                 Log.w(
                     TAG,
@@ -3607,6 +3613,10 @@ class WalkieTalkieEngine(
                         }
                         WalkieProtocol.TYPE_SEE_ACK -> {
                             seeAckReceived.set(true)
+                            com.example.barky.net.LiveDebug.emit(
+                                "SEE_RX",
+                                "RX SEE_ACK from=$from port=$fromPort relay=${delivered != null} — Peer accepted SEE!"
+                            )
                             Log.i(TAG, "SEE_ACK from=$from port=$fromPort relay=${delivered != null}")
                             postStatus("Peer accepted SEE — waiting for video…")
                         }
@@ -3618,6 +3628,10 @@ class WalkieTalkieEngine(
                         }
                         WalkieProtocol.TYPE_SESSION_FAIL -> {
                             val reason = parseSessionFailReason(walkieBytes)
+                            com.example.barky.net.LiveDebug.emit(
+                                "SESSION_FAIL",
+                                "RX SESSION_FAIL from=$from reason=$reason"
+                            )
                             Log.w(TAG, "SESSION_FAIL from=$from reason=$reason")
                             postError(reason.ifBlank { "Peer could not complete the session" })
                             // Stop local SEE request if we were waiting
@@ -3864,7 +3878,13 @@ class WalkieTalkieEngine(
         // (cellular relay delivers H.264 TYPE_MONITOR_VIDEO_AVC, not JPEG).
         if (!storeClip && (requestingSee.get() || requestingScreen.get())) {
             monitorVideoRxCount++
-            if (monitorVideoRxCount == 1 || monitorVideoRxCount % 30 == 0) {
+            if (monitorVideoRxCount == 1) {
+                com.example.barky.net.LiveDebug.emit(
+                    "VIDEO_RX",
+                    "First H.264 video frame received (${au.size} bytes) from $from — decoding and displaying!"
+                )
+            }
+            if (monitorVideoRxCount % 30 == 0) {
                 Log.i(
                     TAG,
                     "MONITOR_VIDEO_AVC_RX n=$monitorVideoRxCount bytes=${au.size} from=$from"
@@ -4859,6 +4879,12 @@ class WalkieTalkieEngine(
         selectPeer(peer)
         userLockedSelection.set(true)
         peer = currentPeer() ?: peer
+        com.example.barky.net.LiveDebug.setSession("SEE_REQUESTING")
+        com.example.barky.net.LiveDebug.emit(
+            "SEE_REQ",
+            "startSeeRemote: peer=${peer.displayName} host=${peer.host}:${peer.port} " +
+                "selfWifi=${NetworkEndpoints.isWifi(appContext)}"
+        )
         if (!requestingSee.compareAndSet(false, true)) {
             stopSeeRemote()
             return
@@ -4898,6 +4924,11 @@ class WalkieTalkieEngine(
                 lastControlTargets = targets.all
                 val primary = applyPrimaryPeer(targets.primary)
                 seeWatchPeer = primary
+                com.example.barky.net.LiveDebug.emit(
+                    "SEE_REQ",
+                    "Resolved targets: primary=${primary.host}:${primary.port} (vport=${primary.videoPort}) " +
+                        "alts=${targets.all.map { "${it.host}:${it.port}" }} reason=${targets.reason}"
+                )
                 // Full SEE control plane in See.kt
                 See.sendReqBurst(
                     targets = targets.all,
@@ -5147,6 +5178,11 @@ class WalkieTalkieEngine(
             "SEE_REQ from $from fromPort=$fromPort payloadPort=$payloadPort payloadVideo=$payloadVideo " +
                 "usePort=${peer.port} vport=${peer.videoPort} host=${peer.host} destId=${destId?.take(12)} (video-only serve)"
         )
+        com.example.barky.net.LiveDebug.setSession("SEE_SERVING")
+        com.example.barky.net.LiveDebug.emit(
+            "SEE_SERVE",
+            "RX SEE_REQ from $from:$fromPort (replyPort=$replyPort) -> starting camera & sending SEE_ACK"
+        )
         // Tell requester we accepted (so they can show "no ack" if this never arrives)
         val ackPeer = peer
         thread(name = "walkie-see-ack", isDaemon = true) {
@@ -5157,6 +5193,10 @@ class WalkieTalkieEngine(
                     TAG,
                     "SEE_ACK → ${ackPeer.host}:${ackPeer.port} destId=${ackDestId?.take(12)} " +
                         "relayOn=${BarkyHubConfig.relayEnabled}"
+                )
+                com.example.barky.net.LiveDebug.emit(
+                    "SEE_SERVE",
+                    "TX SEE_ACK -> ${ackPeer.host}:${ackPeer.port} (destId=${ackDestId?.take(10)})"
                 )
                 sendSessionControl(ackPeer, WalkieProtocol.TYPE_SEE_ACK)
                 if (!PeerEndpoint.isPrivateIp(ackPeer.host) || ackDestId != null) {
@@ -5175,9 +5215,18 @@ class WalkieTalkieEngine(
 
     private fun scheduleSeeAckWatchdog(peer: WalkiePeer) {
         cancelSeeWatchdog()
+        val timeoutMs = if (NetworkEndpoints.isWifi(appContext)) 7_000L else 14_000L
+        com.example.barky.net.LiveDebug.emit(
+            "SEE_WATCHDOG",
+            "Armed watchdog (${timeoutMs}ms) for peer=${peer.displayName} host=${peer.host}:${peer.port}"
+        )
         val r = Runnable {
             if (!requestingSee.get()) return@Runnable
             if (!seeAckReceived.get()) {
+                com.example.barky.net.LiveDebug.emit(
+                    "SEE_WATCHDOG",
+                    "TIMEOUT! No SEE_ACK received from ${peer.host}:${peer.port} after ${timeoutMs}ms"
+                )
                 Log.w(TAG, "SEE watchdog: no SEE_ACK from ${peer.host}")
                 failSessionBothSides(
                     peer = peer,
@@ -5188,6 +5237,10 @@ class WalkieTalkieEngine(
                 return@Runnable
             }
             if (monitorVideoRxCount <= 0) {
+                com.example.barky.net.LiveDebug.emit(
+                    "SEE_WATCHDOG",
+                    "TIMEOUT! SEE_ACK was received, but 0 video frames arrived from ${peer.host}:${peer.port} (video path failed)"
+                )
                 Log.w(TAG, "SEE watchdog: ACK but no video frames from ${peer.host}")
                 failSessionBothSides(
                     peer = peer,
@@ -5196,12 +5249,15 @@ class WalkieTalkieEngine(
                 )
                 stopSeeRemote()
             } else {
+                com.example.barky.net.LiveDebug.emit(
+                    "SEE_WATCHDOG",
+                    "SUCCESS: Received $monitorVideoRxCount video frames from ${peer.host}"
+                )
                 Log.i(TAG, "SEE watchdog OK frames=$monitorVideoRxCount")
             }
         }
         seeWatchdog = r
         // Cellular + hub relay needs headroom for REG/FWD/ACK round-trips
-        val timeoutMs = if (NetworkEndpoints.isWifi(appContext)) 7_000L else 14_000L
         mainHandler.postDelayed(r, timeoutMs)
     }
 
@@ -6188,6 +6244,10 @@ class WalkieTalkieEngine(
                         "lanQuality=$lanQuality tcp=$tcpOk hubTcp=$videoOutViaHub " +
                         "avc=$useAvc vport=${peer.videoPort}"
                 )
+                com.example.barky.net.LiveDebug.emit(
+                    "VIDEO_TX",
+                    "Camera stream active: codec=${if (useAvc) "H.264" else "MJPEG"} tcp=$tcpOk hubTcp=$videoOutViaHub to ${peer.host}:${peer.port}"
+                )
                 if (useAvc) {
                     videoDebug(
                         if (videoOutViaHub) "TX H.264/AVC 640x480 hub-TCP (cellular HD)"
@@ -6217,6 +6277,7 @@ class WalkieTalkieEngine(
                     },
                     onError = { msg ->
                         videoDebug("SEE cam: $msg")
+                        com.example.barky.net.LiveDebug.emit("VIDEO_ERR", "SEE camera error: $msg")
                         Log.w(TAG, "SEE cam error: $msg")
                     },
                     onAvcUnit = { au ->
@@ -6231,7 +6292,13 @@ class WalkieTalkieEngine(
                         val ok = viaTcp || sendMonitorVideoAvcUdp(au, dest)
                         if (ok) {
                             frames++
-                            if (frames == 1 || frames % 30 == 0) {
+                            if (frames == 1) {
+                                com.example.barky.net.LiveDebug.emit(
+                                    "VIDEO_TX",
+                                    "First H.264 video frame sent (${au.size} bytes) to ${dest.host} via ${if (viaTcp) "TCP" else "UDP"}"
+                                )
+                            }
+                            if (frames % 30 == 0) {
                                 Log.i(
                                     TAG,
                                     "SEE_TX_AVC n=$frames bytes=${au.size} tcp=$viaTcp " +
@@ -6254,7 +6321,13 @@ class WalkieTalkieEngine(
                         val ok = viaTcp || sendMonitorVideoUdp(jpeg, dest)
                         if (ok) {
                             frames++
-                            if (frames == 1 || frames % 30 == 0) {
+                            if (frames == 1) {
+                                com.example.barky.net.LiveDebug.emit(
+                                    "VIDEO_TX",
+                                    "First MJPEG video frame sent (${jpeg.size} bytes) to ${dest.host} via ${if (viaTcp) "TCP" else "UDP"}"
+                                )
+                            }
+                            if (frames % 30 == 0) {
                                 // LAN SeeLan ~50–70KB; cell SeeLive ~15–25KB
                                 Log.i(
                                     TAG,

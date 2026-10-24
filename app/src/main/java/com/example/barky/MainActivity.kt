@@ -504,6 +504,9 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Initialize on-demand live debug telemetry for remote live monitoring
+        com.example.barky.net.LiveDebug.init(this)
+        com.example.barky.net.LiveDebug.emit("APP", "MainActivity onCreate (version: ${appVersionSubtitle()})")
         setContentView(R.layout.activity_main)
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
@@ -745,9 +748,15 @@ class MainActivity : AppCompatActivity() {
 
         walkieSee.setOnClickListener {
             if (selectedPeer == null) {
+                com.example.barky.net.LiveDebug.emit("UI", "SEE clicked: NO PEER SELECTED (show toast)")
                 Toast.makeText(this, R.string.walkie_status_waiting, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
+            com.example.barky.net.LiveDebug.emit(
+                "UI",
+                "SEE clicked: isSeeing=$isSeeing peer=${selectedPeer?.displayName} " +
+                    "host=${selectedPeer?.host}:${selectedPeer?.port} vport=${selectedPeer?.videoPort}"
+            )
             if (isSeeing) walkieService?.stopSeeRemote()
             else walkieService?.startSeeRemote()
         }
@@ -1793,7 +1802,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             lp.leftMargin
         } else {
-            // Top-end default (12dp margin from right edge)
+            // Default: bottom-right corner (12dp margin from right edge)
             parentW - pipW - (12 * density).toInt()
         }
         var top = if (useSaved) {
@@ -1803,8 +1812,8 @@ class MainActivity : AppCompatActivity() {
         ) {
             lp.topMargin
         } else {
-            // Below top HUD (~96dp), never over footer
-            (96 * density).toInt()
+            // Default: bottom-right corner (24dp margin above screen bottom / nav bar)
+            parentH - pipH - (24 * density).toInt()
         }
         left = left.coerceIn(0, (parentW - pipW).coerceAtLeast(0))
         top = top.coerceIn(0, (parentH - pipH).coerceAtLeast(0))
@@ -1912,6 +1921,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
                         // Click on self camera: flip camera immediately while staying strictly in one spot
+                        com.example.barky.net.LiveDebug.emit("UI", "Self camera clicked -> switchCamera() (stays docked at bottom-right)")
                         if (isSeeing) {
                             walkieService?.switchCamera()
                             Toast.makeText(
