@@ -21,8 +21,8 @@ android {
         // Release 111 (5.71-auto-scrn-sticky-mic-cell-smoke): zero-prompt SCRN screen mirroring
         // via AccessibilityService, sticky Left (Private) / Right (Speaker) mic position, louder
         // speaker playback, and mandatory Wi-Fi + cellular relay path testing.
-        versionCode 119
-        versionName "5.79-oracle-always-free-10tb-relay"
+        versionCode 120
+        versionName "5.80-video-quality-modes-hd-std-low"
     }
 
     compileOptions {

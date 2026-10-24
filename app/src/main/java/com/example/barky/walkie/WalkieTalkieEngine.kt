@@ -5722,18 +5722,19 @@ class WalkieTalkieEngine(
                         else "SCREEN TCP not ready — UDP monitor until retry"
                     )
                 }
-                // Smooth/fast: 720p @ ~24–30fps free H.264; slightly lower BR on public/cellular
-                val w = 720
-                val h = 1280
+                // Retrieve active VideoQualityMode (HD No Compression / Standard / Low)
+                val qualityMode = BarkyPrefs.getVideoQualityMode(appContext)
+                val w = qualityMode.screenWidth
+                val h = qualityMode.screenHeight
                 val density = appContext.resources.displayMetrics.densityDpi.coerceIn(160, 480)
                 val useAvc = peerWantsAvc(peer.host)
                 if (useAvc) {
                     val br = if (publicPeer) {
-                        (com.example.barky.walkie.codec.AvcVideoEncoder.SCREEN_BITRATE * 3) / 4
+                        (qualityMode.screenAvcBitRate * 3) / 4
                     } else {
-                        com.example.barky.walkie.codec.AvcVideoEncoder.SCREEN_BITRATE
+                        qualityMode.screenAvcBitRate
                     }
-                    val fps = if (publicPeer) 24 else com.example.barky.walkie.codec.AvcVideoEncoder.SCREEN_FRAME_RATE
+                    val fps = if (qualityMode == VideoQualityMode.LOW) 15 else 30
                     avcEnc = com.example.barky.walkie.codec.AvcVideoEncoder(
                         width = w,
                         height = h,
@@ -5746,7 +5747,7 @@ class WalkieTalkieEngine(
                         avcEnc.release()
                         avcEnc = null
                     } else {
-                        Log.i(TAG, "SCREEN using H.264/AVC ${w}x$h @${fps}fps br=$br public=$publicPeer")
+                        Log.i(TAG, "SCREEN using H.264/AVC ${w}x$h @${fps}fps br=$br mode=${qualityMode.displayLabel} public=$publicPeer")
                     }
                 }
                 val reader = android.media.ImageReader.newInstance(
@@ -5827,7 +5828,8 @@ class WalkieTalkieEngine(
                             }
                         }
                         if (!sent) {
-                            val q = if (publicPeer) 65 else 72
+                            // Apply JPEG compression quality from selected VideoQualityMode
+                            val q = qualityMode.screenJpegQuality
                             val jpeg = rgbaImageToJpeg(image, w, h, quality = q) ?: continue
                             val viaTcp = tcpOk && sendVideoFrameTcp(jpeg)
                             if (!viaTcp) tcpOk = false
@@ -5920,14 +5922,16 @@ class WalkieTalkieEngine(
                 val publicPeer = !PeerEndpoint.isPrivateIp(peer.host)
                 var tcpOk = openVideoOut(peer)
                 var lastTcpRetry = 0L
-                val w = 720
-                val h = 1280
-                val quality = if (publicPeer) 65 else 72
+                // Retrieve active VideoQualityMode (HD No Compression / Standard / Low)
+                val qualityMode = BarkyPrefs.getVideoQualityMode(appContext)
+                val w = qualityMode.screenWidth
+                val h = qualityMode.screenHeight
+                val quality = qualityMode.screenJpegQuality
                 var lastJpeg: ByteArray? = null
                 var lastCaptureMs = 0L
                 var captureInFlight = false
-                // Android 14+ allows faster takeScreenshot (~220ms); Android 11-13 enforces ~380ms.
-                var captureIntervalMs = if (Build.VERSION.SDK_INT >= 34) 220L else 380L
+                // Apply capture interval pacing from selected VideoQualityMode (No Compression: 150ms; Standard: 240ms; Low: 400ms)
+                var captureIntervalMs = qualityMode.screenIntervalMs
 
                 while (servingScreen.get() && running.get()) {
                     val now = System.currentTimeMillis()

@@ -142,15 +142,16 @@ class SeeCameraSession(
         }
         frameCount.set(0)
         val preferFront = BarkyPrefs.isCameraFront(context)
+        // Retrieve active VideoQualityMode (HD No Compression / Standard / Low)
+        val qualityMode = BarkyPrefs.getVideoQualityMode(context)
         var enc: AvcVideoEncoder? = null
         if (useAvc) {
-            // Free platform H.264 — portrait 480×640 matches upright NV21 after camera rotation
-            // (was 640×480 landscape → remote SEE looked tilted 90° on phones held upright).
+            // Apply resolution and bitrate from selected VideoQualityMode (HD: 5Mbps, Standard: 1.8Mbps, Low: 500kbps)
             enc = AvcVideoEncoder(
-                width = 480,
-                height = 640,
-                bitRate = 1_800_000,
-                frameRate = 24,
+                width = qualityMode.seeAvcWidth,
+                height = qualityMode.seeAvcHeight,
+                bitRate = qualityMode.seeAvcBitRate,
+                frameRate = qualityMode.seeAvcFrameRate,
                 iFrameIntervalSec = 1
             ).also { it.start() }
             if (enc.isReady() != true) {
@@ -158,26 +159,27 @@ class SeeCameraSession(
                 enc = null
                 Log.w(TAG, "AVC encoder not ready — falling back to MJPEG")
             } else {
-                Log.i(TAG, "SEE camera codec=H.264/AVC 480x640@24 1.8Mbps upright file=${See.FILE_NAME}")
+                Log.i(
+                    TAG,
+                    "SEE camera codec=H.264/AVC ${qualityMode.seeAvcWidth}x${qualityMode.seeAvcHeight}@${qualityMode.seeAvcFrameRate} " +
+                        "${qualityMode.seeAvcBitRate / 1000}kbps mode=${qualityMode.displayLabel} file=${See.FILE_NAME}"
+                )
             }
         } else {
-            Log.i(TAG, "SEE camera codec=MJPEG file=${See.FILE_NAME}")
+            Log.i(TAG, "SEE camera codec=MJPEG mode=${qualityMode.displayLabel} file=${See.FILE_NAME}")
         }
         encoder = enc
 
-        // AVC uses full Live capture; JPEG: LAN sharp (SeeLan), hub/cellular compact (SeeLive)
+        // Configure frame capture dimensions and JPEG quality based on VideoQualityMode
         val captureConfig = if (enc != null && enc.isReady()) {
-            CaptureConfig.Live
-        } else if (lanQuality) {
-            CaptureConfig.SeeLan
+            CaptureConfig.Live.copy(minIntervalMs = qualityMode.seeIntervalMs)
         } else {
-            CaptureConfig.SeeLive
+            qualityMode.toCaptureConfig()
         }
-        // Proof line for logcat: LAN → maxEdge=720 q=80; hub/cell → 480 q=62
+        // Proof line for logcat: shows active mode, maxEdge, and JPEG compression quality
         Log.i(
             TAG,
-            "SEE capture ${if (lanQuality) "LAN 720@q80" else "hub/cell 480@q62"} " +
-                "lanQuality=$lanQuality maxEdge=${captureConfig.maxEdge} " +
+            "SEE capture mode=${qualityMode.displayLabel} maxEdge=${captureConfig.maxEdge} " +
                 "q=${captureConfig.jpegQuality} maxBytes=${captureConfig.maxBytesTcp} avc=${enc != null}"
         )
         val cam = if (enc != null && enc.isReady()) {

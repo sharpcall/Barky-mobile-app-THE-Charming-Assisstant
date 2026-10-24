@@ -57,6 +57,25 @@ object BarkyPrefs {
         prefs(context).edit().putBoolean(KEY_BEST_QUALITY, enabled).commit()
     }
 
+    /** Key for video and screen-mirroring quality mode (NO_COMPRESSION, STANDARD, LOW). */
+    const val KEY_VIDEO_QUALITY_MODE = "video_quality_mode"
+
+    /**
+     * Returns the active VideoQualityMode (defaults to STANDARD).
+     * Controls SEE camera resolution/bitrate and SCRN screen mirroring compression.
+     */
+    fun getVideoQualityMode(context: Context): com.example.barky.walkie.VideoQualityMode {
+        val raw = prefs(context).getString(KEY_VIDEO_QUALITY_MODE, null)
+        return com.example.barky.walkie.VideoQualityMode.fromKey(raw)
+    }
+
+    /**
+     * Persists the selected VideoQualityMode immediately so in-flight and next streaming sessions apply it.
+     */
+    fun setVideoQualityMode(context: Context, mode: com.example.barky.walkie.VideoQualityMode) {
+        prefs(context).edit().putString(KEY_VIDEO_QUALITY_MODE, mode.key).commit()
+    }
+
     /** Default false so cellular/internet peers work without a settings visit. */
     fun isWifiOnly(context: Context): Boolean =
         prefs(context).getBoolean(KEY_WIFI_ONLY, false)

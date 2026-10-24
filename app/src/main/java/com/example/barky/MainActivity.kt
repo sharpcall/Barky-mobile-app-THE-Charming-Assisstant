@@ -51,6 +51,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var walkieStatus: TextView
     private lateinit var walkiePeers: TextView
     private lateinit var walkieBestQuality: MaterialCheckBox
+    /** Beta Video & Screen Mirror Quality Switcher (HD No Compression / Standard / Low). */
+    private lateinit var btnVideoQuality: MaterialButton
     private lateinit var walkieScrn: MaterialButton
     /** Sole GPS map toggle button in Row 2 (duplicate GPS checkbox removed). */
     private lateinit var walkieGpsBtn: MaterialButton
@@ -526,6 +528,8 @@ class MainActivity : AppCompatActivity() {
         walkieStatus = findViewById(R.id.walkie_status)
         walkiePeers = findViewById(R.id.walkie_peers)
         walkieBestQuality = findViewById(R.id.walkie_best_quality)
+        // Bind the 3-mode Quality switcher button (HD No Compression / Standard / Low)
+        btnVideoQuality = findViewById(R.id.btn_video_quality)
         walkieScrn = findViewById(R.id.walkie_scrn)
         // Bind the single GPS button in Row 2 (duplicate GPS checkbox removed).
         walkieGpsBtn = findViewById(R.id.walkie_gps_btn)
@@ -642,6 +646,20 @@ class MainActivity : AppCompatActivity() {
             updatePttLabels()
         }
         BarkyPrefs.setBestQualityVideo(this, walkieBestQuality.isChecked)
+
+        // Setup 3-mode Quality switcher: HD (No Compression) -> Standard -> Low (Data Saver)
+        updateVideoQualityButtonUi(BarkyPrefs.getVideoQualityMode(this))
+        btnVideoQuality.setOnClickListener {
+            val currentMode = BarkyPrefs.getVideoQualityMode(this)
+            val nextMode = currentMode.next()
+            BarkyPrefs.setVideoQualityMode(this, nextMode)
+            updateVideoQualityButtonUi(nextMode)
+            Toast.makeText(
+                this,
+                "${nextMode.displayLabel}\nBandwidth: ${nextMode.estimatedBandwidthDesc}",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
 
         // Initialize GPS enabled state from preferences for the Row 2 GPS button.
         gpsEnabled = BarkyPrefs.isGpsEnabled(this)
@@ -2096,6 +2114,34 @@ class MainActivity : AppCompatActivity() {
         updateListenSeeButtons()
         updateScrnButton()
         updateGpsButtonChrome()
+    }
+
+    /**
+     * Updates the 3-mode Quality button text and accent badge colors.
+     * High Definition (HD): Cyan accent badge
+     * Standard: Clean surface on dark
+     * Low: Magenta/secondary data-saver badge
+     */
+    private fun updateVideoQualityButtonUi(mode: com.example.barky.walkie.VideoQualityMode) {
+        if (!::btnVideoQuality.isInitialized) return
+        btnVideoQuality.text = mode.buttonText
+        when (mode) {
+            com.example.barky.walkie.VideoQualityMode.NO_COMPRESSION -> {
+                btnVideoQuality.setTextColor(ContextCompat.getColor(this, R.color.barky_accent))
+                btnVideoQuality.strokeColor =
+                    android.content.res.ColorStateList.valueOf(ContextCompat.getColor(this, R.color.barky_accent))
+            }
+            com.example.barky.walkie.VideoQualityMode.STANDARD -> {
+                btnVideoQuality.setTextColor(ContextCompat.getColor(this, R.color.barky_on_surface))
+                btnVideoQuality.strokeColor =
+                    android.content.res.ColorStateList.valueOf(ContextCompat.getColor(this, R.color.barky_card_stroke))
+            }
+            com.example.barky.walkie.VideoQualityMode.LOW -> {
+                btnVideoQuality.setTextColor(ContextCompat.getColor(this, R.color.barky_secondary))
+                btnVideoQuality.strokeColor =
+                    android.content.res.ColorStateList.valueOf(ContextCompat.getColor(this, R.color.barky_secondary))
+            }
+        }
     }
 
     private fun updatePttLabels() {
