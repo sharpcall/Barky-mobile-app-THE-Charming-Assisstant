@@ -133,8 +133,7 @@ class MainActivity : AppCompatActivity() {
     private var previewBufW = 0
     private var previewBufH = 0
     private var previewDisplayOrient = 90
-    /** SEE PiP: enlarged when user double-taps the floating self-view. */
-    private var pipEnlarged = false
+    /** SEE PiP: Drag-bound state flag. */
     private var pipDragBound = false
     /** True while user is dragging PiP — blocks geometry relayout. */
     private var pipDragging = false
@@ -438,10 +437,7 @@ class MainActivity : AppCompatActivity() {
                 previewBufW = previewW
                 previewBufH = previewH
                 previewDisplayOrient = displayOrientation
-                // Geometry for aspect only — do not fight an in-progress drag
-                if (isSeeing && !isRequestingScreen && pipLayoutActive && !pipDragging) {
-                    layoutFloatingPip(preservePosition = true)
-                }
+                // PiP size and position remain firmly fixed in one spot; natural transform handles center-crop
                 if (!pipDragging) applyNaturalPreviewTransform()
             }
         }
@@ -1726,7 +1722,6 @@ class MainActivity : AppCompatActivity() {
                 applyNaturalPreviewTransform()
             }
         } else {
-            pipEnlarged = false
             pipLayoutActive = false
             pipLastLeft = -1
             pipLastTop = -1
@@ -1742,55 +1737,31 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Self PiP: clear normal vs enlarged sizes (dp).
-     * Normal ~140dp wide; double-tap enlarge ~240dp. Height from camera aspect.
-     * (Bug: enlarged used ≥50% of parent which layout treated as full-bleed → stuck big, no drag.)
+     * Self PiP size: fixed standard compact ~140dp wide x 186dp high (aspect ~4:3).
+     * The dimensions are constant so clicking the self camera or switching lenses
+     * never alters window size or shifts the box left.
+     * TextureView natural transform handles center-cropping camera frames to fill this window.
      */
     private fun pipSizePx(): Pair<Int, Int> {
         val density = resources.displayMetrics.density
-        val baseW = ((if (pipEnlarged) 240f else 140f) * density).toInt()
-        val uprightAspectHOverW = if (previewBufW > 0 && previewBufH > 0) {
-            val orient = previewDisplayOrient
-            val uprightW: Float
-            val uprightH: Float
-            if (orient % 180 == 0) {
-                uprightW = previewBufW.toFloat()
-                uprightH = previewBufH.toFloat()
-            } else {
-                uprightW = previewBufH.toFloat()
-                uprightH = previewBufW.toFloat()
-            }
-            (uprightH / uprightW).coerceIn(1.2f, 1.9f)
-        } else {
-            4f / 3f
-        }
-        var pipW = baseW
-        var pipH = (baseW * uprightAspectHOverW).toInt()
+        val baseW = (140f * density).toInt()
+        val baseH = (186f * density).toInt()
         val parent = walkiePipBox.parent as? android.view.ViewGroup
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
-        // Hard caps well under half-screen so we never look “full stage”
-        val maxW = minOf(
-            (parentW * (if (pipEnlarged) 0.48f else 0.36f)).toInt(),
-            ((if (pipEnlarged) 280f else 160f) * density).toInt()
-        ).coerceAtLeast((96 * density).toInt())
-        val maxH = minOf(
-            (parentH * (if (pipEnlarged) 0.50f else 0.38f)).toInt(),
-            ((if (pipEnlarged) 380f else 220f) * density).toInt()
-        ).coerceAtLeast((120 * density).toInt())
-        if (pipW > maxW) {
-            val s = maxW.toFloat() / pipW
-            pipW = maxW
-            pipH = (pipH * s).toInt()
-        }
-        if (pipH > maxH) {
-            val s = maxH.toFloat() / pipH
-            pipH = maxH
-            pipW = (pipW * s).toInt()
-        }
-        return pipW.coerceAtLeast(1) to pipH.coerceAtLeast(1)
+        // Hard caps well under 40% screen so self camera never looks full stage on small screens
+        val maxW = (parentW * 0.38f).toInt().coerceAtLeast((96 * density).toInt())
+        val maxH = (parentH * 0.38f).toInt().coerceAtLeast((120 * density).toInt())
+        val pipW = minOf(baseW, maxW).coerceAtLeast(1)
+        val pipH = minOf(baseH, maxH).coerceAtLeast(1)
+        return pipW to pipH
     }
 
+    /**
+     * Layout the floating self-camera PiP window.
+     * When [preservePosition] is true and a valid position was previously set, keeps the PiP
+     * locked in that exact spot without drifting left or jumping when clicked or flipped.
+     */
     private fun layoutFloatingPip(preservePosition: Boolean) {
         if (!::walkiePipBox.isInitialized) return
         val density = resources.displayMetrics.density
@@ -1800,7 +1771,7 @@ class MainActivity : AppCompatActivity() {
         val parentW = if ((parent?.width ?: 0) > 0) parent!!.width else resources.displayMetrics.widthPixels
         val parentH = if ((parent?.height ?: 0) > 0) parent!!.height else resources.displayMetrics.heightPixels
         val existing = walkiePipBox.layoutParams as? android.widget.FrameLayout.LayoutParams
-        // Only true full-stage leftovers (MATCH_PARENT or ≥80%) — NOT enlarged PiP (~half)
+        // Only true full-stage leftovers (MATCH_PARENT or ≥80%)
         val wasFullBleed = existing == null ||
             existing.width == android.view.ViewGroup.LayoutParams.MATCH_PARENT ||
             existing.height == android.view.ViewGroup.LayoutParams.MATCH_PARENT ||
@@ -1810,7 +1781,7 @@ class MainActivity : AppCompatActivity() {
         val lp = existing ?: android.widget.FrameLayout.LayoutParams(pipW, pipH)
         val oldW = lp.width
         val oldH = lp.height
-        // Accept normal + enlarged sizes for sticky drag position
+        // Accept normal compact sizes for sticky position
         val sizeOk = !wasFullBleed &&
             lp.width in 1..(parentW * 0.55f).toInt() &&
             lp.height in 1..(parentH * 0.60f).toInt()
@@ -1822,7 +1793,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             lp.leftMargin
         } else {
-            // Top-end default — bottom sits under footer and cannot receive touches
+            // Top-end default (12dp margin from right edge)
             parentW - pipW - (12 * density).toInt()
         }
         var top = if (useSaved) {
@@ -1846,7 +1817,7 @@ class MainActivity : AppCompatActivity() {
         walkiePipBox.layoutParams = lp
         walkiePipBox.clipChildren = true
         walkiePipBox.clipToPadding = true
-        walkiePipBox.elevation = 24f
+        walkiePipBox.elevation = 40f
         walkiePreview.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -1862,25 +1833,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * PiP is on root above footer. Drag moves it; single tap flips; double tap resizes.
+     * Touch handling on self-camera PiP:
+     * - Dragging moves the window smoothly across the screen and preserves the dropped spot.
+     * - Clicking / tapping flips front/back camera while staying firmly anchored in place (no drifting left).
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun bindFloatingPip() {
         if (pipDragBound || !::walkiePipBox.isInitialized || !::walkiePreview.isInitialized) return
         pipDragBound = true
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
-        val doubleTapMs = 280L
         var downX = 0f
         var downY = 0f
         var startLeft = 0
         var startTop = 0
         var moved = false
-        var lastTapUpMs = 0L
-        var pendingFlipToken = 0L
         walkiePipBox.isClickable = true
         walkiePipBox.isFocusable = true
-        // Use translation for drag — does not fight layoutParams from size changes
-        val listener = View.OnTouchListener { v, event ->
+        val listener = View.OnTouchListener { _, event ->
             if (!isSeeing) return@OnTouchListener false
             val box = walkiePipBox
             val parent = box.parent as? android.view.ViewGroup ?: return@OnTouchListener false
@@ -1898,13 +1867,16 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - downX
                     val dy = event.rawY - downY
-                    if (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop) moved = true
+                    // Touch slop threshold so clicks/taps never accidentally trigger drag drift
+                    val dragSlop = slop * 1.5f
+                    if (kotlin.math.abs(dx) > dragSlop || kotlin.math.abs(dy) > dragSlop) {
+                        moved = true
+                    }
                     if (moved) {
                         val w = box.width.coerceAtLeast(1)
                         val h = box.height.coerceAtLeast(1)
                         val maxL = (parent.width - w).coerceAtLeast(0).toFloat()
                         val maxT = (parent.height - h).coerceAtLeast(0).toFloat()
-                        // Position via translation relative to laid-out left/top
                         val baseL = box.left.toFloat()
                         val baseT = box.top.toFloat()
                         val wantL = (startLeft + dx).coerceIn(0f, maxL)
@@ -1919,8 +1891,8 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     parent.requestDisallowInterceptTouchEvent(false)
                     pipDragging = false
-                    // Commit translation into margins so next layout keeps place
                     if (moved) {
+                        // Drag completed: commit translation into FrameLayout margins and reset translation
                         val lp = (box.layoutParams as? android.widget.FrameLayout.LayoutParams)
                             ?: android.widget.FrameLayout.LayoutParams(box.width, box.height)
                         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
@@ -1933,33 +1905,20 @@ class MainActivity : AppCompatActivity() {
                         box.translationX = 0f
                         box.translationY = 0f
                         box.layoutParams = lp
+                    } else {
+                        // Click / tap without drag: ensure zero translation so view stays strictly in place
+                        box.translationX = 0f
+                        box.translationY = 0f
                     }
                     if (!moved && event.actionMasked == MotionEvent.ACTION_UP) {
-                        val now = android.os.SystemClock.uptimeMillis()
-                        if (now - lastTapUpMs <= doubleTapMs) {
-                            pendingFlipToken = 0L
-                            lastTapUpMs = 0L
-                            pipEnlarged = !pipEnlarged
-                            layoutFloatingPip(preservePosition = true)
+                        // Click on self camera: flip camera immediately while staying strictly in one spot
+                        if (isSeeing) {
+                            walkieService?.switchCamera()
                             Toast.makeText(
                                 this,
-                                if (pipEnlarged) R.string.pip_enlarged else R.string.pip_normal,
+                                R.string.walkie_flip_self_toast,
                                 Toast.LENGTH_SHORT
                             ).show()
-                        } else {
-                            lastTapUpMs = now
-                            val token = now
-                            pendingFlipToken = token
-                            v.postDelayed({
-                                if (pendingFlipToken == token && isSeeing) {
-                                    walkieService?.switchCamera()
-                                    Toast.makeText(
-                                        this,
-                                        R.string.walkie_flip_self_toast,
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }, doubleTapMs)
                         }
                     }
                     true
